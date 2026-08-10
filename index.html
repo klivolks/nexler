@@ -34,9 +34,17 @@
 
 <header class="hero" id="top">
   <div class="wrap">
-    <span class="eyebrow"><span class="dot"></span> Self-contained · scaffolds with zero network access</span>
-    <h1>Scaffold a Go app,<br><em>in under a minute.</em></h1>
-    <p>Nexler is a scaffolding CLI for the Nexler Go web framework — like <code>django-admin startproject</code> or <code>rails new</code>. It generates the handlers/services/store/models layout your app follows, wires new routes into it, and vendors front-end assets from npm.</p>
+    <div class="hero-top">
+      <div class="hero-text">
+        <span class="eyebrow"><span class="dot"></span> Self-contained · scaffolds with zero network access</span>
+        <h1>Scaffold a Go app,<br><em>in under a minute.</em></h1>
+        <p>Nexler is a scaffolding CLI for the Nexler Go web framework — like <code>django-admin startproject</code> or <code>rails new</code>. It generates the handlers/services/store/models layout your app follows, wires new routes into it, and vendors front-end assets from npm.</p>
+      </div>
+
+      <div class="hero-visual">
+        <img src="img/nexler-hero.png" data-parallax alt="Terminal running nexler create app and nexler create /about, scaffolding a Go app in seconds" width="1439" height="771" loading="eager">
+      </div>
+    </div>
 
     <div class="installer" id="install">
       <div class="tabs" role="tablist">
@@ -200,6 +208,43 @@ go install github.com/klivolks/nexler/cmd/nexler@latest</pre>
       });
     });
   });
+
+  // Hero image parallax: scroll drift + subtle pointer tilt.
+  const heroImg = document.querySelector('.hero-visual [data-parallax]');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (heroImg && !reduceMotion) {
+    const heroEl = document.querySelector('.hero');
+    let scrollY = 0, tiltX = 0, tiltY = 0, ticking = false;
+
+    const render = () => {
+      heroImg.style.transform =
+        `translateY(${scrollY}px) rotateX(${tiltY}deg) rotateY(${tiltX}deg)`;
+      ticking = false;
+    };
+    const schedule = () => {
+      if (!ticking) { requestAnimationFrame(render); ticking = true; }
+    };
+
+    window.addEventListener('scroll', () => {
+      const rect = heroEl.getBoundingClientRect();
+      const past = Math.min(Math.max(-rect.top, 0), rect.height);
+      scrollY = past * 0.22;
+      schedule();
+    }, { passive: true });
+
+    heroEl.addEventListener('mousemove', (e) => {
+      const rect = heroEl.getBoundingClientRect();
+      const px = (e.clientX - rect.left) / rect.width - 0.5;
+      const py = (e.clientY - rect.top) / rect.height - 0.5;
+      tiltX = px * 8;
+      tiltY = py * -8;
+      schedule();
+    });
+    heroEl.addEventListener('mouseleave', () => {
+      tiltX = 0; tiltY = 0;
+      schedule();
+    });
+  }
 </script>
 
 </body>

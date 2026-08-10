@@ -74,6 +74,29 @@ a{ color:inherit; }
 }
 .hero p code{ background:rgba(255,255,255,.08); padding:2px 6px; border-radius:5px; font-size:14px; color:#C9D3EA; }
 
+/* ---------- hero layout: heading/copy + visual, tabs stay full width below ---------- */
+.hero-top{ display:flex; align-items:flex-start; gap:44px; margin-bottom:40px; }
+.hero-text{ flex:1 1 auto; min-width:0; }
+.hero-text p{ margin-bottom:0; }
+.hero-visual{
+  flex:0 0 auto; width:360px; max-width:40%;
+  margin-top:6px;
+  perspective:1200px;
+}
+.hero-visual img{
+  display:block; width:100%; height:auto;
+  border-radius:14px; border:1px solid rgba(255,255,255,.14);
+  box-shadow:var(--shadow-soft);
+  will-change:transform;
+}
+@media (max-width:900px){
+  .hero-top{ flex-direction:column; align-items:stretch; gap:28px; }
+  .hero-visual{ order:2; width:100%; max-width:420px; margin:0 auto; }
+}
+@media (prefers-reduced-motion: reduce){
+  .hero-visual img{ transform:none !important; }
+}
+
 /* ---------- platform picker + terminal (signature element) ---------- */
 .installer{
   background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.1);
