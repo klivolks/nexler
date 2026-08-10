@@ -6,6 +6,7 @@
 		OperationID: "{{ .OperationID }}",
 		Summary:     "{{ .Verb }} {{ $.Route }}",
 		Protected:   {{ $.Protected }},
+		Tags:        []string{"{{ $.Module }}"},
 		ReqType:     {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Request{},
 {{- if .ReqContentType }}
 		ReqContentType: "{{ .ReqContentType }}",
@@ -13,6 +14,9 @@
 		RespType: {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response{},
 {{- if $.HTMLResponse }}
 		RespContentType: "text/html",
+{{- end }}
+{{- if $.RawResponse }}
+		RespUnwrapped: true,
 {{- end }}
 	})
 {{- end }}

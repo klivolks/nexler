@@ -19,6 +19,8 @@ func Handle{{ $.Name }}{{ .VerbTitle }}(w http.ResponseWriter, r *http.Request) 
 
 {{- if $.HTMLResponse }}
 	response.HTML(w, r, "{{ $.RelDirSlash }}", "{{ .HTMLContentName }}", "{{ $.Name }}", resp)
+{{- else if $.RawResponse }}
+	response.JSONRaw(w, http.StatusOK, resp)
 {{- else }}
 	response.JSON(w, http.StatusOK, resp)
 {{- end }}

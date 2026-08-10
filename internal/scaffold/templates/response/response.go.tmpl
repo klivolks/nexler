@@ -40,6 +40,17 @@ func JSON(w http.ResponseWriter, status int, v any) {
 	write(w, status, Envelope{Data: v})
 }
 
+// JSONRaw writes v directly (no {"data": ...} envelope) with the given
+// status code — for routes with a response contract that predates the
+// envelope convention (e.g. an existing non-Go client), where JSON's
+// wrapping isn't an option. Prefer JSON for anything without that
+// constraint, so the envelope stays the norm.
+func JSONRaw(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
 // Error writes message wrapped as {"error": message} with the given
 // status code.
 {{- if .HasDB }}
@@ -159,3 +170,6 @@ func HTML(w http.ResponseWriter, r *http.Request, module, name, title string, da
 	w.WriteHeader(http.StatusOK)
 	w.Write(out.Bytes())
 }
+
+// nexler:response (do not remove this marker) — nexler anchors future
+// additions to this package here.

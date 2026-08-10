@@ -45,3 +45,18 @@ const kpassTmpl = "kpass_templates/kpass.go.tmpl"
 var kgateTemplateFS embed.FS
 
 const kgateTmpl = "kgate_templates/kgate.go.tmpl"
+
+// ciTemplateFS embeds the release-workflow templates used by `nexler init
+// ci`, same dependency-free principle as templateFS. Both are fully
+// static (no {{ }} placeholders) — GitHub Actions' own contexts
+// (github.repository_owner, github.event.repository.name, secrets.*)
+// resolve at workflow-run time, not scaffold time, so the same file works
+// unmodified for every app.
+//
+//go:embed ci_templates
+var ciTemplateFS embed.FS
+
+const (
+	ciTmplGHCR      = "ci_templates/release-ghcr.yml"
+	ciTmplDockerHub = "ci_templates/release-dockerhub.yml"
+)

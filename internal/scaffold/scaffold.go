@@ -59,6 +59,13 @@ type NewAppConfig struct {
 	// bool parameter to auth.StartSession that swaps the session/cookie
 	// lifetime from a short default to a long one. Ignored otherwise.
 	RememberMe bool
+	// JWTSecret, if non-empty, is used verbatim as the app's JWT signing
+	// secret instead of generating a fresh random one — set this when
+	// multiple apps in the same ecosystem need to validate each other's
+	// bearer tokens, so they all sign/verify with the same secret. Empty
+	// (default) preserves today's behavior: generateJWTSecret produces a
+	// fresh, unique-per-app secret. Ignored when AuthKind doesn't need JWT.
+	JWTSecret string
 	// DBTypes selects which database driver(s) to generate db/ support
 	// for — any subset of "mongo", "mysql", "postgres", "mssql". Empty
 	// (default) generates no db/ package at all. This only decides which
@@ -149,10 +156,14 @@ func NewApp(cfg NewAppConfig) error {
 
 	jwtSecret := ""
 	if needsJWT {
-		var err error
-		jwtSecret, err = generateJWTSecret()
-		if err != nil {
-			return fmt.Errorf("generating JWT secret: %w", err)
+		if cfg.JWTSecret != "" {
+			jwtSecret = cfg.JWTSecret
+		} else {
+			var err error
+			jwtSecret, err = generateJWTSecret()
+			if err != nil {
+				return fmt.Errorf("generating JWT secret: %w", err)
+			}
 		}
 	}
 

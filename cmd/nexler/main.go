@@ -48,6 +48,8 @@ func main() {
 		runAdd(os.Args[2:])
 	case "db":
 		runDb(os.Args[2:])
+	case "update":
+		runUpdate(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("nexler CLI v%s\n", cliVersion)
 	case "help", "-h", "--help":
@@ -95,6 +97,7 @@ func runCreateApp(args []string) {
 	ui := fs.Bool("ui", false, "serve the homepage from editable templates/html/home/{home,layout}.html on disk (via response.HTML), instead of the built-in embedded homepage")
 	auth := fs.String("auth", "none", "auth method middleware.RequireAuth enforces: none (default, unverified stub), jwt (bearer token), session (cookie), or both")
 	rememberMe := fs.Bool("remember-me", false, "when -auth includes session, add a rememberMe option to auth.StartSession for a longer-lived login")
+	jwtSecret := fs.String("jwt-secret", "", "existing JWT signing secret to reuse instead of generating a new one — set this when multiple apps in the same ecosystem need to validate each other's tokens; blank (default) generates a fresh, unique secret")
 	db := fs.String("db", "", "comma-separated database drivers to generate db/ support for: mongo, mysql, postgres, mssql (any subset; blank means none)")
 	core := fs.String("core", "", "which -db type is this app's conventional default (\"core\") connection; required only when -db selects more than one type")
 	dbHost := fs.String("db-host", "", "core database host; blank (default) leaves .env's DSN blank for you to fill in by hand")
@@ -140,6 +143,11 @@ func runCreateApp(args []string) {
 	rememberMeVal := *rememberMe
 	if !set["remember-me"] && (authVal == "session" || authVal == "both") {
 		rememberMeVal = promptBool(`Support "remember me" (longer-lived login)`, rememberMeVal)
+	}
+
+	jwtSecretVal := *jwtSecret
+	if !set["jwt-secret"] && (authVal == "jwt" || authVal == "both") {
+		jwtSecretVal = prompt("Existing JWT secret to reuse (blank = generate a new one; typed in PLAIN TEXT, not masked)", jwtSecretVal)
 	}
 
 	dbVal := *db
@@ -198,6 +206,7 @@ func runCreateApp(args []string) {
 		UI:             uiVal,
 		AuthKind:       authVal,
 		RememberMe:     rememberMeVal,
+		JWTSecret:      jwtSecretVal,
 		DBTypes:        dbTypes,
 		CoreDB:         coreVal,
 		CoreDBHost:     dbHostVal,
@@ -216,13 +225,17 @@ func runCreateApp(args []string) {
 	if uiVal {
 		fmt.Println("Custom UI homepage: edit templates/html/home/home.html and templates/html/shared/layout.html")
 	}
+	jwtSecretNote := "secret pre-filled in .env"
+	if jwtSecretVal != "" {
+		jwtSecretNote = "using the secret you provided (shared across apps)"
+	}
 	switch authVal {
 	case "jwt":
-		fmt.Println("Auth: JWT bearer tokens — see auth/jwt.go (IssueJWT/VerifyJWT); secret pre-filled in .env.")
+		fmt.Printf("Auth: JWT bearer tokens — see auth/jwt.go (IssueJWT/VerifyJWT); %s.\n", jwtSecretNote)
 	case "session":
 		fmt.Println("Auth: sessions — see auth/session.go (StartSession/SessionFromRequest/EndSession); in-memory only.")
 	case "both":
-		fmt.Println("Auth: JWT bearer tokens + sessions — see auth/jwt.go and auth/session.go; secret pre-filled in .env.")
+		fmt.Printf("Auth: JWT bearer tokens + sessions — see auth/jwt.go and auth/session.go; %s.\n", jwtSecretNote)
 	}
 	if len(dbTypes) > 0 {
 		displayTypes := make([]string, len(dbTypes))
@@ -251,11 +264,14 @@ func runCreateRoute(route string, args []string) {
 	fs := flag.NewFlagSet("create route", flag.ExitOnError)
 	module := fs.String("module", "", "module (top-level group) this route belongs to, e.g. purchase")
 	submodule := fs.String("submodule", "", "submodule (nested group) this route belongs to, e.g. verify")
+	file := fs.String("file", "", "base file name for the generated handler/service/store/model files, e.g. verify; defaults to the route's package name (last of -module/-submodule)")
+	service := fs.String("service", "", "reuse an existing service package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify")
+	store := fs.String("store", "", "reuse an existing store package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify")
 	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
 	protected := fs.Bool("protected", false, "require auth for this route (registers in routes/protected instead of routes/public)")
 	methods := fs.String("methods", "GET", "comma-separated HTTP methods to generate: GET, POST, PUT, PATCH, DELETE (OPTIONS is automatic and always 200 OK)")
 	body := fs.String("body", "json", "request body shape for non-GET methods: json, form, or multipart")
-	response := fs.String("response", "json", "response kind for every method: json (response.JSON, default) or html (response.HTML)")
+	response := fs.String("response", "json", "response kind for every method: json (response.JSON, default), html (response.HTML), or raw (response.JSONRaw, no {\"data\": ...} envelope)")
 	layout := fs.String("layout", "shared", "HTML layout for -response html: shared (default; reuses templates/html/shared/layout.html) or module (this route gets its own templates/html/<module>/layout.html copy)")
 	fs.Parse(reorderFlagsFirst(fs, args))
 
@@ -270,6 +286,21 @@ func runCreateRoute(route string, args []string) {
 	submoduleVal := *submodule
 	if !set["submodule"] {
 		submoduleVal = prompt("Submodule (optional)", "")
+	}
+
+	fileVal := *file
+	if !set["file"] {
+		fileVal = prompt("File name (optional, default: package name)", "")
+	}
+
+	serviceVal := *service
+	if !set["service"] {
+		serviceVal = prompt("Reuse existing service (optional, e.g. purchase/verify)", "")
+	}
+
+	storeVal := *store
+	if !set["store"] {
+		storeVal = prompt("Reuse existing store (optional, e.g. purchase/verify)", "")
 	}
 
 	protectedVal := *protected
@@ -289,11 +320,7 @@ func runCreateRoute(route string, args []string) {
 
 	responseVal := *response
 	if !set["response"] {
-		if promptUIOrAPI("Response type", responseVal == "html") {
-			responseVal = "html"
-		} else {
-			responseVal = "json"
-		}
+		responseVal = promptChoice("Response type", []string{"json", "html", "raw"}, responseVal)
 	}
 
 	layoutVal := *layout
@@ -310,6 +337,9 @@ func runCreateRoute(route string, args []string) {
 		Route:        route,
 		Module:       moduleVal,
 		Submodule:    submoduleVal,
+		FileName:     fileVal,
+		ServiceRef:   serviceVal,
+		StoreRef:     storeVal,
 		AppDir:       dirVal,
 		Protected:    protectedVal,
 		Methods:      splitCSV(methodsVal),
@@ -335,7 +365,22 @@ func runCreateRoute(route string, args []string) {
 
 	if result.Created {
 		fmt.Printf("Added %s route %s [%s] (%s)\n", kind, route, strings.Join(result.Added, ","), group)
-		fmt.Println("Generated handler, service, store, and model files, and wired the route into routes/" + kind + "/" + kind + ".go.")
+		layers := []string{"handler"}
+		if serviceVal == "" {
+			layers = append(layers, "service")
+		}
+		if storeVal == "" {
+			layers = append(layers, "store")
+		}
+		layers = append(layers, "model")
+		fmt.Printf("Generated %s files", strings.Join(layers, ", "))
+		if serviceVal != "" {
+			fmt.Printf(", reusing service %s", serviceVal)
+		}
+		if storeVal != "" {
+			fmt.Printf(", reusing store %s", storeVal)
+		}
+		fmt.Println(", and wired the route into routes/" + kind + "/" + kind + ".go.")
 	} else {
 		fmt.Printf("Route %s (%s) already existed — added method(s): %s\n", route, group, strings.Join(result.Added, ", "))
 		if len(result.Skipped) > 0 {
@@ -638,6 +683,39 @@ Usage:
 
       Example: nexler init kgate -dir ./myapp
 
+  nexler init docker [-dir <app-dir>]
+      Adds a multi-stage Dockerfile (build + serve) and a docker-compose.yml
+      to an existing generated app. The Dockerfile's golang:<version>-alpine
+      build stage always matches the app's actual go.mod "go X.Y" directive
+      (read fresh each time, not nexler's own current default), and EXPOSE/
+      the compose ports mapping match the app's real {PREFIX}_PORT from
+      .env (defaulting to 8080). .env itself is never baked into the image
+      — the compose file passes it through via env_file: at container
+      runtime instead, so no secret ends up inside an image layer.
+      docker-compose.yml is added to .gitignore (created if the app doesn't
+      have one yet); Dockerfile is deliberately not gitignored, since "nexler
+      init ci" builds from it. Refuses if either file already exists.
+
+      Example: nexler init docker -dir ./myapp
+
+  nexler init ci [-dir <app-dir>] [-registry dockerhub|github]
+      Adds .github/workflows/release.yml: builds and pushes a Docker image
+      whenever a GitHub Release is published. -registry picks where images
+      go — "github" (GitHub Container Registry, ghcr.io, authenticated via
+      the automatic GITHUB_TOKEN, no repo secrets needed) or "dockerhub"
+      (authenticated via DOCKERHUB_USERNAME/DOCKERHUB_TOKEN secrets you add
+      under repo Settings > Secrets and variables > Actions) — prompted
+      interactively if not passed. Both generated workflows are fully
+      static (no per-app values baked in — GitHub's own
+      github.repository_owner/github.event.repository.name/secrets.*
+      contexts resolve at workflow-run time), so the file is identical
+      across every nexler app regardless of registry choice. Doesn't
+      require a Dockerfile to already exist (prints a reminder if one's
+      missing rather than refusing) since you may add one by hand or run
+      "nexler init docker" afterward. Refuses if release.yml already exists.
+
+      Example: nexler init ci -dir ./myapp -registry github
+
   nexler add <package>[@version] [-dir <app-dir>] [-as <name>]
       Vendors a static asset package from npm into an existing app, without ever giving the
       app itself a package.json or node_modules: nexler shells out to "npm install <package>
@@ -658,6 +736,22 @@ Usage:
       Example: nexler add bootstrap
       Example: nexler add bootstrap@5.3.3 -as bootstrap
       Example: nexler add @popperjs/core
+
+  nexler update [-dir <app-dir>]
+      Brings an existing generated app's nexler-owned files — ones you generally don't
+      hand-edit — up to date with whatever the current nexler binary knows how to generate,
+      without needing to coincidentally trigger it via "nexler create <route>" (which already
+      runs these same checks, but only as a side effect, and only the ones relevant to the
+      route being created). Today this covers openapi/openapi.go (regenerated in full whenever
+      it predates an Operation field nexler now sets, e.g. Tags/RespUnwrapped/ClientIdAuth —
+      safe, since that file has no per-app content at all) and response/response.go (JSONRaw
+      inserted if missing, append-only, never a full rewrite, since that file is realistically
+      hand-extended). Extended over time as nexler adds more such checks. Never touches
+      handlers/services/store/models, main.go, .env, or templates/html/* — anything you're
+      expected to hand-edit is out of scope by design. Prints "updated" or "already up to
+      date" per file checked.
+
+      Example: nexler update -dir ./myapp
 
   nexler version
       Print the CLI version.

@@ -60,6 +60,23 @@ type RouteConfig struct {
 	Module string
 	// Submodule is an optional nested grouping, e.g. "verify".
 	Submodule string
+	// FileName optionally overrides the generated files' base name
+	// (handlers/services/store/models), e.g. "verify" writes
+	// handlers/<relDir>/verify.go instead of handlers/<relDir>/<pkgName>.go.
+	// Sanitized the same way as Module/Submodule. Only affects the file
+	// name on disk — the Go package name, exported handler functions, the
+	// models import alias, and the OpenAPI operationId all keep deriving
+	// from Module/Submodule as before. Defaults to the route's own package
+	// name (the last of Module/Submodule) when empty.
+	FileName string
+	// ServiceRef, when non-empty, points this route at an already-scaffolded
+	// service package instead of generating a new one — a "module[/submodule]"
+	// reference addressed the same way Module/Submodule are, e.g. "purchase"
+	// or "purchase/verify". The referenced package must already exist.
+	// Empty (default) generates a fresh service for this route, as before.
+	ServiceRef string
+	// StoreRef is the same as ServiceRef, for the store layer.
+	StoreRef string
 	// AppDir is the path to the generated app's root (the directory
 	// containing its go.mod). Defaults to "." by the caller if unset.
 	AppDir string
@@ -104,22 +121,30 @@ type routeMethod struct {
 
 // routeData is what's available to route_templates/*.tmpl placeholders.
 type routeData struct {
-	PkgName        string // e.g. "verify"
-	Name           string // e.g. "Verify" — used in identifiers like HandleVerify
-	Route          string // e.g. "/asd"
-	ModulePath     string // the app's own module path, from its go.mod
-	RelDirSlash    string // e.g. "purchase/verify", forward-slashed for import paths
-	Protected      bool   // whether handlers wrap themselves with middleware.RequireAuth
-	Alias          string // e.g. "purchaseverify" — used as the models package import alias
-	HTMLResponse   bool   // whether every method responds via response.HTML instead of response.JSON
-	HasCoreDB      bool   // whether the app has a "core" database connection (see readCoreDBType)
-	CoreDBAccessor string // "SQL" or "Mongo" — which db.<Accessor>("core") the store TODO comment points at
-	CoreDBType     string // "mongo", "mysql", "postgres", or "mssql" — which package (matching name) the store TODO comment points at
-	PathParams     []string // e.g. ["id"] — names of every "{name}" wildcard segment in Route, in order
-	HasPathParams  bool     // len(PathParams) > 0
-	PathParamArgs  string   // e.g. `"id", "code"` — Go source for request.DecodePath's variadic names argument
-	PathParamsCSV  string   // e.g. "id, code" — for doc comments
-	Methods        []routeMethod
+	PkgName           string // e.g. "verify"
+	Name              string // e.g. "Verify" — used in identifiers like HandleVerify
+	Route             string // e.g. "/asd"
+	ModulePath        string // the app's own module path, from its go.mod
+	RelDirSlash       string // e.g. "purchase/verify", forward-slashed for import paths
+	Protected         bool   // whether handlers wrap themselves with middleware.RequireAuth
+	Alias             string // e.g. "purchaseverify" — used as the models package import alias
+	Module            string // e.g. "purchase" — the top-level module, always set regardless of Submodule; used as the OpenAPI operation tag
+	HasServiceRef     bool   // true when this route reuses an existing service package instead of generating its own
+	ServiceImportPath string // e.g. "example.com/app/services/purchase/verify" — the reused service's import path
+	ServicePkgName    string // e.g. "verify" — the reused service's package name
+	HasStoreRef       bool   // true when this route reuses an existing store package instead of generating its own
+	StoreImportPath   string // e.g. "example.com/app/store/purchase/verify" — the reused store's import path
+	StorePkgName      string // e.g. "verify" — the reused store's package name
+	HTMLResponse      bool   // whether every method responds via response.HTML instead of response.JSON
+	RawResponse       bool   // whether every method responds via response.JSONRaw (no {"data": ...} envelope) instead of response.JSON
+	HasCoreDB         bool   // whether the app has a "core" database connection (see readCoreDBType)
+	CoreDBAccessor    string // "SQL" or "Mongo" — which db.<Accessor>("core") the store TODO comment points at
+	CoreDBType        string // "mongo", "mysql", "postgres", or "mssql" — which package (matching name) the store TODO comment points at
+	PathParams        []string // e.g. ["id"] — names of every "{name}" wildcard segment in Route, in order
+	HasPathParams     bool     // len(PathParams) > 0
+	PathParamArgs     string   // e.g. `"id", "code"` — Go source for request.DecodePath's variadic names argument
+	PathParamsCSV     string   // e.g. "id, code" — for doc comments
+	Methods           []routeMethod
 }
 
 // NewRoute scaffolds handlers/services/store/models files for cfg.Route
@@ -160,6 +185,24 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 	pkgName := pkgParts[len(pkgParts)-1]
 	name := exportedName(pkgName)
 	alias := strings.Join(pkgParts, "")
+	module := pkgParts[0]
+
+	fileName := pkgName
+	if cfg.FileName != "" {
+		fileName = sanitizeIdent(cfg.FileName)
+		if fileName == "" {
+			return RouteResult{}, fmt.Errorf("-file must contain at least one letter or digit")
+		}
+	}
+
+	serviceImportPath, servicePkgName, hasServiceRef, err := resolveLayerRef(appDir, modulePath, "service", "services", cfg.ServiceRef)
+	if err != nil {
+		return RouteResult{}, err
+	}
+	storeImportPath, storePkgName, hasStoreRef, err := resolveLayerRef(appDir, modulePath, "store", "store", cfg.StoreRef)
+	if err != nil {
+		return RouteResult{}, err
+	}
 
 	pathParams, err := parsePathParams(cfg.Route)
 	if err != nil {
@@ -189,6 +232,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		return RouteResult{}, err
 	}
 	htmlResponse := responseKind == "html"
+	rawResponse := responseKind == "raw"
 
 	layoutKind := cfg.LayoutKind
 	if layoutKind == "" {
@@ -235,47 +279,68 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 	}
 
 	data := routeData{
-		PkgName:        pkgName,
-		Name:           name,
-		Route:          cfg.Route,
-		ModulePath:     modulePath,
-		RelDirSlash:    relDirSlash,
-		Protected:      cfg.Protected,
-		Alias:          alias,
-		HTMLResponse:   htmlResponse,
-		HasCoreDB:      hasCoreDB,
-		CoreDBAccessor: coreDBAccessor,
-		CoreDBType:     coreDBType,
-		PathParams:     pathParams,
-		HasPathParams:  len(pathParams) > 0,
-		PathParamArgs:  strings.Join(pathParamArgs, ", "),
-		PathParamsCSV:  strings.Join(pathParams, ", "),
-		Methods:        methods,
+		PkgName:           pkgName,
+		Name:              name,
+		Route:             cfg.Route,
+		ModulePath:        modulePath,
+		RelDirSlash:       relDirSlash,
+		Protected:         cfg.Protected,
+		Alias:             alias,
+		Module:            module,
+		HasServiceRef:     hasServiceRef,
+		ServiceImportPath: serviceImportPath,
+		ServicePkgName:    servicePkgName,
+		HasStoreRef:       hasStoreRef,
+		StoreImportPath:   storeImportPath,
+		StorePkgName:      storePkgName,
+		HTMLResponse:      htmlResponse,
+		RawResponse:       rawResponse,
+		HasCoreDB:         hasCoreDB,
+		CoreDBAccessor:    coreDBAccessor,
+		CoreDBType:        coreDBType,
+		PathParams:        pathParams,
+		HasPathParams:     len(pathParams) > 0,
+		PathParamArgs:     strings.Join(pathParamArgs, ", "),
+		PathParamsCSV:     strings.Join(pathParams, ", "),
+		Methods:           methods,
 	}
 
-	handlerDestFile := filepath.Join(appDir, "handlers", relDir, pkgName+".go")
-	if _, err := os.Stat(handlerDestFile); err == nil {
+	if _, err := ensureOpenAPIUpToDate(appDir); err != nil {
+		return RouteResult{}, fmt.Errorf("upgrading openapi/openapi.go: %w", err)
+	}
+	if rawResponse {
+		if _, err := ensureResponseJSONRaw(appDir); err != nil {
+			return RouteResult{}, fmt.Errorf("upgrading response/response.go for JSONRaw support: %w", err)
+		}
+	}
+
+	if _, found, err := findMarkedFile(filepath.Join(appDir, "handlers", relDir), handlerMarker); err != nil {
+		return RouteResult{}, err
+	} else if found {
 		return addMethodsToExistingRoute(appDir, modulePath, data, cfg)
 	}
 
-	files := []struct {
+	type routeFile struct {
 		layer    string // "handlers", "services", "store", "models"
 		tmplPath string
 		fs       embed.FS
-	}{
-		{"handlers", routeHandlerTmpl, routeTemplateFS},
-		{"services", routeServiceTmpl, routeTemplateFS},
-		{"store", routeStoreTmpl, routeTemplateFS},
-		{"models", routeModelTmpl, routeTemplateFS},
 	}
+	files := []routeFile{{"handlers", routeHandlerTmpl, routeTemplateFS}}
+	if !hasServiceRef {
+		files = append(files, routeFile{"services", routeServiceTmpl, routeTemplateFS})
+	}
+	if !hasStoreRef {
+		files = append(files, routeFile{"store", routeStoreTmpl, routeTemplateFS})
+	}
+	files = append(files, routeFile{"models", routeModelTmpl, routeTemplateFS})
 
 	var written []string
 	for _, f := range files {
 		destDir := filepath.Join(appDir, f.layer, relDir)
-		destFile := filepath.Join(destDir, pkgName+".go")
+		destFile := filepath.Join(destDir, fileName+".go")
 
 		if _, err := os.Stat(destFile); err == nil {
-			return RouteResult{}, fmt.Errorf("%s already exists — pick a different -module/-submodule, or edit it directly", destFile)
+			return RouteResult{}, fmt.Errorf("%s already exists — pick a different -file name (or -module/-submodule), or edit it directly", destFile)
 		}
 
 		raw, err := f.fs.ReadFile(f.tmplPath)
@@ -420,8 +485,20 @@ func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg Ro
 		return RouteResult{}, fmt.Errorf("this route was originally created as %s — mixing protected and public within one route package isn't supported", want)
 	}
 
-	handlerPath := filepath.Join(appDir, "handlers", filepath.FromSlash(data.RelDirSlash), data.PkgName+".go")
-	modelPath := filepath.Join(appDir, "models", filepath.FromSlash(data.RelDirSlash), data.PkgName+".go")
+	handlerPath, found, err := findMarkedFile(filepath.Join(appDir, "handlers", filepath.FromSlash(data.RelDirSlash)), handlerMarker)
+	if err != nil {
+		return RouteResult{}, err
+	}
+	if !found {
+		return RouteResult{}, fmt.Errorf("no existing handler file found containing the %q marker under handlers/%s — it may predate this feature; add the marker manually or edit the route directly", handlerMarker, data.RelDirSlash)
+	}
+	modelPath, found, err := findMarkedFile(filepath.Join(appDir, "models", filepath.FromSlash(data.RelDirSlash)), modelMarker)
+	if err != nil {
+		return RouteResult{}, err
+	}
+	if !found {
+		return RouteResult{}, fmt.Errorf("no existing model file found containing the %q marker under models/%s — it may predate this feature; add the marker manually or edit the route directly", modelMarker, data.RelDirSlash)
+	}
 
 	handlerRaw, err := os.ReadFile(handlerPath)
 	if err != nil {
@@ -458,7 +535,7 @@ func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg Ro
 	}
 
 	handlerContent, err = insertFragment(handlerContent, routeHandlerMethodsFragment, data,
-		"// nexler:handlers (do not remove this marker)",
+		handlerMarker,
 		fmt.Sprintf("could not find the handler-insertion marker in %s — it may predate this feature. Add a line `// nexler:handlers (do not remove this marker)` right before the `// Register wires...` comment, or add the new method's handler manually.", handlerPath))
 	if err != nil {
 		return RouteResult{}, err
@@ -479,7 +556,7 @@ func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg Ro
 	}
 	modelContent := strings.ReplaceAll(string(modelRaw), "\r\n", "\n")
 	modelContent, err = insertFragment(modelContent, routeModelMethodsFragment, data,
-		"// nexler:models (do not remove this marker)",
+		modelMarker,
 		fmt.Sprintf("could not find the model-insertion marker in %s — it may predate this feature. Add a line `// nexler:models (do not remove this marker)` at the end of the file, or add the new structs manually.", modelPath))
 	if err != nil {
 		return RouteResult{}, err
@@ -493,6 +570,92 @@ func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg Ro
 		added = append(added, m.Verb)
 	}
 	return RouteResult{Created: false, Added: added, Skipped: skipped}, nil
+}
+
+// handlerMarker and modelMarker are the stable marker comments left in
+// generated handler/model files — insertFragment anchors new method/model
+// insertions on them, and findMarkedFile (below) reuses the same text to
+// recognize an already-scaffolded route file regardless of its base name
+// (the default pkgName-derived name, a -file override, or a hand-renamed
+// file), instead of assuming a fixed file name.
+const (
+	handlerMarker = "// nexler:handlers (do not remove this marker)"
+	modelMarker   = "// nexler:models (do not remove this marker)"
+)
+
+// findMarkedFile scans dir's top-level *.go files for one whose content
+// contains marker, returning its path. found is false if dir doesn't
+// exist or no file contains marker — not an error, since that just means
+// no nexler-managed route file exists there yet (a brand-new route) or
+// the directory holds only hand-written files (e.g. helper files added
+// alongside a route's own handler.go, which won't contain the marker).
+func findMarkedFile(dir, marker string) (path string, found bool, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(raw), marker) {
+			return p, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// dirHasGoFile reports whether dir contains at least one top-level *.go
+// file — used by resolveLayerRef to confirm a -service/-store reference
+// actually points at an already-scaffolded package before wiring a route's
+// comments to it. A non-existent dir simply reports false, not an error.
+func dirHasGoFile(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveLayerRef parses a "module[/submodule]" reference passed to
+// -service/-store, addressed the exact same way -module/-submodule
+// themselves are (sanitizeIdent per segment, joined into a directory under
+// layer — "services" or "store"). has is false when ref is empty, meaning
+// "generate a fresh file for this route" (today's default behavior) rather
+// than reusing one. A non-empty ref that doesn't point at an
+// already-scaffolded package is a clear error, not a silent no-op — a typo
+// here would otherwise leave a route's TODO comment pointing at nothing.
+func resolveLayerRef(appDir, modulePath, flagName, layer, ref string) (importPath, pkgName string, has bool, err error) {
+	if ref == "" {
+		return "", "", false, nil
+	}
+	var refParts []string
+	for _, p := range strings.SplitN(ref, "/", 2) {
+		sp := sanitizeIdent(p)
+		if sp == "" {
+			return "", "", false, fmt.Errorf("-%s %q is invalid — module/submodule must contain at least one letter or digit", flagName, ref)
+		}
+		refParts = append(refParts, sp)
+	}
+	refRelDir := filepath.Join(refParts...)
+	dir := filepath.Join(appDir, layer, refRelDir)
+	if !dirHasGoFile(dir) {
+		return "", "", false, fmt.Errorf("-%s %q points at %s, but no package exists there yet — scaffold it first, or omit -%s to generate a new one here", flagName, ref, filepath.Join(layer, refRelDir), flagName)
+	}
+	return modulePath + "/" + layer + "/" + filepath.ToSlash(refRelDir), refParts[len(refParts)-1], true, nil
 }
 
 // insertFragment renders the embedded fragment template at fragmentPath
@@ -533,6 +696,119 @@ func detectExistingProtection(appDir, modulePath, relDirSlash string) (protected
 		}
 	}
 	return false, false, nil
+}
+
+// openAPIUpToDateMarkers lists every Operation field openapi.go.tmpl has
+// gained since its original version — ensureOpenAPIUpToDate regenerates
+// the file unless ALL of them are present, not just the newest one: an app
+// can pick up these fields independently of each other depending on
+// exactly when it was last regenerated (e.g. a hand-maintained app that
+// added its own RespUnwrapped before Tags existed, or vice versa) — a
+// single-marker check would wrongly consider such a file current. Add the
+// new field's name here whenever openapi.go.tmpl gains another one.
+var openAPIUpToDateMarkers = []string{"Tags", "RespUnwrapped", "ClientIdAuth"}
+
+// ensureOpenAPIUpToDate rewrites appDir/openapi/openapi.go from the current
+// embedded template if it predates any Operation field nexler now expects
+// to set (see openAPIUpToDateMarkers), so a route created with this nexler
+// version doesn't emit a struct literal referencing a field that doesn't
+// exist yet in an app scaffolded (or last regenerated) by an older nexler.
+// Safe to fully regenerate (not marker-patch): openapi.go.tmpl has no
+// per-app templating at all — its rendered output is byte-identical across
+// every app at a given nexler version — so there's nothing app-specific
+// that a full rewrite could clobber.
+func ensureOpenAPIUpToDate(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "openapi", "openapi.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No openapi package in this app — nothing to upgrade.
+			return false, nil
+		}
+		return false, err
+	}
+	upToDate := true
+	for _, marker := range openAPIUpToDateMarkers {
+		if !strings.Contains(string(raw), marker) {
+			upToDate = false
+			break
+		}
+	}
+	if upToDate {
+		return false, nil
+	}
+	tmplPath := templatesRoot + "/openapi/openapi.go.tmpl"
+	content, err := templateFS.ReadFile(tmplPath)
+	if err != nil {
+		return false, fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
+	}
+	rendered, err := render(tmplPath, content, nil)
+	if err != nil {
+		return false, fmt.Errorf("rendering %s: %w", tmplPath, err)
+	}
+	if err := os.WriteFile(path, rendered, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// responseMarker is the stable anchor ensureResponseJSONRaw inserts
+// JSONRaw before, in apps scaffolded with this feature. responseErrorAnchor
+// is the fallback anchor for apps scaffolded before the marker existed —
+// still self-healing without a re-scaffold, since func Error's signature
+// has been stable since response.go.tmpl's very first version.
+const (
+	responseMarker      = "// nexler:response (do not remove this marker)"
+	responseErrorAnchor = "func Error(w http.ResponseWriter"
+	jsonRawFunc         = `
+// JSONRaw writes v directly (no {"data": ...} envelope) with the given
+// status code — for routes with a response contract that predates the
+// envelope convention (e.g. an existing non-Go client), where JSON's
+// wrapping isn't an option. Prefer JSON for anything without that
+// constraint, so the envelope stays the norm.
+func JSONRaw(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+`
+)
+
+// ensureResponseJSONRaw inserts JSONRaw into appDir/response/response.go if
+// it's missing — needed for a route created with -response raw against an
+// app scaffolded before this feature (or before JSONRaw was unconditional).
+// Deliberately append-only, never a full-file regeneration like
+// ensureOpenAPIUpToDate uses for openapi.go: unlike openapi.go ("no file on
+// disk to keep in sync," pure generated infra), response.go is realistically
+// hand-extended — ctrl-svc's own JSONRaw was itself a hand-addition before
+// this feature existed — so a blind overwrite could silently delete an
+// unrelated hand-written helper living in the same file.
+func ensureResponseJSONRaw(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "response", "response.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, fmt.Errorf("%s does not exist — is %s a nexler app directory?", path, appDir)
+		}
+		return false, err
+	}
+	content := string(raw)
+	if strings.Contains(content, "JSONRaw") {
+		return false, nil
+	}
+
+	anchor := responseMarker
+	if !strings.Contains(content, anchor) {
+		anchor = responseErrorAnchor
+		if !strings.Contains(content, anchor) {
+			return false, fmt.Errorf("could not find an insertion point for JSONRaw in %s (has it been hand-rewritten?) — add the following manually:\n%s", path, jsonRawFunc)
+		}
+	}
+	content = strings.Replace(content, anchor, jsonRawFunc+"\n"+anchor, 1)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // wireAggregator inserts an import for importPath (aliased as alias) and a
@@ -787,10 +1063,10 @@ func validateBodyKind(kind string) error {
 // shapes.
 func validateResponseKind(kind string) error {
 	switch kind {
-	case "json", "html":
+	case "json", "html", "raw":
 		return nil
 	default:
-		return fmt.Errorf("unsupported -response %q (supported: json, html)", kind)
+		return fmt.Errorf("unsupported -response %q (supported: json, html, raw)", kind)
 	}
 }
 

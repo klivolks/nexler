@@ -1,8 +1,13 @@
 package {{ .PkgName }}
 
 // Do{{ .Name }} contains the business logic for {{ .Route }}.
+{{- if .HasStoreRef }}
+// TODO: implement, calling into store as needed. The store lives at
+// {{ .StoreImportPath }}.
+{{- else }}
 // TODO: implement, calling into store as needed. The store lives at
 // {{ .ModulePath }}/store/{{ .RelDirSlash }}.
+{{- end }}
 func Do{{ .Name }}() error {
 	return nil
 }
