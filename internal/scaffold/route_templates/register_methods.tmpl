@@ -5,7 +5,7 @@
 		Path:        "{{ $.Route }}",
 		OperationID: "{{ .OperationID }}",
 		Summary:     "{{ .Verb }} {{ $.Route }}",
-		Protected:   {{ $.Protected }},
+		Protected:   {{ .Protected }},
 		Tags:        []string{"{{ $.Module }}"},
 		ReqType:     {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Request{},
 {{- if .ReqContentType }}

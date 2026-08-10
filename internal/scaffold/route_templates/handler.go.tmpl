@@ -55,9 +55,13 @@ func Handle{{ $.Name }}{{ .VerbTitle }}(w http.ResponseWriter, r *http.Request) 
 // ("METHOD /path", Go 1.22+) — hitting the path with an unregistered
 // method gets an automatic 405 from net/http. Called once
 {{- if .Protected }}
-// from routes/protected/protected.go.
+// from routes/protected/protected.go. Individual methods below wrap
+// themselves in middleware.RequireAuth independently — a later
+// `nexler create` on this route can add public methods alongside these.
 {{- else }}
-// from routes/public/public.go.
+// from routes/public/public.go. Individual methods below wrap
+// themselves in middleware.RequireAuth independently — a later
+// `nexler create` on this route can add protected methods alongside these.
 {{- end }}
 func Register(mux *http.ServeMux) {
 	mux.HandleFunc("OPTIONS {{ .Route }}", middleware.HandleOptions)
@@ -68,7 +72,7 @@ func Register(mux *http.ServeMux) {
 		Path:        "{{ $.Route }}",
 		OperationID: "{{ .OperationID }}",
 		Summary:     "{{ .Verb }} {{ $.Route }}",
-		Protected:   {{ $.Protected }},
+		Protected:   {{ .Protected }},
 		Tags:        []string{"{{ $.Module }}"},
 		ReqType:     {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Request{},
 {{- if .ReqContentType }}

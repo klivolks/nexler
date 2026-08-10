@@ -912,9 +912,16 @@ If a route's handler package already exists, `NewRoute` dispatches to
 `addMethodsToExistingRoute` instead of erroring: it adds only the newly-requested HTTP methods
 (skipping any already registered, detected by an exact `"<VERB> <route>"` string marker inside the
 handler file) and leaves `services/`/`store/` untouched, since those are generic per-route, not
-per-method. Mixing `-protected` with an existing route created the other way is rejected
-(`detectExistingProtection`) — a handler package can only be registered in one of
-`routes/public`/`routes/protected`.
+per-method. Which aggregator file a package's `Register(mux)` call lives in
+(`routes/public/public.go` vs `routes/protected/protected.go`) is decided once, at the package's
+first creation, and never changes afterward — `addMethodsToExistingRoute` skips aggregator wiring
+entirely, since the package is already imported and registered there. `-protected` on a later
+`nexler create` for an already-existing route only governs the newly-added method(s): each one
+independently wraps itself in `middleware.RequireAuth` (or not) via its own `RegisterExpr`,
+regardless of what the rest of the package's methods already do — so one package can end up with
+a mix of protected and public methods. `detectExistingProtection` no longer rejects this; it only
+powers an informational `RouteResult.Note` (printed by the CLI, not an error) when this
+invocation's `-protected` differs from the package's original aggregator classification.
 
 If any marker is missing (e.g. a route scaffolded before this feature existed, or a hand-edited
 file), the corresponding insert fails with an error naming the exact marker text to add back by
@@ -926,7 +933,12 @@ hand — it does not silently fall back to guessing a location.
 `HandleVerifyPost`, `RegisterExpr` — either bare or wrapped in
 `middleware.RequireAuth(...)` when `-protected` — `OperationID`, content types, doc-comment
 phrasing) so the `.tmpl` files themselves stay mostly free of conditional logic; they just range
-over `.Methods`. GET always gets a query-parameter-only request struct regardless of `-body`;
+over `.Methods`. `routeMethod.Protected` (feeding both `RegisterExpr` and `openapi.Register`'s
+`Protected` field) is tracked per method, not just once for the whole route — a single `nexler
+create` invocation still applies one `-protected` value to every method it creates/adds in that
+call, but this is what lets a later invocation add differently-protected methods to an
+already-existing package (see above). GET always gets a query-parameter-only request struct
+regardless of `-body`;
 other methods follow `-body json|form|multipart`. `-response json|html` (route-level, like
 `-protected`, not per-method) picks `routeData.HTMLResponse`, the one conditional the handler
 templates do branch on — see "HTML responses" above. OPTIONS is wired automatically for every

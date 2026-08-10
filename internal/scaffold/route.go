@@ -50,6 +50,11 @@ type RouteResult struct {
 	// Skipped lists requested methods that were already registered for
 	// this route and were left untouched (only set when Created is false).
 	Skipped []string
+	// Note is an optional informational message about something worth
+	// telling the caller that isn't an error — e.g. that the newly-added
+	// method(s) have a different auth requirement than the rest of an
+	// already-existing route package (only set when Created is false).
+	Note string
 }
 
 // RouteConfig holds the parameters for scaffolding one route.
@@ -80,10 +85,15 @@ type RouteConfig struct {
 	// AppDir is the path to the generated app's root (the directory
 	// containing its go.mod). Defaults to "." by the caller if unset.
 	AppDir string
-	// Protected marks the route as requiring auth. It's registered in
-	// routes/protected/protected.go and its handler wraps itself with
-	// middleware.RequireAuth. False (the default) registers it in
-	// routes/public/public.go instead.
+	// Protected marks the newly-created-or-added method(s) as requiring
+	// auth: each one's handler wraps itself with middleware.RequireAuth.
+	// For a brand-new route package, it also decides which aggregator file
+	// the package is registered in (routes/protected/protected.go if true,
+	// routes/public/public.go if false — the default). For a route package
+	// that already exists, it only affects the method(s) this invocation
+	// adds — independently of whatever protection the package's existing
+	// methods already have, and without moving the package to a different
+	// aggregator file. See routeMethod.Protected.
 	Protected bool
 	// Methods is the set of HTTP methods to generate handlers for, e.g.
 	// ["GET", "POST"]. Defaults to ["GET"] if empty. OPTIONS is handled
@@ -112,6 +122,7 @@ type routeMethod struct {
 	Verb            string // "GET", "POST", ...
 	VerbTitle       string // "Get", "Post", ... — used in identifiers
 	RegisterExpr    string // e.g. "HandleXGet" or "middleware.RequireAuth(HandleXGet)"
+	Protected       bool   // whether this specific method wraps itself with middleware.RequireAuth — same value RegisterExpr was built from
 	BodyDescription string // human-readable, used in model doc comments
 	OperationID     string // e.g. "getPing" — used in the openapi.Register call
 	ReqContentType  string // e.g. "application/json"; empty for GET (no body)
@@ -252,6 +263,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		if cfg.Protected {
 			registerExpr = fmt.Sprintf("middleware.RequireAuth(%s)", handlerName)
 		}
+		protected := cfg.Protected
 		reqContentType := ""
 		if v != "GET" {
 			reqContentType = openAPIContentType(bodyKind)
@@ -264,6 +276,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 			Verb:            v,
 			VerbTitle:       vt,
 			RegisterExpr:    registerExpr,
+			Protected:       protected,
 			BodyDescription: bodyDescription(v, bodyKind),
 			OperationID:     strings.ToLower(v) + name,
 			ReqContentType:  reqContentType,
@@ -470,19 +483,21 @@ func writeIfMissing(path, content string) error {
 // aren't already registered for this route, to the already-existing
 // handler and model files — leaving services/store untouched (they're
 // generic, not per-method) and skipping aggregator wiring entirely
-// (the route package is already imported and registered there).
+// (the route package is already imported and registered there, and which
+// aggregator file that is never changes after a route's first creation).
 //
-// It refuses to mix -protected with an existing route that was created
-// the other way, since a single handler package can only be registered
-// in one of routes/public or routes/protected.
+// Each newly-added method wraps itself with middleware.RequireAuth (or
+// not) according to this invocation's own cfg.Protected, independently of
+// whichever methods already exist in the package — so a package can end
+// up with a mix of protected and public methods (see routeMethod.Protected,
+// consumed per-method by handler.go.tmpl/register_methods.tmpl). Mixing is
+// not an error: detectExistingProtection is used only to build an
+// informational RouteResult.Note when this invocation's cfg.Protected
+// differs from the package's original aggregator classification.
 func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg RouteConfig) (RouteResult, error) {
-	existingProtected, found, err := detectExistingProtection(appDir, modulePath, data.RelDirSlash)
-	if err == nil && found && existingProtected != cfg.Protected {
-		want := "public (omit -protected)"
-		if existingProtected {
-			want = "protected (pass -protected)"
-		}
-		return RouteResult{}, fmt.Errorf("this route was originally created as %s — mixing protected and public within one route package isn't supported", want)
+	existingProtected, existingProtectionFound, err := detectExistingProtection(appDir, modulePath, data.RelDirSlash)
+	if err != nil {
+		existingProtectionFound = false
 	}
 
 	handlerPath, found, err := findMarkedFile(filepath.Join(appDir, "handlers", filepath.FromSlash(data.RelDirSlash)), handlerMarker)
@@ -569,7 +584,17 @@ func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg Ro
 	for _, m := range newMethods {
 		added = append(added, m.Verb)
 	}
-	return RouteResult{Created: false, Added: added, Skipped: skipped}, nil
+
+	var note string
+	if existingProtectionFound && existingProtected != cfg.Protected {
+		existingLabel, addedLabel := "public", "protected"
+		if existingProtected {
+			existingLabel, addedLabel = "protected", "public"
+		}
+		note = fmt.Sprintf("note: this route package was already registered as %s; the newly added method(s) (%s) are %s instead — only those handlers wrap themselves with middleware.RequireAuth, the rest of the package is untouched", existingLabel, strings.Join(added, ", "), addedLabel)
+	}
+
+	return RouteResult{Created: false, Added: added, Skipped: skipped, Note: note}, nil
 }
 
 // handlerMarker and modelMarker are the stable marker comments left in
@@ -679,9 +704,10 @@ func insertFragment(content, fragmentPath string, data routeData, marker, missin
 
 // detectExistingProtection checks whether a route's handler package is
 // currently imported by routes/public/public.go or
-// routes/protected/protected.go, so addMethodsToExistingRoute can refuse
-// a mismatched -protected flag instead of producing an inconsistent
-// registration.
+// routes/protected/protected.go, so addMethodsToExistingRoute can note
+// when this invocation's -protected setting differs from the package's
+// original aggregator classification. Informational only — mixed
+// protection within one package is supported (see routeMethod.Protected).
 func detectExistingProtection(appDir, modulePath, relDirSlash string) (protected bool, found bool, err error) {
 	importPath := fmt.Sprintf("%q", modulePath+"/handlers/"+relDirSlash)
 
