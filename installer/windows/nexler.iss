@@ -34,6 +34,10 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible or arm64
 ArchitecturesInstallIn64BitMode=x64compatible or arm64
 SetupIconFile=nexler.ico
+; Shown for the Control Panel / Settings "Apps" list entry — same reason
+; the shortcuts below need it too: a plain `go build` binary has no
+; embedded icon resource of its own for Windows to fall back to.
+UninstallDisplayIcon={app}\nexler.ico
 ; MIT — permissive enough that just showing it (not requiring a click to
 ; accept beyond the wizard's own standard Next button) is appropriate;
 ; Inno still always displays it as its own page either way.
@@ -62,6 +66,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "payload\arm64\nexler.exe"; DestDir: "{app}"; DestName: "nexler.exe"; Check: IsArm64; Flags: ignoreversion
 Source: "payload\amd64\nexler.exe"; DestDir: "{app}"; DestName: "nexler.exe"; Check: (IsX64Compatible and not IsArm64); Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+; Installed alongside nexler.exe purely so the shortcuts below have an
+; icon to point at — a plain `go build` binary has no embedded icon
+; resource of its own for IconFilename to extract from.
+Source: "nexler.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: checkedonce
@@ -72,10 +80,10 @@ Name: "installgo"; Description: "Install Go (needed to build apps you scaffold w
 Name: "installnpm"; Description: "Install Node.js/npm (needed for 'nexler add')"; GroupDescription: "Optional prerequisites:"; Check: NeedNpm
 
 [Icons]
-Name: "{group}\Nexler Command Prompt"; Filename: "{cmd}"; Parameters: "/K ""cd /d ""{app}"" && nexler.exe help"""; WorkingDir: "{app}"; IconFilename: "{app}\nexler.exe"
+Name: "{group}\Nexler Command Prompt"; Filename: "{cmd}"; Parameters: "/K ""cd /d ""{app}"" && nexler.exe help"""; WorkingDir: "{app}"; IconFilename: "{app}\nexler.ico"
 Name: "{group}\README"; Filename: "{app}\README.md"
 Name: "{group}\Uninstall Nexler"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Nexler"; Filename: "{cmd}"; Parameters: "/K ""cd /d ""{app}"" && nexler.exe help"""; WorkingDir: "{app}"; IconFilename: "{app}\nexler.exe"; Tasks: desktopicon
+Name: "{autodesktop}\Nexler"; Filename: "{cmd}"; Parameters: "/K ""cd /d ""{app}"" && nexler.exe help"""; WorkingDir: "{app}"; IconFilename: "{app}\nexler.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\README.md"; Description: "View README"; Flags: postinstall shellexec skipifsilent
