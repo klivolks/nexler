@@ -79,7 +79,7 @@ a{ color:inherit; }
 .hero-text{ flex:1 1 auto; min-width:0; }
 .hero-text p{ margin-bottom:0; }
 .hero-visual{
-  flex:0 0 auto; width:360px; max-width:40%;
+  flex:0 0 auto; width:460px; max-width:50%;
   margin-top:6px;
   perspective:1200px;
 }
