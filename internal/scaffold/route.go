@@ -305,11 +305,11 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		Methods:           methods,
 	}
 
-	if err := ensureOpenAPIUpToDate(appDir); err != nil {
+	if _, err := ensureOpenAPIUpToDate(appDir); err != nil {
 		return RouteResult{}, fmt.Errorf("upgrading openapi/openapi.go: %w", err)
 	}
 	if rawResponse {
-		if err := ensureResponseJSONRaw(appDir); err != nil {
+		if _, err := ensureResponseJSONRaw(appDir); err != nil {
 			return RouteResult{}, fmt.Errorf("upgrading response/response.go for JSONRaw support: %w", err)
 		}
 	}
@@ -706,7 +706,7 @@ func detectExistingProtection(appDir, modulePath, relDirSlash string) (protected
 // added its own RespUnwrapped before Tags existed, or vice versa) — a
 // single-marker check would wrongly consider such a file current. Add the
 // new field's name here whenever openapi.go.tmpl gains another one.
-var openAPIUpToDateMarkers = []string{"Tags", "RespUnwrapped"}
+var openAPIUpToDateMarkers = []string{"Tags", "RespUnwrapped", "ClientIdAuth"}
 
 // ensureOpenAPIUpToDate rewrites appDir/openapi/openapi.go from the current
 // embedded template if it predates any Operation field nexler now expects
@@ -717,15 +717,15 @@ var openAPIUpToDateMarkers = []string{"Tags", "RespUnwrapped"}
 // per-app templating at all — its rendered output is byte-identical across
 // every app at a given nexler version — so there's nothing app-specific
 // that a full rewrite could clobber.
-func ensureOpenAPIUpToDate(appDir string) error {
+func ensureOpenAPIUpToDate(appDir string) (bool, error) {
 	path := filepath.Join(appDir, "openapi", "openapi.go")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No openapi package in this app — nothing to upgrade.
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	upToDate := true
 	for _, marker := range openAPIUpToDateMarkers {
@@ -735,18 +735,21 @@ func ensureOpenAPIUpToDate(appDir string) error {
 		}
 	}
 	if upToDate {
-		return nil
+		return false, nil
 	}
 	tmplPath := templatesRoot + "/openapi/openapi.go.tmpl"
 	content, err := templateFS.ReadFile(tmplPath)
 	if err != nil {
-		return fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
+		return false, fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
 	}
 	rendered, err := render(tmplPath, content, nil)
 	if err != nil {
-		return fmt.Errorf("rendering %s: %w", tmplPath, err)
+		return false, fmt.Errorf("rendering %s: %w", tmplPath, err)
 	}
-	return os.WriteFile(path, rendered, 0o644)
+	if err := os.WriteFile(path, rendered, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // responseMarker is the stable anchor ensureResponseJSONRaw inserts
@@ -780,29 +783,32 @@ func JSONRaw(w http.ResponseWriter, status int, v any) {
 // hand-extended — ctrl-svc's own JSONRaw was itself a hand-addition before
 // this feature existed — so a blind overwrite could silently delete an
 // unrelated hand-written helper living in the same file.
-func ensureResponseJSONRaw(appDir string) error {
+func ensureResponseJSONRaw(appDir string) (bool, error) {
 	path := filepath.Join(appDir, "response", "response.go")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("%s does not exist — is %s a nexler app directory?", path, appDir)
+			return false, fmt.Errorf("%s does not exist — is %s a nexler app directory?", path, appDir)
 		}
-		return err
+		return false, err
 	}
 	content := string(raw)
 	if strings.Contains(content, "JSONRaw") {
-		return nil
+		return false, nil
 	}
 
 	anchor := responseMarker
 	if !strings.Contains(content, anchor) {
 		anchor = responseErrorAnchor
 		if !strings.Contains(content, anchor) {
-			return fmt.Errorf("could not find an insertion point for JSONRaw in %s (has it been hand-rewritten?) — add the following manually:\n%s", path, jsonRawFunc)
+			return false, fmt.Errorf("could not find an insertion point for JSONRaw in %s (has it been hand-rewritten?) — add the following manually:\n%s", path, jsonRawFunc)
 		}
 	}
 	content = strings.Replace(content, anchor, jsonRawFunc+"\n"+anchor, 1)
-	return os.WriteFile(path, []byte(content), 0o644)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // wireAggregator inserts an import for importPath (aliased as alias) and a

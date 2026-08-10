@@ -192,7 +192,7 @@ func Spec(title string) map[string]any {
 
 		if op.Protected {
 			needsSecurity = true
-			sec := map[string][]string{"ApiKeyAuth": {}, "BearerAuth": {}}
+			sec := map[string][]string{"ApiKeyAuth": {}, "BearerAuth": {}, "ClientIdAuth": {}}
 			operation["security"] = []map[string][]string{sec}
 		}
 
@@ -210,8 +210,9 @@ func Spec(title string) map[string]any {
 	components := map[string]any{"schemas": schemas}
 	if needsSecurity {
 		components["securitySchemes"] = map[string]any{
-			"ApiKeyAuth": map[string]any{"type": "apiKey", "in": "header", "name": "X-Api-Key"},
-			"BearerAuth": map[string]any{"type": "http", "scheme": "bearer"},
+			"ApiKeyAuth":   map[string]any{"type": "apiKey", "in": "header", "name": "X-Api-Key"},
+			"BearerAuth":   map[string]any{"type": "http", "scheme": "bearer"},
+			"ClientIdAuth": map[string]any{"type": "apiKey", "in": "header", "name": "X-Client-Id"},
 		}
 	}
 

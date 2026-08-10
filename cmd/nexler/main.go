@@ -48,6 +48,8 @@ func main() {
 		runAdd(os.Args[2:])
 	case "db":
 		runDb(os.Args[2:])
+	case "update":
+		runUpdate(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("nexler CLI v%s\n", cliVersion)
 	case "help", "-h", "--help":
@@ -734,6 +736,22 @@ Usage:
       Example: nexler add bootstrap
       Example: nexler add bootstrap@5.3.3 -as bootstrap
       Example: nexler add @popperjs/core
+
+  nexler update [-dir <app-dir>]
+      Brings an existing generated app's nexler-owned files — ones you generally don't
+      hand-edit — up to date with whatever the current nexler binary knows how to generate,
+      without needing to coincidentally trigger it via "nexler create <route>" (which already
+      runs these same checks, but only as a side effect, and only the ones relevant to the
+      route being created). Today this covers openapi/openapi.go (regenerated in full whenever
+      it predates an Operation field nexler now sets, e.g. Tags/RespUnwrapped/ClientIdAuth —
+      safe, since that file has no per-app content at all) and response/response.go (JSONRaw
+      inserted if missing, append-only, never a full rewrite, since that file is realistically
+      hand-extended). Extended over time as nexler adds more such checks. Never touches
+      handlers/services/store/models, main.go, .env, or templates/html/* — anything you're
+      expected to hand-edit is out of scope by design. Prints "updated" or "already up to
+      date" per file checked.
+
+      Example: nexler update -dir ./myapp
 
   nexler version
       Print the CLI version.
