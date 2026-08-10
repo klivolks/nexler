@@ -268,7 +268,7 @@ func runCreateRoute(route string, args []string) {
 	service := fs.String("service", "", "reuse an existing service package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify")
 	store := fs.String("store", "", "reuse an existing store package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify")
 	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
-	protected := fs.Bool("protected", false, "require auth for this route (registers in routes/protected instead of routes/public)")
+	protected := fs.Bool("protected", false, "require auth for this route (registers in routes/protected instead of routes/public); when adding method(s) to an already-existing route package, applies only to the newly-added method(s), independently of the rest of the package")
 	methods := fs.String("methods", "GET", "comma-separated HTTP methods to generate: GET, POST, PUT, PATCH, DELETE (OPTIONS is automatic and always 200 OK)")
 	body := fs.String("body", "json", "request body shape for non-GET methods: json, form, or multipart")
 	response := fs.String("response", "json", "response kind for every method: json (response.JSON, default), html (response.HTML), or raw (response.JSONRaw, no {\"data\": ...} envelope)")
@@ -382,9 +382,12 @@ func runCreateRoute(route string, args []string) {
 		}
 		fmt.Println(", and wired the route into routes/" + kind + "/" + kind + ".go.")
 	} else {
-		fmt.Printf("Route %s (%s) already existed — added method(s): %s\n", route, group, strings.Join(result.Added, ", "))
+		fmt.Printf("Route %s (%s) already existed — added method(s): %s (%s)\n", route, group, strings.Join(result.Added, ", "), kind)
 		if len(result.Skipped) > 0 {
 			fmt.Printf("Already present, left unchanged: %s\n", strings.Join(result.Skipped, ", "))
+		}
+		if result.Note != "" {
+			fmt.Println(result.Note)
 		}
 	}
 }
