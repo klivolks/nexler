@@ -8,13 +8,15 @@
 
 # Database connections — see db/db.go. "core" is this app's conventional
 # default connection (store/ packages reach for it via
-# db.{{ .CoreDBAccessor }}("core") unless told otherwise) — fill in its DSN below.
-# Add more connections by listing another name here, then a _TYPE
-# ({{ .DBTypesCSV }}) and _DSN per name. Example:
+# db.{{ .CoreDBAccessor }}("core") unless told otherwise){{ if .CoreDBDSN }}.{{ else }} — fill in its DSN below.{{ end }}
+# Add more connections either by hand (list another name here, then a
+# _TYPE ({{ .DBTypesCSV }}) and _DSN per name) or via `nexler db add <name>
+# -type <type>`, which can also enable a driver type you didn't originally
+# select here. Example:
 #   {{ .EnvPrefix }}_DB_CONNECTIONS=core,analytics
 #   {{ .EnvPrefix }}_DB_ANALYTICS_TYPE=postgres
 #   {{ .EnvPrefix }}_DB_ANALYTICS_DSN=postgres://user:pass@localhost:5432/appdb
 {{ .EnvPrefix }}_DB_CONNECTIONS=core
 {{ .EnvPrefix }}_DB_CORE_TYPE={{ .CoreDB }}
-{{ .EnvPrefix }}_DB_CORE_DSN=
+{{ .EnvPrefix }}_DB_CORE_DSN={{ .CoreDBDSN }}
 {{- end }}
