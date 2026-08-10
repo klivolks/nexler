@@ -40,7 +40,7 @@ import (
 // runInit dispatches `nexler init ...`.
 func runInit(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "nexler: usage: nexler init db [-dir <app-dir>]\n              nexler init kpass [-dir <app-dir>]\n              nexler init kgate [-dir <app-dir>]")
+		fmt.Fprintln(os.Stderr, "nexler: usage: nexler init db [-dir <app-dir>]\n              nexler init kpass [-dir <app-dir>]\n              nexler init kgate [-dir <app-dir>]\n              nexler init docker [-dir <app-dir>]\n              nexler init ci [-dir <app-dir>] [-registry dockerhub|github]")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -50,8 +50,12 @@ func runInit(args []string) {
 		runInitKpass(args[1:])
 	case "kgate":
 		runInitKgate(args[1:])
+	case "docker":
+		runInitDocker(args[1:])
+	case "ci":
+		runInitCI(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "nexler: unknown resource %q for init\n\nsupported: db, kpass, kgate\n", args[0])
+		fmt.Fprintf(os.Stderr, "nexler: unknown resource %q for init\n\nsupported: db, kpass, kgate, docker, ci\n", args[0])
 		os.Exit(1)
 	}
 }

@@ -681,6 +681,39 @@ Usage:
 
       Example: nexler init kgate -dir ./myapp
 
+  nexler init docker [-dir <app-dir>]
+      Adds a multi-stage Dockerfile (build + serve) and a docker-compose.yml
+      to an existing generated app. The Dockerfile's golang:<version>-alpine
+      build stage always matches the app's actual go.mod "go X.Y" directive
+      (read fresh each time, not nexler's own current default), and EXPOSE/
+      the compose ports mapping match the app's real {PREFIX}_PORT from
+      .env (defaulting to 8080). .env itself is never baked into the image
+      — the compose file passes it through via env_file: at container
+      runtime instead, so no secret ends up inside an image layer.
+      docker-compose.yml is added to .gitignore (created if the app doesn't
+      have one yet); Dockerfile is deliberately not gitignored, since "nexler
+      init ci" builds from it. Refuses if either file already exists.
+
+      Example: nexler init docker -dir ./myapp
+
+  nexler init ci [-dir <app-dir>] [-registry dockerhub|github]
+      Adds .github/workflows/release.yml: builds and pushes a Docker image
+      whenever a GitHub Release is published. -registry picks where images
+      go — "github" (GitHub Container Registry, ghcr.io, authenticated via
+      the automatic GITHUB_TOKEN, no repo secrets needed) or "dockerhub"
+      (authenticated via DOCKERHUB_USERNAME/DOCKERHUB_TOKEN secrets you add
+      under repo Settings > Secrets and variables > Actions) — prompted
+      interactively if not passed. Both generated workflows are fully
+      static (no per-app values baked in — GitHub's own
+      github.repository_owner/github.event.repository.name/secrets.*
+      contexts resolve at workflow-run time), so the file is identical
+      across every nexler app regardless of registry choice. Doesn't
+      require a Dockerfile to already exist (prints a reminder if one's
+      missing rather than refusing) since you may add one by hand or run
+      "nexler init docker" afterward. Refuses if release.yml already exists.
+
+      Example: nexler init ci -dir ./myapp -registry github
+
   nexler add <package>[@version] [-dir <app-dir>] [-as <name>]
       Vendors a static asset package from npm into an existing app, without ever giving the
       app itself a package.json or node_modules: nexler shells out to "npm install <package>
