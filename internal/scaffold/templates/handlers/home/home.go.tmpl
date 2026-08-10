@@ -1,0 +1,36 @@
+package home
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"{{ .ModulePath }}/openapi"
+{{- if .UI }}
+	"{{ .ModulePath }}/response"
+{{- end }}
+	"{{ .ModulePath }}/templates"
+)
+
+// HandleOpenAPI builds and serves the OpenAPI spec fresh on every
+// request, from whatever routes have registered themselves with the
+// openapi package — see {{ .ModulePath }}/openapi.
+func HandleOpenAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(openapi.Spec("{{ .AppName }}"))
+}
+
+// Register wires the built-in homepage, static assets, and docs routes
+// onto mux. Called once from routes/routes.go, alongside
+// public.Register and protected.Register.
+func Register(mux *http.ServeMux) {
+	templates.RegisterStatic(mux)
+{{- if .UI }}
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		response.HTML(w, r, "home", "home", "{{ .AppName }}", nil)
+	})
+{{- else }}
+	mux.HandleFunc("GET /", templates.ServePage("home.html"))
+{{- end }}
+	mux.HandleFunc("GET /swagger", templates.ServePage("swagger.html"))
+	mux.HandleFunc("GET /openapi.json", HandleOpenAPI)
+}

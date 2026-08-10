@@ -1,0 +1,26 @@
+{{ range .Methods }}
+// Handle{{ $.Name }}{{ .VerbTitle }} handles {{ .Verb }} {{ $.Route }}.
+func Handle{{ $.Name }}{{ .VerbTitle }}(w http.ResponseWriter, r *http.Request) {
+	var req {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Request
+	if err := {{ .DecodeCall }}; err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+{{- if $.HasPathParams }}
+	if err := request.DecodePath(r, &req, {{ $.PathParamArgs }}); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+{{- end }}
+
+	// TODO: call {{ $.PkgName }}'s service with req, and build a real
+	// {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response.
+	resp := {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response{}
+
+{{- if $.HTMLResponse }}
+	response.HTML(w, r, "{{ $.RelDirSlash }}", "{{ .HTMLContentName }}", "{{ $.Name }}", resp)
+{{- else }}
+	response.JSON(w, http.StatusOK, resp)
+{{- end }}
+}
+{{ end }}

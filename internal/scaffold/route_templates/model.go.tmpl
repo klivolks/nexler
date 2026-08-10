@@ -1,0 +1,17 @@
+package {{ .PkgName }}
+{{ range .Methods }}
+// {{ .VerbTitle }}{{ $.Name }}Request is the {{ .BodyDescription }} for {{ .Verb }} {{ $.Route }}.
+{{- if $.PathParams }}
+// Path parameter(s) {{ $.PathParamsCSV }} are populated by request.DecodePath —
+// add a matching json-tagged field per name to receive them.
+{{- end }}
+type {{ .VerbTitle }}{{ $.Name }}Request struct {
+	// TODO: add fields.
+}
+
+// {{ .VerbTitle }}{{ $.Name }}Response is the response payload for {{ .Verb }} {{ $.Route }}.
+type {{ .VerbTitle }}{{ $.Name }}Response struct {
+	// TODO: add fields.
+}
+{{ end }}
+// nexler:models (do not remove this marker)

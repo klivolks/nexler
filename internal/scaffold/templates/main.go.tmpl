@@ -1,0 +1,67 @@
+package main
+{{ if .HasDB }}
+import (
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"{{ .ModulePath }}/config"
+	"{{ .ModulePath }}/db"
+	"{{ .ModulePath }}/middleware"
+	"{{ .ModulePath }}/routes"
+)
+
+func main() {
+	if err := db.Connect(); err != nil {
+		log.Fatalf("connecting to databases: %v", err)
+	}
+	defer db.Close()
+
+	mux := http.NewServeMux()
+	routes.Register(mux)
+
+	srv := &http.Server{Addr: config.C.Addr(), Handler: middleware.Recover(mux)}
+
+	go func() {
+		log.Printf("{{ .AppName }} listening on %s", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
+}
+{{ else }}
+import (
+	"log"
+	"net/http"
+
+	"{{ .ModulePath }}/config"
+	"{{ .ModulePath }}/middleware"
+	"{{ .ModulePath }}/routes"
+)
+
+func main() {
+	mux := http.NewServeMux()
+
+	routes.Register(mux)
+
+	addr := config.C.Addr()
+	log.Printf("{{ .AppName }} listening on %s", addr)
+	if err := http.ListenAndServe(addr, middleware.Recover(mux)); err != nil {
+		log.Fatal(err)
+	}
+}
+{{ end }}

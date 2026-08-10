@@ -1,0 +1,32 @@
+# nexler CLI build output
+/nexler
+/nexler.exe
+
+# build/gen-icons is a throwaway tool module — ignore its compiled binary,
+# keep its source
+/build/gen-icons/*.exe
+/build/gen-icons/gen-icons
+
+# goreleaser output
+/dist/
+
+# compiled installer output (built by CI, or locally per installer/*/BUILDING.md)
+/installer/windows/*.exe
+/installer/windows/payload/
+/installer/macos/*.pkg
+/installer/macos/payload/
+/installer/macos/build/
+/installer/macos/*.iconset/
+
+# downloaded Go/Node installer payloads from testing the installers locally
+/installer/windows/*.msi
+/installer/macos/*.pkg.download
+
+# cosign private key + its passphrase — NEVER commit these. cosign.key is
+# password-encrypted at rest, but treat it as a real secret regardless.
+# In CI, its contents (and the password) come from GitHub Actions repo
+# secrets COSIGN_KEY/COSIGN_PASSWORD instead — see CLAUDE.md's "Releasing"
+# section. cosign.pub (the public key, safe to commit) is intentionally
+# NOT listed here.
+/cosign.key
+/cosign.password.txt

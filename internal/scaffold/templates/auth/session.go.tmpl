@@ -1,0 +1,118 @@
+// Package auth implements {{ .AppName }}'s authentication. This file
+// covers server-side sessions, identified by an HttpOnly cookie.
+//
+// Sessions live in memory only: they're lost on restart and aren't
+// shared across multiple instances of this app. Swap the map below for
+// a real store (Redis, a database, ...) before running more than one
+// instance in production — this is a starting point, the same way
+// store/<route>'s generated Store stub is.
+package auth
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"net/http"
+	"sync"
+	"time"
+)
+
+// SessionCookieName is the cookie {{ .AppName }}'s sessions are tracked by.
+const SessionCookieName = "{{ .EnvPrefix }}_session"
+
+const (
+	sessionTTL = 24 * time.Hour
+{{- if .RememberMe }}
+	rememberMeTTL = 30 * 24 * time.Hour
+{{- end }}
+)
+
+type sessionEntry struct {
+	Subject   string
+	ExpiresAt time.Time
+}
+
+var (
+	sessionsMu sync.Mutex
+	sessions   = map[string]sessionEntry{}
+)
+
+// StartSession creates a server-side session for subject, sets
+// SessionCookieName on w, and returns the session ID. Call this from
+// your own login handler once credentials are verified.
+{{- if .RememberMe }}
+// rememberMe extends the session/cookie lifetime from sessionTTL to
+// rememberMeTTL (e.g. a "remember me" checkbox on your login form).
+func StartSession(w http.ResponseWriter, subject string, rememberMe bool) string {
+	ttl := sessionTTL
+	if rememberMe {
+		ttl = rememberMeTTL
+	}
+{{- else }}
+func StartSession(w http.ResponseWriter, subject string) string {
+	ttl := sessionTTL
+{{- end }}
+	id := randomID()
+	exp := time.Now().Add(ttl)
+
+	sessionsMu.Lock()
+	sessions[id] = sessionEntry{Subject: subject, ExpiresAt: exp}
+	sessionsMu.Unlock()
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookieName,
+		Value:    id,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  exp,
+	})
+	return id
+}
+
+// SessionFromRequest looks up the session referenced by r's session
+// cookie. ok is false if there's no cookie, or the session doesn't
+// exist or has expired (an expired session is also removed here).
+func SessionFromRequest(r *http.Request) (subject string, ok bool) {
+	c, err := r.Cookie(SessionCookieName)
+	if err != nil {
+		return "", false
+	}
+
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+
+	entry, found := sessions[c.Value]
+	if !found {
+		return "", false
+	}
+	if time.Now().After(entry.ExpiresAt) {
+		delete(sessions, c.Value)
+		return "", false
+	}
+	return entry.Subject, true
+}
+
+// EndSession destroys the session referenced by r's cookie (if any) and
+// clears the cookie on w. Call this from your own logout handler.
+func EndSession(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(SessionCookieName); err == nil {
+		sessionsMu.Lock()
+		delete(sessions, c.Value)
+		sessionsMu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
+}
+
+func randomID() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // crypto/rand failing means the OS RNG is broken
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}

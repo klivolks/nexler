@@ -1,0 +1,119 @@
+{{- if eq .CoreDBAccessor "Mongo" -}}
+package core
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"{{ .ModulePath }}/mongo"
+)
+
+type kgateChannelDoc struct {
+	Channel   string    `bson:"channel"`
+	CreatedAt time.Time `bson:"created_at"`
+}
+
+func kgateChannelCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database("core").Collection("core_kgate_channels"), true
+}
+
+// AddKgateChannel idempotently records channel in the kgate channel
+// registry — see kgate.Subscribe, which calls this so a channel survives
+// restarts.
+func AddKgateChannel(ctx context.Context, channel string) error {
+	coll, ok := kgateChannelCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	return mongo.Set(ctx, coll, kgateChannelDoc{Channel: channel}, kgateChannelDoc{Channel: channel, CreatedAt: time.Now().UTC()})
+}
+
+// RemoveKgateChannel removes channel from the kgate channel registry — see
+// kgate.Unsubscribe.
+func RemoveKgateChannel(ctx context.Context, channel string) error {
+	coll, ok := kgateChannelCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	return mongo.Delete(ctx, coll, kgateChannelDoc{Channel: channel})
+}
+
+// ListKgateChannels returns every channel currently recorded — see
+// kgate.ResumeAll, which re-subscribes to each on startup.
+func ListKgateChannels(ctx context.Context) ([]string, error) {
+	coll, ok := kgateChannelCollection()
+	if !ok {
+		return nil, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	docs, err := mongo.Get[kgateChannelDoc](ctx, coll, kgateChannelDoc{})
+	if err != nil {
+		return nil, err
+	}
+	channels := make([]string, len(docs))
+	for i, d := range docs {
+		channels[i] = d.Channel
+	}
+	return channels, nil
+}
+{{- else -}}
+package core
+
+import (
+	"context"
+	"fmt"
+
+	"{{ .ModulePath }}/{{ .CoreDB }}"
+)
+
+type kgateChannelRow struct {
+	Channel string `db:"channel"`
+}
+
+// AddKgateChannel idempotently records channel in the kgate channel
+// registry, via the core_kgate_channel_add stored procedure (see `nexler
+// init db`) — see kgate.Subscribe, which calls this so a channel survives
+// restarts.
+func AddKgateChannel(ctx context.Context, channel string) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_kgate_channel_add", channel)
+	return err
+}
+
+// RemoveKgateChannel removes channel from the kgate channel registry, via
+// the core_kgate_channel_remove stored procedure — see kgate.Unsubscribe.
+func RemoveKgateChannel(ctx context.Context, channel string) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_kgate_channel_remove", channel)
+	return err
+}
+
+// ListKgateChannels returns every channel currently recorded — a plain
+// read needs no stored procedure (same reasoning GetSetting already
+// uses) — see kgate.ResumeAll, which re-subscribes to each on startup.
+func ListKgateChannels(ctx context.Context) ([]string, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return nil, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	rows, err := {{ .CoreDB }}.Query[kgateChannelRow](ctx, conn, "SELECT channel FROM core_kgate_channels")
+	if err != nil {
+		return nil, err
+	}
+	channels := make([]string, len(rows))
+	for i, r := range rows {
+		channels[i] = r.Channel
+	}
+	return channels, nil
+}
+{{- end }}

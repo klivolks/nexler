@@ -1,0 +1,20 @@
+# {{ .AppName }} runtime configuration — see config/config.go.
+{{ .EnvPrefix }}_HOST=
+{{ .EnvPrefix }}_PORT=8080
+{{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
+{{ .EnvPrefix }}_JWT_SECRET={{ .JWTSecret }}
+{{- end }}
+{{- if .HasDB }}
+
+# Database connections — see db/db.go. "core" is this app's conventional
+# default connection (store/ packages reach for it via
+# db.{{ .CoreDBAccessor }}("core") unless told otherwise) — fill in its DSN below.
+# Add more connections by listing another name here, then a _TYPE
+# ({{ .DBTypesCSV }}) and _DSN per name. Example:
+#   {{ .EnvPrefix }}_DB_CONNECTIONS=core,analytics
+#   {{ .EnvPrefix }}_DB_ANALYTICS_TYPE=postgres
+#   {{ .EnvPrefix }}_DB_ANALYTICS_DSN=postgres://user:pass@localhost:5432/appdb
+{{ .EnvPrefix }}_DB_CONNECTIONS=core
+{{ .EnvPrefix }}_DB_CORE_TYPE={{ .CoreDB }}
+{{ .EnvPrefix }}_DB_CORE_DSN=
+{{- end }}

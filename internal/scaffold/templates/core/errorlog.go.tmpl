@@ -1,0 +1,67 @@
+{{- if eq .CoreDBAccessor "Mongo" -}}
+package core
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"{{ .ModulePath }}/mongo"
+)
+
+type errorLogDoc struct {
+	OccurredAt time.Time `bson:"occurred_at"`
+	Message    string    `bson:"message"`
+	Details    string    `bson:"details,omitempty"`
+	Route      string    `bson:"route,omitempty"`
+}
+
+func errorLogCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database("core").Collection("core_error_log"), true
+}
+
+// LogError records an error to the core_error_log collection: message is
+// required; details and route may be left blank. See middleware.Recover,
+// which calls this automatically on a recovered panic — call it directly
+// yourself for any other error you want in the same log.
+func LogError(ctx context.Context, message, details, route string) error {
+	coll, ok := errorLogCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	return mongo.Insert(ctx, coll, errorLogDoc{
+		OccurredAt: time.Now().UTC(),
+		Message:    message,
+		Details:    details,
+		Route:      route,
+	})
+}
+{{- else -}}
+package core
+
+import (
+	"context"
+	"fmt"
+
+	"{{ .ModulePath }}/{{ .CoreDB }}"
+)
+
+// LogError records an error to the core_error_log table, via the
+// core_error_log_insert stored procedure (see `nexler init db`): message
+// is required; details and route may be left blank. See
+// middleware.Recover, which calls this automatically on a recovered
+// panic — call it directly yourself for any other error you want in the
+// same log.
+func LogError(ctx context.Context, message, details, route string) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_error_log_insert", message, details, route)
+	return err
+}
+{{- end }}

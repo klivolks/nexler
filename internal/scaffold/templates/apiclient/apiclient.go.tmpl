@@ -1,0 +1,116 @@
+// Package apiclient provides small helpers for calling other HTTP APIs —
+// Get/Post/Put/Delete, similar in spirit to fetch/axios in JavaScript.
+// Every call is synchronous: it blocks until the response is fully read,
+// then closes the response body itself before returning — callers never
+// see an *http.Response and never need to remember to close one. This
+// also releases the underlying connection back to Client's pool for
+// keep-alive reuse as soon as the call returns, instead of leaking it
+// until some later, easy-to-forget Close() call.
+package apiclient
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// Client is the *http.Client every call in this package uses. Replace it
+// (e.g. to change Timeout or install a custom Transport) before making
+// any calls.
+var Client = &http.Client{Timeout: 120 * time.Second}
+
+// Response is an API response with its body already fully read and its
+// connection already released — see the package doc comment.
+type Response struct {
+	StatusCode int
+	Header     http.Header
+	Body       []byte
+}
+
+// JSON decodes r's body into v.
+func (r *Response) JSON(v any) error {
+	if err := json.Unmarshal(r.Body, v); err != nil {
+		return fmt.Errorf("apiclient: decoding response body: %w", err)
+	}
+	return nil
+}
+
+// Get sends a GET request to url with headers (nil is fine) and waits for
+// the response.
+func Get(ctx context.Context, url string, headers map[string]string) (*Response, error) {
+	return do(ctx, http.MethodGet, url, headers, nil)
+}
+
+// Post sends a POST request to url with headers (nil is fine) and body,
+// and waits for the response. body may be []byte or string (sent as-is),
+// any other value (marshaled to JSON, with Content-Type: application/json
+// set unless headers already sets it), or nil (no body at all).
+func Post(ctx context.Context, url string, headers map[string]string, body any) (*Response, error) {
+	return do(ctx, http.MethodPost, url, headers, body)
+}
+
+// Put sends a PUT request — see Post for how body is handled.
+func Put(ctx context.Context, url string, headers map[string]string, body any) (*Response, error) {
+	return do(ctx, http.MethodPut, url, headers, body)
+}
+
+// Delete sends a DELETE request to url with headers (nil is fine) and
+// waits for the response.
+func Delete(ctx context.Context, url string, headers map[string]string) (*Response, error) {
+	return do(ctx, http.MethodDelete, url, headers, nil)
+}
+
+func do(ctx context.Context, method, url string, headers map[string]string, body any) (*Response, error) {
+	reqBody, contentType, err := encodeBody(body)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("apiclient: building request: %w", err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("apiclient: %s %s: %w", method, url, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("apiclient: reading response body: %w", err)
+	}
+
+	return &Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: data}, nil
+}
+
+// encodeBody turns body into a request reader and, for a JSON-marshaled
+// body, the Content-Type to send alongside it. nil yields no body at all.
+func encodeBody(body any) (io.Reader, string, error) {
+	switch b := body.(type) {
+	case nil:
+		return nil, "", nil
+	case []byte:
+		return bytes.NewReader(b), "", nil
+	case string:
+		return strings.NewReader(b), "", nil
+	default:
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, "", fmt.Errorf("apiclient: encoding request body: %w", err)
+		}
+		return bytes.NewReader(data), "application/json", nil
+	}
+}

@@ -1,0 +1,154 @@
+#!/bin/bash
+# postinstall — run automatically as root by Installer.app once pkgbuild's
+# payload is laid down. Apple's standard script arguments: $1 = path to
+# this package, $2 = install location (matches pkgbuild's
+# --install-location, i.e. /usr/local/nexler), $3 = target volume (e.g. /).
+#
+# macOS-only — written on a Windows machine, first real verification
+# happens wherever this actually runs (a Mac, or GitHub's macos-latest CI
+# runner). See BUILDING.md for exactly what has and hasn't been tested.
+set -euo pipefail
+
+INSTALL_LOCATION="${2:-/usr/local/nexler}"
+NEXLER_BIN="$INSTALL_LOCATION/bin/nexler"
+ICNS_SRC="$INSTALL_LOCATION/share/nexler.icns"
+
+# Minimum Go version nexler's own apps target (see go.mod) — Nexler
+# itself doesn't need Go to run; this only matters for `go build`/
+# `go run` on apps scaffolded with it. npm is presence-only (needed by
+# `nexler add`), no version floor.
+GO_MIN_MAJOR=1
+GO_MIN_MINOR=26
+GO_VERSION="1.26.0"
+NODE_VERSION="22.18.0"
+
+log() { echo "nexler postinstall: $*"; }
+
+go_ok() {
+  local out ver major minor
+  out="$(go version 2>/dev/null || true)"
+  [ -n "$out" ] || return 1
+  ver="$(echo "$out" | sed -nE 's/.*go([0-9]+)\.([0-9]+).*/\1 \2/p')"
+  major="$(echo "$ver" | awk '{print $1}')"
+  minor="$(echo "$ver" | awk '{print $2}')"
+  [ -n "$major" ] && [ -n "$minor" ] || return 1
+  if [ "$major" -gt "$GO_MIN_MAJOR" ]; then return 0; fi
+  [ "$major" -eq "$GO_MIN_MAJOR" ] && [ "$minor" -ge "$GO_MIN_MINOR" ]
+}
+
+npm_ok() {
+  npm --version >/dev/null 2>&1
+}
+
+# Go's official macOS installers are NOT universal — separate
+# darwin-amd64/darwin-arm64 pkgs — so this needs the arch check. Node's
+# official installer IS universal, no branching needed there.
+install_go() {
+  local arch url pkgfile
+  case "$(uname -m)" in
+    arm64) arch="arm64" ;;
+    *) arch="amd64" ;;
+  esac
+  url="https://go.dev/dl/go${GO_VERSION}.darwin-${arch}.pkg"
+  pkgfile="/tmp/nexler-go-installer.pkg"
+  log "downloading Go ${GO_VERSION} (${arch}) from $url"
+  if curl -fsSL -o "$pkgfile" "$url"; then
+    log "installing Go"
+    installer -pkg "$pkgfile" -target / || log "Go install failed — continuing without it, install it yourself later"
+    rm -f "$pkgfile"
+  else
+    log "downloading Go failed — continuing without it, install it yourself later"
+  fi
+}
+
+install_node() {
+  local url pkgfile
+  url="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.pkg"
+  pkgfile="/tmp/nexler-node-installer.pkg"
+  log "downloading Node.js ${NODE_VERSION} from $url"
+  if curl -fsSL -o "$pkgfile" "$url"; then
+    log "installing Node.js"
+    installer -pkg "$pkgfile" -target / || log "Node.js install failed — continuing without it, install it yourself later"
+    rm -f "$pkgfile"
+  else
+    log "downloading Node.js failed — continuing without it, install it yourself later"
+  fi
+}
+
+if ! go_ok; then
+  install_go
+else
+  log "Go already satisfies >= ${GO_MIN_MAJOR}.${GO_MIN_MINOR} — skipping"
+fi
+
+if ! npm_ok; then
+  install_node
+else
+  log "npm already present — skipping"
+fi
+
+# This *is* macOS's "PATH globally" mechanism — /usr/local/bin is on the
+# default system PATH for both Intel and Apple Silicon Macs, no shell
+# profile editing needed (unlike Windows' registry approach).
+mkdir -p /usr/local/bin
+ln -sf "$NEXLER_BIN" /usr/local/bin/nexler
+log "linked /usr/local/bin/nexler -> $NEXLER_BIN"
+
+# Desktop icon / "Start Menu" (Launchpad/Applications) equivalent. Must
+# resolve the actual logged-in console user first — this script runs as
+# root, so $USER/whoami would just report "root".
+CONSOLE_USER="$(stat -f "%Su" /dev/console 2>/dev/null || true)"
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ] || [ "$CONSOLE_USER" = "_mbsetupuser" ]; then
+  log "no real logged-in console user detected (got '$CONSOLE_USER') — skipping Desktop/Applications shortcut, install still succeeded"
+  exit 0
+fi
+
+USER_HOME="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
+  log "could not resolve a home directory for $CONSOLE_USER — skipping Desktop/Applications shortcut, install still succeeded"
+  exit 0
+fi
+
+# A minimal wrapper .app — Nexler is a CLI tool, so "launching" it means
+# opening Terminal running `nexler help`, matching the same "seed an
+# interactive prompt" idea as the Windows installer's Start Menu/Desktop
+# shortcut.
+APP_DIR="/Applications/Nexler.app"
+rm -rf "$APP_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+if [ -f "$ICNS_SRC" ]; then
+  cp "$ICNS_SRC" "$APP_DIR/Contents/Resources/nexler.icns"
+fi
+
+cat > "$APP_DIR/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Nexler</string>
+    <key>CFBundleExecutable</key><string>nexler-launcher</string>
+    <key>CFBundleIconFile</key><string>nexler.icns</string>
+    <key>CFBundleIdentifier</key><string>com.klivolks.nexler.launcher</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+</dict>
+</plist>
+PLIST
+
+cat > "$APP_DIR/Contents/MacOS/nexler-launcher" <<LAUNCHER
+#!/bin/bash
+osascript -e 'tell application "Terminal" to do script "'"$NEXLER_BIN"' help"' -e 'tell application "Terminal" to activate'
+LAUNCHER
+chmod +x "$APP_DIR/Contents/MacOS/nexler-launcher"
+log "created $APP_DIR (visible in Launchpad/Applications — macOS's Start Menu equivalent)"
+
+# Desktop alias, for the logged-in user specifically (not root).
+if ln -sf "$APP_DIR" "$USER_HOME/Desktop/Nexler.app" 2>/dev/null; then
+  chown -h "$CONSOLE_USER" "$USER_HOME/Desktop/Nexler.app" 2>/dev/null || true
+  log "created Desktop alias for $CONSOLE_USER"
+else
+  log "could not create Desktop alias for $CONSOLE_USER — continuing, install still succeeded"
+fi
+
+log "done"
+exit 0

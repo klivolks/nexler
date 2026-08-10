@@ -1,0 +1,120 @@
+// Package kpass is a client for klivolks' kpass permission-check service.
+// Check calls POST {KPASS_URL}/permission/check/ and returns kpass's full
+// response — including UserRole/UserType — so callers can write their own
+// conditions on top of it (e.g. restricting which data a given role/level
+// can fetch), not just a plain yes/no; Allowed is the separate, simple
+// helper for the common "is this a plain ALLOW" case. Fill in KPASS_URL,
+// KPASS_CLIENT_ID, and KPASS_API_SECRET in .env before use (added by
+// `nexler init kpass`).
+package kpass
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+{{- if or .HasJWT .HasSession }}
+	"net/http"
+
+	"{{ .ModulePath }}/auth"
+{{- end }}
+
+	"{{ .ModulePath }}/apiclient"
+)
+
+// Access is kpass's permission verdict for one Check call. ALLOW/DENY are
+// the values documented today; compare Result.Access directly rather than
+// assuming these are the only two, since kpass may add more later.
+type Access string
+
+const (
+	AccessAllow Access = "ALLOW"
+	AccessDeny  Access = "DENY"
+)
+
+// Result is kpass's raw /permission/check/ response.
+type Result struct {
+	Status   string `json:"status"`            // "success" or "error"
+	Message  string `json:"message,omitempty"` // set when Status is "error"
+	Access   Access `json:"access"`
+	UserRole string `json:"user_role"`
+	UserType string `json:"user_type"`
+}
+
+// Check calls kpass's POST {KPASS_URL}/permission/check/ for userID's
+// access to resource (e.g. "myapp.users.create"), and returns kpass's
+// full response — including UserRole/UserType — so callers can write
+// their own conditions on top of it (e.g. restricting which data a given
+// role/level can fetch), not just a plain yes/no. See Allowed for the
+// common "is this a plain ALLOW" case; Check itself stays the one place
+// that talks to kpass, kept separate on purpose so it's never forced
+// through a bool-only helper.
+//
+// extra adds further fields to the request payload beyond
+// user_id/resource, for whatever kpass's API grows to accept later.
+func Check(ctx context.Context, userID, resource string, extra map[string]any) (*Result, error) {
+	base := os.Getenv("KPASS_URL")
+	if base == "" {
+		return nil, fmt.Errorf("kpass: KPASS_URL is not set")
+	}
+
+	payload := map[string]any{"user_id": userID, "resource": resource}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	headers := map[string]string{
+		"X-Client-Id":  os.Getenv("KPASS_CLIENT_ID"),
+		"X-Api-Secret": os.Getenv("KPASS_API_SECRET"),
+	}
+
+	resp, err := apiclient.Post(ctx, strings.TrimRight(base, "/")+"/permission/check/", headers, payload)
+	if err != nil {
+		return nil, fmt.Errorf("kpass: calling permission/check: %w", err)
+	}
+	var result Result
+	if err := resp.JSON(&result); err != nil {
+		return nil, fmt.Errorf("kpass: decoding response: %w", err)
+	}
+	if result.Status == "error" {
+		return &result, fmt.Errorf("kpass: %s", result.Message)
+	}
+	return &result, nil
+}
+
+// Allowed reports whether result is a plain ALLOW — the common case for a
+// simple auth gate, kept separate from Check so callers needing more
+// (UserRole/UserType-based conditions) call Check directly instead of
+// being forced through a bool.
+func Allowed(result *Result) bool {
+	return result != nil && result.Access == AccessAllow
+}
+{{- if or .HasJWT .HasSession }}
+
+// UserIDFromRequest extracts r's authenticated subject —
+{{- if and .HasJWT .HasSession }}
+// from its JWT bearer token (auth.Claims.Subject) if present, else its
+// session cookie's subject, the same precedence middleware.RequireAuth
+// uses —
+{{- else if .HasJWT }}
+// from its JWT bearer token's auth.Claims.Subject —
+{{- else }}
+// from its session cookie's subject (auth.SessionFromRequest) —
+{{- end }}
+// for passing as Check's userID. ok is false if the request isn't
+// authenticated.
+func UserIDFromRequest(r *http.Request) (userID string, ok bool) {
+{{- if .HasJWT }}
+	if token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); found && token != "" {
+		if claims, err := auth.VerifyJWT(token); err == nil {
+			return claims.Subject, true
+		}
+	}
+{{- end }}
+{{- if .HasSession }}
+	if subject, found := auth.SessionFromRequest(r); found {
+		return subject, true
+	}
+{{- end }}
+	return "", false
+}
+{{- end }}

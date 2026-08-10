@@ -1,0 +1,16 @@
+// Package public aggregates registration of routes that do not require
+// authentication. `nexler create <route>` (default, no -protected) adds
+// an import and a Register call here — the marker comment below is a
+// fixed anchor kept in place so this file can be edited repeatedly
+// without breaking.
+package public
+
+import (
+	"net/http"
+)
+
+// Register wires every public route onto mux. Called once from
+// routes/routes.go.
+func Register(mux *http.ServeMux) {
+	// nexler:routes (do not remove this marker)
+}

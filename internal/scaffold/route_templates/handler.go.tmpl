@@ -1,0 +1,75 @@
+package {{ .PkgName }}
+
+import (
+	"net/http"
+
+	"{{ .ModulePath }}/middleware"
+	{{ .Alias }}models "{{ .ModulePath }}/models/{{ .RelDirSlash }}"
+	"{{ .ModulePath }}/openapi"
+	"{{ .ModulePath }}/request"
+	"{{ .ModulePath }}/response"
+)
+{{ range .Methods }}
+// Handle{{ $.Name }}{{ .VerbTitle }} handles {{ .Verb }} {{ $.Route }}.
+func Handle{{ $.Name }}{{ .VerbTitle }}(w http.ResponseWriter, r *http.Request) {
+	var req {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Request
+	if err := {{ .DecodeCall }}; err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+{{- if $.HasPathParams }}
+	if err := request.DecodePath(r, &req, {{ $.PathParamArgs }}); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+{{- end }}
+
+	// TODO: call {{ $.PkgName }}'s service with req, and build a real
+	// {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response.
+	resp := {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response{}
+
+{{- if $.HTMLResponse }}
+	response.HTML(w, r, "{{ $.RelDirSlash }}", "{{ .HTMLContentName }}", "{{ $.Name }}", resp)
+{{- else }}
+	response.JSON(w, http.StatusOK, resp)
+{{- end }}
+}
+{{ end }}
+// nexler:handlers (do not remove this marker) — `nexler create <route>`
+// adds new methods' handler functions above this line when adding to an
+// existing route.
+
+// Register wires this package's route onto mux for every selected method,
+// plus a blanket 200 OK for OPTIONS, and registers each method's
+// documentation (including real request/response field names, reflected
+// from the models package) with the openapi package so /openapi.json
+// picks it up automatically. Uses Go's method-aware ServeMux patterns
+// ("METHOD /path", Go 1.22+) — hitting the path with an unregistered
+// method gets an automatic 405 from net/http. Called once
+{{- if .Protected }}
+// from routes/protected/protected.go.
+{{- else }}
+// from routes/public/public.go.
+{{- end }}
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("OPTIONS {{ .Route }}", middleware.HandleOptions)
+{{- range .Methods }}
+	mux.HandleFunc("{{ .Verb }} {{ $.Route }}", {{ .RegisterExpr }})
+	openapi.Register(openapi.Operation{
+		Method:      "{{ .Verb }}",
+		Path:        "{{ $.Route }}",
+		OperationID: "{{ .OperationID }}",
+		Summary:     "{{ .Verb }} {{ $.Route }}",
+		Protected:   {{ $.Protected }},
+		ReqType:     {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Request{},
+{{- if .ReqContentType }}
+		ReqContentType: "{{ .ReqContentType }}",
+{{- end }}
+		RespType: {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response{},
+{{- if $.HTMLResponse }}
+		RespContentType: "text/html",
+{{- end }}
+	})
+{{- end }}
+	// nexler:register (do not remove this marker)
+}

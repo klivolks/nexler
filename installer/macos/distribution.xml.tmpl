@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+    <title>Nexler</title>
+    <organization>com.klivolks</organization>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <!-- README.md rendered as plain text — Installer.app's Read Me pane
+         supports .txt/.rtf/.rtfd/.html, not literal Markdown rendering.
+         Good enough for now; a prettier .rtf conversion is a possible
+         future polish, not pursued here. This is macOS's own natural
+         "show readme" placement (early in the wizard), distinct from the
+         Windows installer's end-of-install "View README" checkbox — a
+         deliberate per-platform difference, not a defect. -->
+    <readme file="README.md" mime-type="text/plain"/>
+    <license file="LICENSE" mime-type="text/plain"/>
+    <options customize="never" require-scripts="true" rootVolumeOnly="true"/>
+    <domains enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.klivolks.nexler"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.klivolks.nexler" visible="false">
+        <pkg-ref id="com.klivolks.nexler"/>
+    </choice>
+    <!-- A standard flat .pkg only offers a destination *volume* picker
+         (see <domains> above), never an arbitrary folder path — a true
+         custom folder-picker needs a full code-signed Installer plugin,
+         disproportionate for a CLI tool that always installs to a fixed,
+         sane location (/usr/local/nexler). Windows gets a real folder
+         picker (native to Inno Setup); this is an intentional, documented
+         per-platform difference. -->
+    <pkg-ref id="com.klivolks.nexler" version="{{VERSION}}" onConclusion="none">component.pkg</pkg-ref>
+</installer-gui-script>

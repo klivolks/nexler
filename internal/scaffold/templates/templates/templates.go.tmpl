@@ -1,0 +1,42 @@
+// Package templates serves the app's built-in HTML pages and static
+// assets (logo, CSS, JS) — no CDN, no network dependency at runtime.
+// Everything under html/ and static/ is embedded directly into the
+// compiled binary.
+package templates
+
+import (
+	"embed"
+	"io/fs"
+	"net/http"
+)
+
+//go:embed html
+var htmlFS embed.FS
+
+//go:embed static
+var staticFS embed.FS
+
+// ServePage returns a handler that writes the embedded html/<name> file
+// as text/html — the one place that owns reading a built-in page,
+// setting its content type, and writing it, instead of a separate
+// handler per page (home, swagger, ...).
+func ServePage(name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, err := htmlFS.ReadFile("html/" + name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(b)
+	}
+}
+
+// RegisterStatic mounts every embedded file under static/ at /static/.
+func RegisterStatic(mux *http.ServeMux) {
+	sub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		panic(err)
+	}
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(sub)))
+}

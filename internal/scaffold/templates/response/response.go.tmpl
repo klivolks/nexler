@@ -1,0 +1,161 @@
+// Package response provides helpers for writing a handler's result: JSON
+// (wrapped in the {"data": ...}/{"error": "..."} envelope every
+// nexler-generated handler uses for its API responses — see the openapi
+// package, which documents the same shape) and HTML (rendering a
+// module's on-disk templates, for routes scaffolded with
+// `-response html`). See {{ .ModulePath }}/openapi.
+{{- if .HasDB }}
+//
+// Error also auto-logs every 5xx it writes to the core database, via
+// core.LogError — the same best-effort logging middleware.Recover already
+// does for a recovered panic. 4xx responses (e.g. the standard 400 a
+// handler writes on a decode/validation failure) are never logged: that's
+// the client's fault, not worth it in the error log.
+{{- end }}
+package response
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"net/http"
+	"os"
+	"path/filepath"
+{{- if .HasDB }}
+
+	"{{ .ModulePath }}/core"
+{{- end }}
+)
+
+// Envelope is the shape every JSON response is wrapped in. Exactly one of
+// Data or Error is set.
+type Envelope struct {
+	Data  any    `json:"data,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// JSON writes v wrapped as {"data": v} with the given status code.
+func JSON(w http.ResponseWriter, status int, v any) {
+	write(w, status, Envelope{Data: v})
+}
+
+// Error writes message wrapped as {"error": message} with the given
+// status code.
+{{- if .HasDB }}
+// A 5xx status also logs message to the core database via core.LogError,
+// best-effort — a logging failure here is silently ignored rather than
+// blocking the error response.
+{{- end }}
+func Error(w http.ResponseWriter, r *http.Request, status int, message string) {
+{{- if .HasDB }}
+	if status >= 500 {
+		core.LogError(r.Context(), message, fmt.Sprintf("status %d", status), r.URL.Path)
+	}
+{{- end }}
+	write(w, status, Envelope{Error: message})
+}
+
+func write(w http.ResponseWriter, status int, env Envelope) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(env)
+}
+
+// htmlTemplatesDir is where per-module HTML content and layout templates
+// live on disk, relative to the app's working directory. Unlike the
+// embedded templates package (the built-in homepage/swagger/static
+// assets, baked into the binary at build time), these are read straight
+// off disk on every call so edits take effect without a rebuild.
+const htmlTemplatesDir = "templates/html"
+
+// htmlSharedDir is the module name resolveHTMLFile falls back to.
+const htmlSharedDir = "shared"
+
+// resolveHTMLFile returns the path to read for module's filename (a
+// content file's "<name>.html", or "layout.html"): module's own copy if
+// it has one, else the shared fallback under templates/html/shared — so
+// e.g. a single layout.html can serve every module that doesn't need its
+// own override. Errors naming both checked paths if neither exists.
+func resolveHTMLFile(module, filename string) (string, error) {
+	modPath := filepath.Join(htmlTemplatesDir, filepath.FromSlash(module), filename)
+	if _, err := os.Stat(modPath); err == nil {
+		return modPath, nil
+	}
+	sharedPath := filepath.Join(htmlTemplatesDir, htmlSharedDir, filename)
+	if _, err := os.Stat(sharedPath); err == nil {
+		return sharedPath, nil
+	}
+	return "", fmt.Errorf("neither %s nor %s exists (nexler create writes one of these at scaffold time — restore or recreate it by hand)", modPath, sharedPath)
+}
+
+// HTML renders module's content file (resolved by resolveHTMLFile: its own
+// templates/html/<module>/<name>.html, or the shared
+// templates/html/shared/<name>.html fallback) inside a layout.html
+// (resolved the same way) and writes the result with status 200. Both
+// files are generated once, at scaffold time — either by `nexler create
+// <route> -response html` (see route.go's writeHTMLTemplates, and its
+// -layout module/shared choice), or by `nexler create app -ui` for the
+// built-in homepage, module "home" (see scaffold.go's writeAppUIHomepage).
+// HTML itself only ever reads them: if neither a module-specific nor a
+// shared copy exists (e.g. hand-deleted), it reports a clear error instead
+// of silently recreating a placeholder over whatever was there.
+//
+// data is available to the content template as {{"{{.Data}}"}}; title is
+// available to both content and layout as {{"{{.Title}}"}}.
+func HTML(w http.ResponseWriter, r *http.Request, module, name, title string, data any) {
+	contentPath, err := resolveHTMLFile(module, name+".html")
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	contentSrc, err := os.ReadFile(contentPath)
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("reading %s: %v", contentPath, err))
+		return
+	}
+	layoutPath, err := resolveHTMLFile(module, "layout.html")
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	layoutSrc, err := os.ReadFile(layoutPath)
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("reading %s: %v", layoutPath, err))
+		return
+	}
+
+	page := struct {
+		Title string
+		Data  any
+	}{title, data}
+
+	contentTmpl, err := template.New(name).Parse(string(contentSrc))
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("parsing %s: %v", contentPath, err))
+		return
+	}
+	var content bytes.Buffer
+	if err := contentTmpl.Execute(&content, page); err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("rendering %s: %v", contentPath, err))
+		return
+	}
+
+	layoutTmpl, err := template.New("layout").Parse(string(layoutSrc))
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("parsing %s: %v", layoutPath, err))
+		return
+	}
+	var out bytes.Buffer
+	if err := layoutTmpl.Execute(&out, struct {
+		Title   string
+		Content template.HTML
+	}{title, template.HTML(content.String())}); err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("rendering %s: %v", layoutPath, err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out.Bytes())
+}

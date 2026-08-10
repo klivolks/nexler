@@ -1,0 +1,83 @@
+// Package config loads {{ .AppName }}'s runtime configuration once, from
+// {{ .EnvPrefix }}_-prefixed environment variables (and an optional .env
+// file at the app root) — namespaced so multiple apps' variables don't
+// collide in a shared environment. Host/Port are the first two settings;
+// more (flags, etc.) land here over time as Config's fields grow.
+//
+// This only covers static, load-once-at-startup settings. Dynamic,
+// runtime-mutable settings (e.g. timezone) that need to change without a
+// restart are expected to eventually live in the core database instead
+// (db.SQL("core")/db.Mongo("core")) — not implemented yet.
+package config
+
+import (
+	"bufio"
+	"os"
+	"strings"
+)
+
+// C is the app's configuration, loaded once at startup.
+var C = load()
+
+// Config holds {{ .AppName }}'s runtime settings.
+type Config struct {
+	Host string // {{ .EnvPrefix }}_HOST — interface to listen on; empty means all interfaces
+	Port string // {{ .EnvPrefix }}_PORT — defaults to "8080"
+{{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
+	JWTSecret string // {{ .EnvPrefix }}_JWT_SECRET — signs/verifies issued JWTs (see auth/jwt.go)
+{{- end }}
+}
+
+// Addr returns the host:port string to pass to http.ListenAndServe.
+func (c Config) Addr() string {
+	return c.Host + ":" + c.Port
+}
+
+func load() Config {
+	loadDotEnv(".env")
+	return Config{
+		Host: os.Getenv("{{ .EnvPrefix }}_HOST"),
+		Port: getEnvOr("{{ .EnvPrefix }}_PORT", "8080"),
+{{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
+		JWTSecret: os.Getenv("{{ .EnvPrefix }}_JWT_SECRET"),
+{{- end }}
+	}
+}
+
+func getEnvOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// loadDotEnv reads simple KEY=VALUE lines from path into the process
+// environment, skipping blank lines and lines starting with #, and
+// skipping any key that's already set — real environment variables
+// always take precedence over .env. A missing file isn't an error: .env
+// is optional (e.g. in production, where real env vars are set
+// directly).
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if _, exists := os.LookupEnv(key); !exists {
+			os.Setenv(key, value)
+		}
+	}
+}

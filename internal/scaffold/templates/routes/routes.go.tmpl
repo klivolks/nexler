@@ -1,0 +1,22 @@
+// Package routes wires every route onto the app's mux, in one place.
+// main.go calls Register once and is never edited again — new routes are
+// added with `nexler create <route> -module ... [-protected]`, which
+// edits routes/public/public.go or routes/protected/protected.go
+// directly, not this file or main.go.
+package routes
+
+import (
+	"net/http"
+
+	"{{ .ModulePath }}/handlers/home"
+	"{{ .ModulePath }}/routes/protected"
+	"{{ .ModulePath }}/routes/public"
+)
+
+// Register wires every route — the built-in homepage/logo/Swagger UI,
+// public, and protected — onto mux.
+func Register(mux *http.ServeMux) {
+	home.Register(mux)
+	public.Register(mux)
+	protected.Register(mux)
+}

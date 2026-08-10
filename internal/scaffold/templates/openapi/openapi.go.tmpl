@@ -1,0 +1,347 @@
+// Package openapi is a tiny in-process registry that every generated
+// route registers itself with, alongside its mux.HandleFunc call. There
+// is no file on disk to keep in sync — Spec() rebuilds the OpenAPI
+// document from whatever's registered every time it's called, so
+// /openapi.json always reflects exactly the routes compiled into this
+// binary.
+//
+// Request/response schemas are built by reflecting over the zero-value
+// struct passed in Operation.ReqType/RespType — real field names (from
+// each field's json tag) and basic types show up in the generated spec.
+// This is deliberately a plain, shallow walk of exported struct fields
+// (see jsonSchema/fieldSchema below), not a general-purpose JSON Schema
+// implementation. One special case: a *multipart.FileHeader field is
+// rendered as {"type": "string", "format": "binary"} — the standard
+// OpenAPI way to represent a file upload — instead of being recursed
+// into like an ordinary nested struct.
+package openapi
+
+import (
+	"mime/multipart"
+	"reflect"
+	"strings"
+	"sync"
+)
+
+// Operation is one HTTP method's worth of documentation, registered by a
+// route's own Register(mux) function.
+type Operation struct {
+	Method         string // "GET", "POST", ...
+	Path           string // e.g. "/purchase/verify"
+	OperationID    string
+	Summary        string
+	Protected      bool
+	ReqType        any // zero-value of the Request struct, e.g. models.GetPingRequest{}
+	ReqContentType string // e.g. "application/json"; ignored for GET
+	RespType       any // zero-value of the Response struct
+	// RespContentType overrides the response media type documented for
+	// the "200" response. Empty means "application/json", wrapped in the
+	// {"data": ...} envelope response.JSON writes. Routes generated with
+	// `-response html` set this to "text/html", since response.HTML
+	// writes a raw HTML body instead of the JSON envelope.
+	RespContentType string
+}
+
+var (
+	mu  sync.Mutex
+	ops []Operation
+)
+
+// fileHeaderType lets fieldSchema special-case file-upload fields (see
+// package doc comment above).
+var fileHeaderType = reflect.TypeOf(multipart.FileHeader{})
+
+// Register records one operation. Called once per method, from inside
+// each generated handler package's Register(mux) — before
+// http.ListenAndServe starts, so by the time any request (including the
+// first /openapi.json) arrives, every route has already registered.
+func Register(op Operation) {
+	mu.Lock()
+	defer mu.Unlock()
+	ops = append(ops, op)
+}
+
+// Spec builds an OpenAPI 3.0 document from every Operation registered so
+// far.
+func Spec(title string) map[string]any {
+	mu.Lock()
+	defer mu.Unlock()
+
+	paths := map[string]any{}
+	schemas := map[string]any{
+		// Every operation's non-200 responses share this shape — see
+		// response.Error, which every generated handler uses to report
+		// decode/validation failures.
+		"Error": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"error": map[string]any{"type": "string"},
+			},
+		},
+	}
+	needsSecurity := false
+
+	for _, op := range ops {
+		item, _ := paths[op.Path].(map[string]any)
+		if item == nil {
+			item = map[string]any{}
+		}
+
+		operation := map[string]any{
+			"operationId": op.OperationID,
+			"summary":     op.Summary,
+		}
+
+		pathParamSet := map[string]bool{}
+		var params []map[string]any
+		for _, name := range pathParamNames(op.Path) {
+			pathParamSet[name] = true
+			params = append(params, map[string]any{
+				"name":     name,
+				"in":       "path",
+				"required": true,
+				"schema":   map[string]any{"type": "string"},
+			})
+		}
+
+		if op.ReqType != nil {
+			if op.Method == "GET" {
+				params = append(params, queryParams(op.ReqType, pathParamSet)...)
+			} else {
+				reqSchemaName := schemaName(op.ReqType)
+				schemas[reqSchemaName] = jsonSchema(op.ReqType)
+				operation["requestBody"] = map[string]any{
+					"required": true,
+					"content": map[string]any{
+						op.ReqContentType: map[string]any{
+							"schema": map[string]any{"$ref": "#/components/schemas/" + reqSchemaName},
+						},
+					},
+				}
+			}
+		}
+		if len(params) > 0 {
+			operation["parameters"] = params
+		}
+
+		if op.RespType != nil {
+			respSchemaName := schemaName(op.RespType)
+			schemas[respSchemaName] = jsonSchema(op.RespType)
+
+			var okContent map[string]any
+			if op.RespContentType == "text/html" {
+				// response.HTML writes a raw HTML body — no JSON
+				// envelope, so document it as a plain string body
+				// instead of $ref-ing the (unused) data schema.
+				okContent = map[string]any{
+					"text/html": map[string]any{
+						"schema": map[string]any{"type": "string"},
+					},
+				}
+			} else {
+				okContent = map[string]any{
+					// response.JSON wraps every success body as
+					// {"data": ...} — see the response package.
+					"application/json": map[string]any{
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"data": map[string]any{"$ref": "#/components/schemas/" + respSchemaName},
+							},
+						},
+					},
+				}
+			}
+
+			operation["responses"] = map[string]any{
+				"200": map[string]any{
+					"description": "OK",
+					"content":     okContent,
+				},
+				"default": map[string]any{
+					"description": "Error",
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{"$ref": "#/components/schemas/Error"},
+						},
+					},
+				},
+			}
+		}
+
+		if op.Protected {
+			needsSecurity = true
+			sec := map[string][]string{"ApiKeyAuth": {}, "BearerAuth": {}}
+			operation["security"] = []map[string][]string{sec}
+		}
+
+		item[strings.ToLower(op.Method)] = operation
+		paths[op.Path] = item
+	}
+
+	components := map[string]any{"schemas": schemas}
+	if needsSecurity {
+		components["securitySchemes"] = map[string]any{
+			"ApiKeyAuth": map[string]any{"type": "apiKey", "in": "header", "name": "X-Api-Key"},
+			"BearerAuth": map[string]any{"type": "http", "scheme": "bearer"},
+		}
+	}
+
+	return map[string]any{
+		"openapi":    "3.0.3",
+		"info":       map[string]any{"title": title, "version": "0.1.0"},
+		"paths":      paths,
+		"components": components,
+	}
+}
+
+// schemaName returns the Go type's own name, used as the OpenAPI
+// component schema name (e.g. "GetHealthResponse").
+func schemaName(v any) string {
+	t := reflect.TypeOf(v)
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.Name()
+}
+
+// jsonSchema builds a JSON-schema object from a struct's exported
+// fields.
+func jsonSchema(v any) map[string]any {
+	t := reflect.TypeOf(v)
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return map[string]any{"type": jsonType(t.Kind())}
+	}
+	return map[string]any{"type": "object", "properties": structProps(t)}
+}
+
+// structProps walks a struct type's exported fields into an OpenAPI
+// "properties" map, using each field's json tag for the property name.
+func structProps(t reflect.Type) map[string]any {
+	props := map[string]any{}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name, skip := jsonFieldName(f)
+		if skip {
+			continue
+		}
+		props[name] = fieldSchema(f.Type)
+	}
+	return props
+}
+
+// fieldSchema resolves one struct field's type into a JSON-schema
+// fragment — recursing into nested structs and slice element types, with
+// one special case: *multipart.FileHeader (a file upload field) renders
+// as {"type": "string", "format": "binary"} instead of being recursed
+// into like an ordinary struct.
+func fieldSchema(t reflect.Type) map[string]any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == fileHeaderType {
+		return map[string]any{"type": "string", "format": "binary"}
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		return map[string]any{"type": "object", "properties": structProps(t)}
+	case reflect.Slice, reflect.Array:
+		return map[string]any{"type": "array", "items": fieldSchema(t.Elem())}
+	default:
+		return map[string]any{"type": jsonType(t.Kind())}
+	}
+}
+
+// jsonType maps a Go kind to its OpenAPI/JSON-schema type name.
+func jsonType(k reflect.Kind) string {
+	switch k {
+	case reflect.String:
+		return "string"
+	case reflect.Bool:
+		return "boolean"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "integer"
+	case reflect.Float32, reflect.Float64:
+		return "number"
+	default:
+		return "string"
+	}
+}
+
+// jsonFieldName returns a field's JSON property name from its json tag
+// (falling back to the Go field name), and whether it should be skipped
+// (json:"-").
+func jsonFieldName(f reflect.StructField) (string, bool) {
+	tag := f.Tag.Get("json")
+	if tag == "" {
+		return f.Name, false
+	}
+	name := strings.Split(tag, ",")[0]
+	if name == "-" {
+		return "", true
+	}
+	if name == "" {
+		return f.Name, false
+	}
+	return name, false
+}
+
+// queryParams builds an OpenAPI "parameters" array (in: query) from a GET
+// request struct's exported fields, skipping any field whose name is in
+// skipNames — those are already documented as path parameters (see
+// pathParamNames) by the caller, and a GET request struct's fields are
+// matched against both path values and the query string by the same json
+// tag, so without this a {id} field would otherwise be listed twice.
+func queryParams(v any, skipNames map[string]bool) []map[string]any {
+	t := reflect.TypeOf(v)
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	var params []map[string]any
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name, skip := jsonFieldName(f)
+		if skip || skipNames[name] {
+			continue
+		}
+		params = append(params, map[string]any{
+			"name":   name,
+			"in":     "query",
+			"schema": fieldSchema(f.Type),
+		})
+	}
+	return params
+}
+
+// pathParamNames extracts every "{name}" (and trailing "{name...}")
+// wildcard segment from a route pattern, in order — the same Go 1.22+
+// ServeMux syntax Register (handler.go.tmpl) passes straight through to
+// mux.HandleFunc. Used to document path parameters here, independently of
+// Operation.ReqType, since path values exist for every HTTP method, not
+// just GET.
+func pathParamNames(path string) []string {
+	var names []string
+	for _, seg := range strings.Split(path, "/") {
+		if len(seg) < 2 || seg[0] != '{' || seg[len(seg)-1] != '}' {
+			continue
+		}
+		name := strings.TrimSuffix(seg[1:len(seg)-1], "...")
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}

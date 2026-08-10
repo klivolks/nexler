@@ -1,0 +1,37 @@
+package middleware
+
+import (
+{{- if .HasDB }}
+	"fmt"
+{{- end }}
+	"net/http"
+{{- if .HasDB }}
+	"runtime/debug"
+
+	"{{ .ModulePath }}/core"
+{{- end }}
+)
+
+// Recover wraps the whole app (see main.go, where it wraps the top-level
+// mux) so a panic in any handler is caught and turned into a 500 response
+// instead of crashing the process.
+{{- if .HasDB }}
+// It also logs the panic (message, stack trace, and request path) to the
+// core database via core.LogError — best-effort: a logging failure here
+// is silently ignored rather than blocking the 500 response. Call
+// core.LogError yourself wherever you want to log something that isn't a
+// panic (e.g. a caught error you still want in the same log).
+{{- end }}
+func Recover(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+{{- if .HasDB }}
+				core.LogError(r.Context(), fmt.Sprint(rec), string(debug.Stack()), r.URL.Path)
+{{- end }}
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}

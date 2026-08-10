@@ -1,0 +1,216 @@
+// Package mongo provides simplified, chainable helpers for MongoDB's
+// basic operations on top of the connections db.Connect() opens (see
+// {{ .ModulePath }}/db). Address a collection via
+// Conn(name).Database(name).Collection(name) — that chain is plain
+// methods, so the handle can be stored in a variable and reused:
+//
+//	users := mongo.Conn("core").Database("app").Collection("users")
+//	one, err := mongo.GetOne[User](ctx, users, User{ID: id})
+//
+// Get/GetOne/Set/Insert/Delete/Aggregate are free functions taking that
+// handle, not methods on it — Go doesn't allow a method to introduce
+// its own type parameter, so the generic decoding these need (into
+// your own struct type, e.g. Get[User]) can't be a method.
+//
+// Get/GetOne/Set/Delete take filter any — your own struct, not a raw
+// bson.M: a single struct's non-zero fields AND together
+// (User{Active: true} -> {"active": true}); a []T slice of structs ORs
+// each element's AND-group (two Users, one per role, ORed together ->
+// {"$or": [{"role": "admin"}, {"role": "owner"}]}). Field-to-key mapping
+// uses each field's bson tag, falling back to the lowercased field
+// name. Zero-valued fields are never part of the filter — there's no
+// way to filter for an explicit zero/empty value this way.
+//
+// Aggregate remains pipeline-based (driver.Pipeline) — it's the escape
+// hatch for anything the struct-filter model can't express.
+package mongo
+
+import (
+	"context"
+	"fmt"
+	"reflect"
+	"strings"
+
+	"{{ .ModulePath }}/db"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	driver "go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+)
+
+// Conn returns a handle for the named Mongo connection (opened by
+// db.Connect() — see .env's {{ .EnvPrefix }}_DB_CONNECTIONS). ok is
+// false if no such connection exists (not yet declared, or declared as
+// a non-mongo type).
+func Conn(name string) (Connection, bool) {
+	client, ok := db.Mongo(name)
+	if !ok {
+		return Connection{}, false
+	}
+	return Connection{client: client}, true
+}
+
+// Connection is a handle to one named Mongo connection.
+type Connection struct {
+	client *driver.Client
+}
+
+// Database returns a handle to the named database within this connection.
+func (c Connection) Database(name string) Database {
+	return Database{db: c.client.Database(name)}
+}
+
+// Database is a handle to one MongoDB database.
+type Database struct {
+	db *driver.Database
+}
+
+// Collection returns a handle to the named collection within this
+// database — pass it to Get/GetOne/Set/Insert/Delete/Aggregate.
+func (d Database) Collection(name string) Collection {
+	return Collection{coll: d.db.Collection(name)}
+}
+
+// Collection is a handle to one MongoDB collection.
+type Collection struct {
+	coll *driver.Collection
+}
+
+// Get finds every document in coll matching filter, decoded into T.
+// Explicit type argument required: mongo.Get[User](ctx, coll, filter).
+func Get[T any](ctx context.Context, coll Collection, filter any) ([]T, error) {
+	q, err := filterToBSON(filter)
+	if err != nil {
+		return nil, err
+	}
+	cur, err := coll.coll.Find(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var out []T
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetOne finds the first document in coll matching filter, decoded into T.
+func GetOne[T any](ctx context.Context, coll Collection, filter any) (T, error) {
+	var out T
+	q, err := filterToBSON(filter)
+	if err != nil {
+		return out, err
+	}
+	err = coll.coll.FindOne(ctx, q).Decode(&out)
+	return out, err
+}
+
+// Set upserts doc into coll: replaces the one document matching filter,
+// or inserts doc as a new document if none matches.
+func Set[T any](ctx context.Context, coll Collection, filter any, doc T) error {
+	q, err := filterToBSON(filter)
+	if err != nil {
+		return err
+	}
+	_, err = coll.coll.ReplaceOne(ctx, q, doc, options.Replace().SetUpsert(true))
+	return err
+}
+
+// Insert inserts doc as a new document into coll.
+func Insert[T any](ctx context.Context, coll Collection, doc T) error {
+	_, err := coll.coll.InsertOne(ctx, doc)
+	return err
+}
+
+// Delete removes the one document in coll matching filter.
+func Delete(ctx context.Context, coll Collection, filter any) error {
+	q, err := filterToBSON(filter)
+	if err != nil {
+		return err
+	}
+	_, err = coll.coll.DeleteOne(ctx, q)
+	return err
+}
+
+// Aggregate runs pipeline against coll, decoding every result document
+// into T.
+func Aggregate[T any](ctx context.Context, coll Collection, pipeline driver.Pipeline) ([]T, error) {
+	cur, err := coll.coll.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var out []T
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// filterToBSON converts filter into a query document: a struct's
+// non-zero fields AND together; a slice of structs ORs each element's
+// AND-group. Anything else is an error.
+func filterToBSON(filter any) (bson.M, error) {
+	v := reflect.ValueOf(filter)
+	if v.Kind() == reflect.Slice {
+		if v.Len() == 0 {
+			return bson.M{}, nil
+		}
+		ors := make([]bson.M, 0, v.Len())
+		for i := 0; i < v.Len(); i++ {
+			m, err := structToBSON(v.Index(i))
+			if err != nil {
+				return nil, err
+			}
+			ors = append(ors, m)
+		}
+		if len(ors) == 1 {
+			return ors[0], nil
+		}
+		return bson.M{"$or": ors}, nil
+	}
+	return structToBSON(v)
+}
+
+func structToBSON(v reflect.Value) (bson.M, error) {
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("mongo: filter must be a struct or slice of structs, got %s", v.Kind())
+	}
+	t := v.Type()
+	out := bson.M{}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if fv.IsZero() {
+			continue
+		}
+		key := bsonFieldName(f)
+		if key == "-" {
+			continue
+		}
+		out[key] = fv.Interface()
+	}
+	return out, nil
+}
+
+// bsonFieldName returns a struct field's Mongo document key, from its
+// bson tag, falling back to the lowercased field name.
+func bsonFieldName(f reflect.StructField) string {
+	tag := f.Tag.Get("bson")
+	if tag == "" {
+		return strings.ToLower(f.Name)
+	}
+	name := strings.Split(tag, ",")[0]
+	if name == "" {
+		return strings.ToLower(f.Name)
+	}
+	return name
+}

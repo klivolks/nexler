@@ -1,0 +1,17 @@
+// Package protected aggregates registration of routes that require
+// authentication. `nexler create <route> -protected` adds an import and
+// a Register call here — the marker comment below is a fixed anchor kept
+// in place so this file can be edited repeatedly without breaking. Each
+// route's own handler package wraps itself with middleware.RequireAuth,
+// so this file just calls Register the same way public.go does.
+package protected
+
+import (
+	"net/http"
+)
+
+// Register wires every protected route onto mux. Called once from
+// routes/routes.go.
+func Register(mux *http.ServeMux) {
+	// nexler:routes (do not remove this marker)
+}

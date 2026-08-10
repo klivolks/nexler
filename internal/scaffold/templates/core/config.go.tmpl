@@ -1,0 +1,103 @@
+// Package core provides {{ .AppName }}'s app-wide "core" system data —
+// independent of whatever business data your own store/ packages manage.
+// Config (dynamic, runtime-mutable settings, e.g. timezone) is the first
+// of these; error log, session log, and API keys follow the same pattern
+// as a fast-follow addition.
+//
+// Provisioning (the core_config table, plus the core_config_upsert stored
+// procedure for SQL backends) is NOT done here or at app startup — run
+// `nexler init db` once per physical database (idempotent — safe to run
+// again, including against a database another scaffolded app already
+// provisioned) before calling GetSetting/SetSetting for the first time.
+package core
+
+import (
+	"context"
+	"fmt"
+
+{{- if eq .CoreDBAccessor "Mongo" }}
+	"time"
+
+	"{{ .ModulePath }}/mongo"
+{{- else }}
+	"{{ .ModulePath }}/{{ .CoreDB }}"
+{{- end }}
+)
+
+{{- if eq .CoreDBAccessor "Mongo" }}
+
+type configDoc struct {
+	Key       string    `bson:"key"`
+	Value     string    `bson:"value"`
+	UpdatedAt time.Time `bson:"updated_at"`
+}
+
+func configCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database("core").Collection("core_config"), true
+}
+
+// GetSetting returns key's current value, and whether it's set at all.
+func GetSetting(ctx context.Context, key string) (string, bool, error) {
+	coll, ok := configCollection()
+	if !ok {
+		return "", false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc, err := mongo.GetOne[configDoc](ctx, coll, configDoc{Key: key})
+	if err != nil {
+		return "", false, nil
+	}
+	return doc.Value, true, nil
+}
+
+// SetSetting upserts key's value.
+func SetSetting(ctx context.Context, key, value string) error {
+	coll, ok := configCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	return mongo.Set(ctx, coll, configDoc{Key: key}, configDoc{Key: key, Value: value, UpdatedAt: time.Now().UTC()})
+}
+{{- else }}
+
+type configRow struct {
+	Value string `db:"value"`
+}
+
+// GetSetting returns key's current value, and whether it's set at all. A
+// plain parameterized SELECT — the only dialect-specific SQL text this
+// package needs (placeholder syntax and "key" quoting both differ across
+// mysql/postgres/mssql; a single-table read has no upsert-style portability
+// problem, so it doesn't need a stored procedure).
+func GetSetting(ctx context.Context, key string) (string, bool, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return "", false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	rows, err := {{ .CoreDB }}.Query[configRow](ctx, conn, {{ printf "%q" .CoreConfigGetQuery }}, key)
+	if err != nil {
+		return "", false, err
+	}
+	if len(rows) == 0 {
+		return "", false, nil
+	}
+	return rows[0].Value, true, nil
+}
+
+// SetSetting upserts key's value, via the core_config_upsert stored
+// procedure (see `nexler init db`) — a real, dialect-native upsert. Unlike
+// the generic {{ .CoreDB }} package's Insert/Update (which can't assume
+// anything about an arbitrary caller's table), nexler owns this schema, so
+// writing a real upsert directly is safe.
+func SetSetting(ctx context.Context, key, value string) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_config_upsert", key, value)
+	return err
+}
+{{- end }}

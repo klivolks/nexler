@@ -1,0 +1,76 @@
+// Package auth implements {{ .AppName }}'s authentication. This file
+// covers signed bearer tokens (JWT, HMAC-SHA256, stdlib only — no
+// third-party dependency). See config/config.go for the signing secret
+// and middleware/auth.go for where VerifyJWT gets called on every
+// protected route.
+package auth
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"strings"
+	"time"
+
+	"{{ .ModulePath }}/config"
+)
+
+// Claims is the payload encoded into every issued JWT. Add fields as
+// your app needs them (e.g. Roles []string) — Subject/ExpiresAt are the
+// only ones nexler assumes.
+type Claims struct {
+	Subject   string `json:"sub"`
+	ExpiresAt int64  `json:"exp"`
+}
+
+// IssueJWT signs claims for subject, valid for ttl, and returns the
+// compact JWT string (base64url(header).base64url(payload).base64url(signature)).
+// Call this from your own login handler once credentials are verified.
+func IssueJWT(subject string, ttl time.Duration) (string, error) {
+	claims := Claims{Subject: subject, ExpiresAt: time.Now().Add(ttl).Unix()}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	signingInput := b64Encode(`{"alg":"HS256","typ":"JWT"}`) + "." + b64Encode(string(payload))
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sign(signingInput)), nil
+}
+
+// VerifyJWT parses and verifies a bearer token's signature and expiry,
+// returning its Claims.
+func VerifyJWT(token string) (Claims, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return Claims{}, errors.New("malformed token")
+	}
+	signingInput := parts[0] + "." + parts[1]
+	gotSig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || !hmac.Equal(gotSig, sign(signingInput)) {
+		return Claims{}, errors.New("invalid signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return Claims{}, err
+	}
+	var claims Claims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return Claims{}, err
+	}
+	if time.Now().Unix() > claims.ExpiresAt {
+		return Claims{}, errors.New("token expired")
+	}
+	return claims, nil
+}
+
+// sign HMAC-SHA256's signingInput with config.C's JWT secret.
+func sign(signingInput string) []byte {
+	mac := hmac.New(sha256.New, []byte(config.C.JWTSecret))
+	mac.Write([]byte(signingInput))
+	return mac.Sum(nil)
+}
+
+func b64Encode(s string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(s))
+}

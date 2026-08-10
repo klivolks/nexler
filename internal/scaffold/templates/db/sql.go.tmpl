@@ -1,0 +1,71 @@
+package db
+
+import (
+	"database/sql"
+	"errors"
+	"sync"
+
+{{- if .HasMySQL }}
+	_ "github.com/go-sql-driver/mysql"
+{{- end }}
+{{- if .HasPostgres }}
+	_ "github.com/jackc/pgx/v5/stdlib"
+{{- end }}
+{{- if .HasMSSQL }}
+	_ "github.com/microsoft/go-mssqldb"
+{{- end }}
+)
+
+var (
+	sqlMu    sync.Mutex
+	sqlConns = map[string]*sql.DB{}
+)
+
+// sqlDriverName maps a {{ .EnvPrefix }}_DB_<NAME>_TYPE value to the
+// database/sql driver name it's registered under (differs from the
+// -db/env TYPE spelling for postgres and mssql).
+func sqlDriverName(dbType string) string {
+	switch dbType {
+	case "postgres":
+		return "pgx"
+	case "mssql":
+		return "sqlserver"
+	default:
+		return dbType // "mysql"
+	}
+}
+
+func openSQL(name, dbType, dsn string) error {
+	conn, err := sql.Open(sqlDriverName(dbType), dsn)
+	if err != nil {
+		return err
+	}
+	if err := conn.Ping(); err != nil {
+		conn.Close()
+		return err
+	}
+
+	sqlMu.Lock()
+	sqlConns[name] = conn
+	sqlMu.Unlock()
+	return nil
+}
+
+// SQL returns the named SQL connection (type mysql, postgres, or mssql),
+// and whether it exists.
+func SQL(name string) (*sql.DB, bool) {
+	sqlMu.Lock()
+	defer sqlMu.Unlock()
+	conn, ok := sqlConns[name]
+	return conn, ok
+}
+
+func closeSQL() error {
+	sqlMu.Lock()
+	defer sqlMu.Unlock()
+	var errs []error
+	for _, conn := range sqlConns {
+		errs = append(errs, conn.Close())
+	}
+	return errors.Join(errs...)
+}

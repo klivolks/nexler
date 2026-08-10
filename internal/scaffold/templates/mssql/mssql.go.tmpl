@@ -1,0 +1,416 @@
+// Package mssql provides simplified, struct-based helpers for SQL
+// Server, built on the connections db.Connect() opens (see
+// {{ .ModulePath }}/db) — independent of the mysql/postgres/mongo
+// packages (each generates its own dialect-correct SQL; nothing is
+// shared between them). Address a table via Conn(name).Table(name):
+//
+//	users := mssql.Conn("core").Table("users")
+//	one, err := mssql.GetOne[User](ctx, users, User{ID: id})
+//
+// Get/GetOne/Insert/Update/Delete are free functions taking that
+// handle, not methods on it — Go doesn't allow a method to introduce
+// its own type parameter, so the generic decoding these need (into
+// your own struct type, e.g. Get[User]) can't be a method.
+//
+// Get/GetOne/Delete (and Update's filter) take filter any — your own
+// struct, not raw SQL: a single struct's non-zero fields AND together
+// (User{Active: true} -> "active = @p1"); a []T slice of structs ORs
+// each element's AND-group. Field-to-column mapping uses each field's
+// db tag, falling back to the lowercased field name. Zero-valued
+// fields are never part of the filter — there's no way to filter for
+// an explicit zero/empty value this way. Update and Delete refuse an
+// empty filter (would touch every row).
+//
+// Insert vs Update is intentionally asymmetric: Insert writes every
+// mapped field's current value, including zeros (it's describing a
+// complete new row); Update's doc uses non-zero fields only (a partial
+// SET patch) — an explicit zero value can't be written back via
+// Update, same limitation as filters.
+//
+// Query and Call are the escape hatches for anything the struct model
+// can't express (joins, aggregates, stored procedures, complete
+// hand-written statements like "select * from tbl_y").
+package mssql
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"reflect"
+	"strconv"
+	"strings"
+
+	"{{ .ModulePath }}/db"
+)
+
+// Conn returns a handle for the named SQL connection (opened by
+// db.Connect() — see .env's {{ .EnvPrefix }}_DB_CONNECTIONS). ok is
+// false if no such connection exists (not yet declared, or declared as
+// a non-mssql type).
+func Conn(name string) (Connection, bool) {
+	conn, ok := db.SQL(name)
+	if !ok {
+		return Connection{}, false
+	}
+	return Connection{db: conn}, true
+}
+
+// Connection is a handle to one named SQL Server connection.
+type Connection struct {
+	db *sql.DB
+}
+
+// Table returns a handle to the named table within this connection —
+// pass it to Get/GetOne/Insert/Update/Delete.
+func (c Connection) Table(name string) Table {
+	return Table{db: c.db, name: name}
+}
+
+// Table is a handle to one SQL Server table.
+type Table struct {
+	db   *sql.DB
+	name string
+}
+
+// Get finds every row in t matching filter, decoded into T. Explicit
+// type argument required: mssql.Get[User](ctx, t, filter).
+func Get[T any](ctx context.Context, t Table, filter any) ([]T, error) {
+	var zero T
+	cols, err := columnsForType(reflect.TypeOf(zero))
+	if err != nil {
+		return nil, err
+	}
+	var args []any
+	where, err := filterToWhere(filter, &args)
+	if err != nil {
+		return nil, err
+	}
+	query := "SELECT " + strings.Join(cols, ", ") + " FROM " + t.name
+	if where != "" {
+		query += " WHERE " + where
+	}
+	rows, err := t.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows[T](rows)
+}
+
+// GetOne finds the first row in t matching filter, decoded into T.
+// Returns sql.ErrNoRows if nothing matches.
+func GetOne[T any](ctx context.Context, t Table, filter any) (T, error) {
+	var zero T
+	cols, err := columnsForType(reflect.TypeOf(zero))
+	if err != nil {
+		return zero, err
+	}
+	var args []any
+	where, err := filterToWhere(filter, &args)
+	if err != nil {
+		return zero, err
+	}
+	// SQL Server has no LIMIT — TOP N goes right after SELECT instead.
+	query := "SELECT TOP 1 " + strings.Join(cols, ", ") + " FROM " + t.name
+	if where != "" {
+		query += " WHERE " + where
+	}
+	rows, err := t.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return zero, err
+	}
+	out, err := scanRows[T](rows)
+	if err != nil {
+		return zero, err
+	}
+	if len(out) == 0 {
+		return zero, sql.ErrNoRows
+	}
+	return out[0], nil
+}
+
+// Insert inserts doc as a new row into t — every mapped field's current
+// value is written, zeros included.
+func Insert[T any](ctx context.Context, t Table, doc T) error {
+	cols, placeholders, args, err := insertColumns(doc)
+	if err != nil {
+		return err
+	}
+	query := "INSERT INTO " + t.name + " (" + strings.Join(cols, ", ") + ") VALUES (" + strings.Join(placeholders, ", ") + ")"
+	_, err = t.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+// Update sets every non-zero field of doc (a partial patch — zero
+// fields are left untouched) on every row in t matching filter. Refuses
+// an empty filter (would update every row) and a doc with no non-zero
+// fields (nothing to set).
+func Update[T any](ctx context.Context, t Table, filter any, doc T) error {
+	var args []any
+	set, err := updateSet(doc, &args)
+	if err != nil {
+		return err
+	}
+	if len(set) == 0 {
+		return fmt.Errorf("mssql: doc has no non-zero fields to update")
+	}
+	where, err := filterToWhere(filter, &args)
+	if err != nil {
+		return err
+	}
+	if where == "" {
+		return fmt.Errorf("mssql: refusing to update without a filter (would update every row)")
+	}
+	query := "UPDATE " + t.name + " SET " + strings.Join(set, ", ") + " WHERE " + where
+	_, err = t.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+// Delete removes every row in t matching filter. Refuses an empty
+// filter (would delete every row).
+func Delete(ctx context.Context, t Table, filter any) error {
+	var args []any
+	where, err := filterToWhere(filter, &args)
+	if err != nil {
+		return err
+	}
+	if where == "" {
+		return fmt.Errorf("mssql: refusing to delete without a filter (would delete every row)")
+	}
+	query := "DELETE FROM " + t.name + " WHERE " + where
+	_, err = t.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+// Query runs a complete, hand-written SQL statement (e.g.
+// "select * from tbl_y"), decoding every result row into T — the
+// escape hatch for anything Get's struct-filter model can't express
+// (joins, aggregates, ...).
+func Query[T any](ctx context.Context, conn Connection, query string, args ...any) ([]T, error) {
+	rows, err := conn.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows[T](rows)
+}
+
+// Call invokes the named stored procedure with args, decoding any
+// returned rows into T. "Provision" only — a single result set, not a
+// general multi-result-set stored-procedure system.
+//
+// Unlike mysql/postgres, this doesn't build "EXEC proc ..." text: the
+// go-mssqldb driver treats a query string that's just a procedure name
+// as an RPC call, with args bound positionally (@p1, @p2, ...) —
+// see https://github.com/microsoft/go-mssqldb.
+func Call[T any](ctx context.Context, conn Connection, proc string, args ...any) ([]T, error) {
+	return Query[T](ctx, conn, proc, args...)
+}
+
+// filterToWhere converts filter into a parameterized WHERE clause
+// (without the "WHERE " keyword), appending its values to args (shared
+// with any other clause in the same statement, e.g. Update's SET, so
+// @pN numbering stays continuous across the whole query): a struct's
+// non-zero fields AND together; a slice of structs ORs each element's
+// AND-group. Empty filter (zero-value struct, or nil/empty slice)
+// yields "" (no condition) — callers that shouldn't allow an unbounded
+// statement check for that themselves.
+func filterToWhere(filter any, args *[]any) (string, error) {
+	v := reflect.ValueOf(filter)
+	if v.Kind() == reflect.Slice {
+		var clauses []string
+		for i := 0; i < v.Len(); i++ {
+			c, err := structToWhere(v.Index(i), args)
+			if err != nil {
+				return "", err
+			}
+			if c == "" {
+				continue
+			}
+			clauses = append(clauses, "("+c+")")
+		}
+		return strings.Join(clauses, " OR "), nil
+	}
+	return structToWhere(v, args)
+}
+
+func structToWhere(v reflect.Value, args *[]any) (string, error) {
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return "", fmt.Errorf("mssql: filter must be a struct or slice of structs, got %s", v.Kind())
+	}
+	t := v.Type()
+	var conds []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if fv.IsZero() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col == "-" {
+			continue
+		}
+		*args = append(*args, fv.Interface())
+		conds = append(conds, col+" = @p"+strconv.Itoa(len(*args)))
+	}
+	return strings.Join(conds, " AND "), nil
+}
+
+// insertColumns lists doc's mapped columns/placeholders/values — every
+// field, zeros included.
+func insertColumns(doc any) (cols, placeholders []string, args []any, err error) {
+	v := reflect.ValueOf(doc)
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, nil, nil, fmt.Errorf("mssql: doc must be a struct, got %s", v.Kind())
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col == "-" {
+			continue
+		}
+		cols = append(cols, col)
+		args = append(args, v.Field(i).Interface())
+		placeholders = append(placeholders, "@p"+strconv.Itoa(len(args)))
+	}
+	return cols, placeholders, args, nil
+}
+
+// updateSet lists doc's non-zero mapped columns for a SET clause,
+// appending values to args (see filterToWhere for why args is shared).
+func updateSet(doc any, args *[]any) ([]string, error) {
+	v := reflect.ValueOf(doc)
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("mssql: doc must be a struct, got %s", v.Kind())
+	}
+	t := v.Type()
+	var set []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if fv.IsZero() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col == "-" {
+			continue
+		}
+		*args = append(*args, fv.Interface())
+		set = append(set, col+" = @p"+strconv.Itoa(len(*args)))
+	}
+	return set, nil
+}
+
+// columnsForType lists t's mapped columns, for building an explicit
+// SELECT column list (rather than "SELECT *").
+func columnsForType(t reflect.Type) ([]string, error) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("mssql: T must be a struct, got %s", t.Kind())
+	}
+	var cols []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col == "-" {
+			continue
+		}
+		cols = append(cols, col)
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("mssql: %s has no exported/mapped fields", t.Name())
+	}
+	return cols, nil
+}
+
+// scanRows decodes every row into T, matching each column name (via
+// rows.Columns()) to T's fields by db tag, falling back to the
+// lowercased field name. Columns with no matching field are discarded
+// (safe for Query/Call, which may return columns beyond what T maps).
+func scanRows[T any](rows *sql.Rows) ([]T, error) {
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	var out []T
+	for rows.Next() {
+		var v T
+		ptrs, err := columnPointers(&v, cols)
+		if err != nil {
+			return nil, err
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// columnPointers returns, for each name in cols, a pointer into v's
+// matching field — or a discard target for columns with no match.
+func columnPointers(v any, cols []string) ([]any, error) {
+	rv := reflect.ValueOf(v).Elem()
+	if rv.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("mssql: scan target must be a struct, got %s", rv.Kind())
+	}
+	fieldByCol := map[string]int{}
+	t := rv.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fieldByCol[dbFieldName(f)] = i
+	}
+
+	ptrs := make([]any, len(cols))
+	for i, col := range cols {
+		if idx, ok := fieldByCol[col]; ok {
+			ptrs[i] = rv.Field(idx).Addr().Interface()
+		} else {
+			var discard any
+			ptrs[i] = &discard
+		}
+	}
+	return ptrs, nil
+}
+
+// dbFieldName returns a struct field's column name, from its db tag,
+// falling back to the lowercased field name.
+func dbFieldName(f reflect.StructField) string {
+	tag := f.Tag.Get("db")
+	if tag == "" {
+		return strings.ToLower(f.Name)
+	}
+	name := strings.Split(tag, ",")[0]
+	if name == "" {
+		return strings.ToLower(f.Name)
+	}
+	return name
+}

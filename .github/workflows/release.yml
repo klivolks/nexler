@@ -1,0 +1,149 @@
+name: Release
+
+# Fires when a GitHub Release is published (Releases -> Draft a new
+# release -> Publish release) — NOT on every tag push. The `if:` below
+# additionally requires that release to target the `release` branch
+# specifically (the dropdown labeled "Target" when drafting it): a
+# release drafted against any other branch is left alone entirely, the
+# whole workflow (including both installer jobs, via their `needs:`)
+# skips rather than running. github.event.release.target_commitish is
+# the branch name (or, if the tag already existed, whatever branch it
+# was actually created from) GitHub recorded for that release.
+#
+# Three jobs: goreleaser cross-compiles the 4 raw binaries and uploads
+# them (plus checksums/changelog) onto that already-existing release
+# (pure-Go cross-compilation needs no native OS tooling, so one Linux
+# runner covers all 4 combos — see .goreleaser.yml's release.mode for why
+# it attaches rather than creates); the two installer jobs each need
+# their own native OS (Inno Setup's ISCC only runs on Windows, pkgbuild/
+# productbuild only run on macOS) and attach their installer to the same
+# release.
+#
+# Every job also cosign-signs what it uploads (checksums.txt in the
+# goreleaser job — see .goreleaser.yml's `signs:` for why that alone
+# transitively covers the 4 raw archives; each installer directly in its
+# own job, since those aren't covered by checksums.txt at all). All three
+# read two repo secrets: COSIGN_NEXLER_KEY (the full contents of the
+# locally-generated, gitignored cosign.key file) and NEXLER_PASSWORD (the
+# password that encrypts it) — see CLAUDE.md's "Releasing" section. Named
+# with a nexler-specific prefix/suffix deliberately, since this project's
+# signing key is its own, not shared with any other repo/app under the
+# same account. cosign.pub (the public key) is committed at the repo root
+# and used to verify a downloaded release afterward.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    if: github.event.release.target_commitish == 'release'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs full history for the changelog
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: sigstore/cosign-installer@v3
+      - name: Write cosign private key
+        run: printf '%s' "$COSIGN_KEY" > cosign.key
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_NEXLER_KEY }}
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_NEXLER_PASSWORD }}
+      - name: Remove cosign private key
+        if: always()
+        run: rm -f cosign.key
+
+  windows-installer:
+    runs-on: windows-latest
+    needs: goreleaser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: sigstore/cosign-installer@v3
+      - name: Derive version from tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build nexler.exe for amd64 and arm64
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p installer/windows/payload/amd64 installer/windows/payload/arm64
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+            -ldflags "-s -w -X main.cliVersion=$VERSION" \
+            -o installer/windows/payload/amd64/nexler.exe ./cmd/nexler
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build \
+            -ldflags "-s -w -X main.cliVersion=$VERSION" \
+            -o installer/windows/payload/arm64/nexler.exe ./cmd/nexler
+      - name: Compile installer with Inno Setup
+        shell: cmd
+        run: |
+          ISCC.exe installer\windows\nexler.iss /DVersion=%VERSION%
+      - name: Sign installer with cosign
+        shell: bash
+        run: |
+          set -eu
+          printf '%s' "$COSIGN_KEY" > cosign.key
+          EXE=$(ls installer/windows/*.exe)
+          cosign sign-blob --key cosign.key --bundle "$EXE.bundle" --yes "$EXE"
+          rm -f cosign.key
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_NEXLER_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_NEXLER_PASSWORD }}
+      - name: Upload installer to the release
+        shell: bash
+        run: |
+          set -eu
+          gh release upload "$GITHUB_REF_NAME" installer/windows/*.exe installer/windows/*.exe.bundle --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  macos-installer:
+    runs-on: macos-latest
+    needs: goreleaser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: sigstore/cosign-installer@v3
+      - name: Derive version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build nexler for amd64 and arm64
+        run: |
+          set -eu
+          mkdir -p installer/macos/payload
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
+            -ldflags "-s -w -X main.cliVersion=$VERSION" \
+            -o installer/macos/payload/nexler-amd64 ./cmd/nexler
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-s -w -X main.cliVersion=$VERSION" \
+            -o installer/macos/payload/nexler-arm64 ./cmd/nexler
+      - name: Build the .pkg
+        run: bash installer/macos/build-pkg.sh "$VERSION"
+      - name: Sign installer with cosign
+        run: |
+          set -eu
+          printf '%s' "$COSIGN_KEY" > cosign.key
+          cosign sign-blob --key cosign.key --bundle installer/macos/Nexler.pkg.bundle --yes installer/macos/Nexler.pkg
+          rm -f cosign.key
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_NEXLER_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_NEXLER_PASSWORD }}
+      - name: Upload installer to the release
+        run: gh release upload "$GITHUB_REF_NAME" installer/macos/Nexler.pkg installer/macos/Nexler.pkg.bundle --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

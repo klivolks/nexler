@@ -1,0 +1,901 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+`nexler` is a scaffolding CLI (like `django-admin startproject` or `rails new`) for a Go web
+framework of the same name. It does not run applications itself — it generates the
+handlers/services/store/models project layout that apps built on nexler follow. Every template
+file is embedded into the binary via `go:embed` (see `internal/scaffold/templates.go`), so
+scaffolding itself — everything under `internal/scaffold`, driven by `create app`/`create <route>`/
+`init kpass`/`init kgate` — is pure local file I/O: no network access, no shelling out to git or
+any other external process. `-db` (see "Database connections" below) is a *scaffold-time* choice
+with a *build-time* consequence, not an exception to this: the generated app gets real
+third-party driver dependencies in its `go.mod`, needing one `go mod tidy` (network access, on the
+user's machine) before its first build — nexler itself still never touches the network to produce
+the app.
+
+Two commands are real exceptions, where nexler's own process does impure work beyond local files —
+both self-contained in `cmd/nexler`, deliberately outside `internal/scaffold`, so its "pure,
+embed-only" scaffolding claim above stays literally true: `nexler init db` (a live database
+connection, to provision the "core" schema — see "`nexler init db`" below) and `nexler add` (a
+live `npm install`, to vendor a static asset package — see "`nexler add`" below). Both are
+explicit, separately-invoked commands — never run implicitly by `create app`/`create <route>`.
+
+## Commands
+
+```
+go build -o nexler.exe ./cmd/nexler   # build the CLI
+go run ./cmd/nexler <args>            # run without building
+go vet ./...                          # static checks
+```
+
+There are no automated tests or Makefile in this repo currently — verify changes by building and
+running the CLI against a scratch directory, e.g.:
+
+```
+go run ./cmd/nexler create app demo -dir /tmp/scratch
+cd /tmp/scratch/demo && go build ./...
+go run ./cmd/nexler create /purchase/verify -module purchase -submodule verify -methods GET,POST -body json
+```
+
+CLI usage (also printed by `nexler help`):
+
+```
+nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>]
+nexler create <route> -module <name> [-submodule <name>] [-dir <app-dir>] [-protected] [-methods GET,POST] [-body json] [-response json]
+nexler add <package>[@version] [-dir <app-dir>] [-as <name>]
+nexler version
+```
+
+## Releasing
+
+Building/releasing the nexler CLI itself (not any app it scaffolds) is deliberately **not** a raw
+tag-push pipeline — it only fires when a human publishes a GitHub Release targeting the `release`
+branch specifically (Releases → Draft a new release → pick/create a tag → **Target: release** →
+Publish release). `.github/workflows/release.yml` listens for `release: types: [published]`, and
+its `goreleaser` job's `if: github.event.release.target_commitish == 'release'` skips the *entire*
+pipeline (both installer jobs cascade-skip via their `needs: goreleaser`) for a release drafted
+against any other branch — so cutting a release from `main` or a feature branch by mistake does
+nothing, silently and safely, rather than half-publishing artifacts.
+
+Once that gate passes: `goreleaser` (`.goreleaser.yml` — cross-compiles windows/darwin ×
+amd64/arm64, checksums, an auto-generated changelog) uploads onto the release that already exists
+(the human just published it — `release.mode: keep-existing` is what makes goreleaser attach
+rather than try to create a competing one for the same tag; `replace_existing_artifacts: true`
+lets a re-run after a failure overwrite instead of erroring), then two more jobs build and attach
+the platform installers to that same release: `installer/windows/nexler.iss` (Inno Setup, on
+`windows-latest`) and `installer/macos/build-pkg.sh` (`pkgbuild`/`productbuild`, on
+`macos-latest`) — see each `installer/*/BUILDING.md` for local build/test instructions and known
+limitations (no code-signing cert exists yet, so both installers hit first-run OS friction —
+SmartScreen on Windows, a Gatekeeper block on macOS). Local dev builds are unaffected by any of
+this: `go build -o nexler.exe ./cmd/nexler` still works exactly as documented above;
+`cmd/nexler/main.go`'s `cliVersion` is a package-level `var` specifically so release builds can
+override it via `-ldflags "-X main.cliVersion=<version>"` while a plain `go build` keeps its
+literal fallback.
+
+### Artifact signing (cosign)
+
+Every job also [cosign](https://github.com/sigstore/cosign)-signs what it uploads, using a
+key-pair (not keyless/OIDC signing — a deliberate choice for a small project, no Fulcio/OIDC
+identity-provider wiring needed): the `goreleaser` job signs `checksums.txt`
+(`.goreleaser.yml`'s `signs:` — signing just the checksum file, not each of the 4 raw archives
+individually, is the standard cosign+goreleaser pattern, since verifying it and then checking each
+archive's own sha256 against it transitively covers everything with one signature); each installer
+job signs its own installer directly (`nexler-setup-*.exe`, `Nexler.pkg`), since those are built
+outside goreleaser and aren't covered by `checksums.txt` at all. Output is a `<file>.bundle`
+Sigstore bundle (signature + public-key hint + a Rekor transparency-log entry, all in one JSON
+document) — **not** a bare `.sig` file: cosign v3's `sign-blob` dropped the old
+`--output-signature`/`--output-certificate` flags entirely in favor of `--bundle`, which is also
+why signing requires real network access (it logs to the public Rekor transparency log by
+default) — reasonable and expected for an open-source project's release artifacts, not a bug to
+suppress.
+
+`cosign.key` (the private key) and its password are **not** in this repo — generated once locally
+(`cosign generate-key-pair`) and deliberately gitignored (see `.gitignore`'s comment). CI reads
+them from two GitHub Actions repository secrets, already created (Settings → Secrets and
+variables → Actions), named with a nexler-specific prefix/suffix rather than a generic `COSIGN_*`
+— deliberate, since this project's signing key is its own, not shared with any other repo/app
+under the same account (see the security tradeoff discussion this was decided from: a shared
+cross-project key means one leak compromises every project signed with it):
+- `COSIGN_NEXLER_KEY` — the full contents of the local `cosign.key` file, pasted as-is.
+- `NEXLER_PASSWORD` — the password that encrypts it. Read into each job's environment under the
+  literal name `COSIGN_PASSWORD` (renamed at the `env:` step level, not the secret name itself) —
+  cosign specifically looks for a variable with that exact name to auto-decrypt the key without an
+  interactive prompt; each job also deletes its own written-out `cosign.key` file immediately after
+  signing, defense-in-depth on top of the runner already being ephemeral.
+
+`cosign.pub` (the public key) **is** committed at the repo root — it's what anyone verifying a
+downloaded release needs, and has no secrecy requirement. To verify, e.g., the checksums:
+
+```
+cosign verify-blob --bundle checksums.txt.bundle --key cosign.pub checksums.txt
+```
+
+(then check each downloaded archive's own `sha256sum` against the matching line in
+`checksums.txt`) — or, for an installer, `cosign verify-blob --bundle nexler-setup-1.2.3.exe.bundle
+--key cosign.pub nexler-setup-1.2.3.exe` directly.
+
+Licensed MIT (`LICENSE`, repo root) — both installers show it as its own wizard page
+(`nexler.iss`'s `LicenseFile=`; `distribution.xml.tmpl`'s `<license>`), and `build-pkg.sh` copies it
+alongside `README.md`/`welcome.html` into the macOS build's resources. `installer/nexler-icon.svg`
+is Nexler's own app icon (a plain "N" monogram, deliberately distinct from
+`internal/scaffold/templates/templates/static/logo.svg`, which is the generic starter logo
+scaffolded *into apps built with* nexler, not nexler itself) — `installer/windows/nexler.ico` and
+`installer/macos/nexler-1024.png` are both regenerated from it via `build/gen-icons` (see each
+`installer/*/BUILDING.md`'s "Regenerating..." section). The Windows wizard's own banner/corner
+images (`installer/windows/wizard-image.png`, `wizard-small-image.png` — Inno's recommended
+192x386/76x80 for `WizardStyle=modern`, set via `nexler.iss`'s `WizardImageFile`/
+`WizardSmallImageFile`) come from two more dedicated sources, `installer/wizard-banner.svg`/
+`wizard-small.svg`, each authored at its own exact target aspect ratio rather than stretching the
+square app icon into a non-square slot — `build/gen-icons` was extended (its `<width>x<height>`
+size argument form) specifically to rasterize these non-square shapes without distortion.
+
+Every flag above is optional in a stronger sense than usual: any flag not passed on the command
+line is asked for interactively instead (`cmd/nexler/prompt.go`), Enter accepting the same default
+shown in this usage text — so passing every flag (scripts/CI) is fully non-interactive, and passing
+none walks through a Q&A. `runCreateApp`/`runCreateRoute` use `fs.Visit` after `fs.Parse` to tell
+which flags were actually set vs left at their zero value, and only prompt for the ones that
+weren't. `-ui`/`-response` prompt as "ui/api?" (`promptUIOrAPI`); `-auth` prompts as an N-way
+choice (`promptChoice`); `-db` is gated behind its own `promptBool("Use a database?", false)` —
+defaulting to *no* database, since basic/`-ui` apps don't need one — and only asks which type(s)
+(the plain free-text `prompt()` helper, comma-separated, same pattern as `-methods`, defaulting to
+`"mongo"`) if that gate is answered yes; `-core` (which `-db` type is the app's default
+connection) only prompts when `-db` selected more than one type — automatic otherwise. The
+request-body-shape prompt (routes), the remember-me prompt, and the core-database prompt
+(both apps) are all skipped entirely when they wouldn't apply (GET-only methods; `-auth`
+not including session; only one `-db` type selected) — never ask a question whose answer
+can't matter.
+
+## Architecture
+
+### Two embedded template trees, two code paths
+
+- `internal/scaffold/templates/` (embedded as `templateFS`) — the full skeleton for a brand-new
+  app: `main.go`, `routes/`, `middleware/`, `openapi/`, `handlers/home/`, static assets. Driven by
+  `scaffold.NewApp` in `scaffold.go`, walking the tree with `fs.WalkDir` and rendering every
+  `*.tmpl` file through `text/template`.
+- `internal/scaffold/route_templates/` (embedded as `routeTemplateFS`) — per-route stubs
+  (handler/service/store/model) plus three *fragment* templates (`handler_methods.tmpl`,
+  `register_methods.tmpl`, `model_methods.tmpl`) used to extend an existing route. Driven by
+  `scaffold.NewRoute` / `addMethodsToExistingRoute` in `route.go`.
+
+Only files ending in `.tmpl` are parsed by `text/template` (see `processFile` in `scaffold.go`);
+everything else is copied through verbatim. This matters because generated Go source can contain
+a literal `{{` (e.g. `[]map[string][]string{{"a": nil}}`) that would otherwise be misparsed as a
+template action. `gomod.tmpl` is special-cased to `go.mod` on output — a real `go.mod` can't live
+inside `templates/` because the Go toolchain would treat it as a module boundary and break the
+`go:embed` of the nexler CLI itself. `dotenv.tmpl` is likewise special-cased to `.env` — a literal
+`.env.tmpl` would never be embedded in the first place, since `go:embed` silently excludes any file
+whose name starts with `.` (or `_`). Both special cases live in `destPath` in `scaffold.go`.
+
+All rendered output is normalized to LF regardless of source line endings (`render()` in
+`scaffold.go`), because the route-wiring logic below depends on exact-byte anchor matching.
+
+### Generated app layout
+
+Apps produced by `nexler create app` follow a fixed layered structure (mirrors "kGate"'s proven
+split, per the `scaffold` package doc comment):
+
+```
+handlers/    HTTP handlers — decode request, (TODO) call service, write response
+services/    business logic, orchestration
+store/       persistence via the Store interface
+models/      request/response and domain structs (struct-tag validated)
+middleware/  auth, logging, recovery, etc.
+routes/      routes.go (calls public+protected Register once from main.go)
+             routes/public/public.go, routes/protected/protected.go — aggregators
+openapi/     in-process OpenAPI registry, reflects Request/Response struct field
+             (json) tags into /openapi.json at request time — no file on disk to
+             keep in sync
+request/     decode helpers a handler calls into its Request struct
+response/    JSON envelope helpers a handler calls to write its result
+apiclient/   fetch/axios-style helpers (Get/Post/Put/Delete) for calling other
+             HTTP APIs — see "The apiclient package" below
+config/      loads {APPNAME}_-prefixed env vars (+ optional .env) once, at
+             package-init time — see "Runtime configuration" below
+.env         editable starting point for the app's env vars (HOST/PORT, and
+             JWT_SECRET if -auth jwt|both, and a pre-populated "core" DB
+             connection — DB_CONNECTIONS/DB_CORE_TYPE/DB_CORE_DSN — if -db
+             is set)
+auth/        only generated for -auth jwt|session|both — see "Authentication"
+             below
+db/          only generated for -db mongo|mysql|postgres|mssql (any subset)
+             — see "Database connections" below
+core/        only generated when -db is set — app-wide system data (Config,
+             error log, and the kgate channel registry today; session log/
+             API keys planned) — see "The core package" below
+kpass/       only added by `nexler init kpass`, run separately after
+             `create app` — see "nexler init kpass" below
+kgate/       only added by `nexler init kgate`, run separately after
+             `create app` (needs -db) — see "nexler init kgate" below
+```
+
+`main.go` calls `routes.Register(mux)` once and is **never edited again** after the initial
+scaffold — new routes are added purely by editing `routes/public/public.go` or
+`routes/protected/protected.go`, which `nexler create <route>` does automatically.
+
+### Request decoding and response envelope
+
+Every generated handler method decodes into its Request struct via one `request` package call —
+precomputed per method as `routeMethod.DecodeCall` in `route.go` (`decodeCall`), so
+`handler.go.tmpl`/`handler_methods.tmpl` just emit it rather than branching on verb/body kind:
+`DecodeQuery` for GET (always query-params-only, regardless of `-body`), else whichever of
+`DecodeJSON`/`DecodeForm`/`DecodeMultipart` matches `-body`. `DecodeForm`/`DecodeMultipart`/
+`DecodeQuery` populate a struct's exported fields via reflection, matched by each field's `json`
+tag (the same tag `openapi`'s schema reflection reads) — string/bool/int/uint/float kinds and
+slices of those are supported; a `*multipart.FileHeader` field is populated from an uploaded file
+of the same name instead.
+
+Every handler writes its result via the `response` package. By default (`-response json`, every
+existing route) that means the JSON envelope: `response.JSON(w, status, v)` → `{"data": v}`,
+`response.Error(w, r, status, msg)` → `{"error": msg}`. `Error` takes the request (not just the
+response writer) because on a `-db` app it also auto-logs every 5xx it writes to the core database
+via `core.LogError`, best-effort — the same logging `middleware.Recover` already does for a
+recovered panic (see "Database connections" below). 4xx responses (e.g. the standard 400 a handler
+writes on a decode/validation failure) are never logged — that's the client's fault, not the
+server's. `openapi.Spec` documents the envelope shape: a `RespType`'s schema is nested under `data`
+in the `"200"` response, and every operation gets a shared `Error` component schema referenced as
+its `"default"` response — see the `schemas["Error"]` entry and the `data`-wrapping in
+`openapi.go.tmpl`'s response-building block. Keep these three in sync if either changes: `request`'s
+decode helpers, `response`'s envelope shape, and `openapi.go.tmpl`'s documented shape.
+
+Handlers only decode-then-respond; the actual service call is left as a `// TODO: call <pkg>'s
+service with req` comment, since `services/<pkg>.go`'s single `Do<Name>()` function isn't
+parameterized per HTTP method (unlike handlers/models) — wiring it in is a separate, not-yet-done
+step.
+
+### The `apiclient` package
+
+`apiclient/apiclient.go.tmpl` provides fetch/axios-style helpers for calling other HTTP
+APIs — `Get(ctx, url, headers)`, `Post(ctx, url, headers, body)`, `Put(ctx, url, headers,
+body)`, `Delete(ctx, url, headers)`, all returning `(*Response, error)`. Unlike
+`request`/`response` (decoding/writing *this* app's own HTTP traffic), `apiclient` is for
+the reverse direction — calling out to other services, the `apiclient` layer
+`scaffold` package's own doc comment already names alongside `store`/`broker`. Always
+generated (pure stdlib `net/http`, no third-party dependency), so unlike `db`/`auth`
+there's no flag gating it — every app gets it.
+
+Every call is synchronous by design ("await" semantics): the shared internal `do()`
+builds the request, calls the package-level `Client` (`&http.Client{Timeout: 120 *
+time.Second}`, swappable), then `defer resp.Body.Close()` + `io.ReadAll`s the body
+*before* returning — the caller only ever sees a `*Response{StatusCode, Header, Body
+[]byte}` (plus a `.JSON(v any) error` decode helper), never an `*http.Response` it could
+forget to close. This is what "honour close connection after data is received" means in
+Go terms: the call blocks until the body is fully drained and the underlying connection
+is released back to `Client`'s pool for keep-alive reuse, rather than leaving that to a
+caller-managed `Close()` that's easy to forget or defer too late.
+
+`Post`/`Put`'s `body any` is encoded before sending: `[]byte`/`string` are sent verbatim
+(no `Content-Type` guess); anything else is `json.Marshal`-ed with `Content-Type:
+application/json` set unless `headers` already sets one; `nil` means no body. `headers`
+(a plain `map[string]string`, nil is fine) is applied after any inferred `Content-Type`,
+so an explicit header always wins over the inferred one.
+
+### Runtime configuration (`config`, `.env`)
+
+`main.go` gets its listen address from `config.C.Addr()` instead of a hardcoded
+`const addr`. `config.C` (`config/config.go`, package-level `var C = load()`, so it's
+ready before `main()` runs with no explicit call needed) currently holds just `Host`/`Port`,
+read from two env vars namespaced per-app as `{APPNAME}_HOST`/`{APPNAME}_PORT` (e.g. `-module
+my-app` → `MY_APP_HOST`/`MY_APP_PORT`) — the prefix is computed once, at scaffold time, by
+`envPrefix` in `scaffold.go` (uppercases letters, keeps digits, replaces everything else with
+`_`) and baked into `config.go.tmpl`/`dotenv.tmpl` as `{{ .EnvPrefix }}`. This is meant to grow:
+the package doc comment on `config.go.tmpl` says more settings (flags, etc.) land here later as
+`Config` gains fields — don't reach for a different mechanism for the next env-driven setting,
+extend `Config`/`load()` instead.
+
+`.env` (scaffolded at the app root, `{APPNAME}_HOST=` / `{APPNAME}_PORT=8080` — empty `HOST`
+means "all interfaces", preserving the old hardcoded `:8080` default) is read by `config.go`'s
+hand-rolled `loadDotEnv` (`bufio.Scanner` over `KEY=VALUE` lines — no third-party dependency,
+consistent with the generated `go.mod` having none). A key already present in the real
+environment is never overwritten by `.env` — real env vars always win, so `.env` is just a
+committed-or-not local default, not an override mechanism.
+
+### Authentication (`-auth none|jwt|session|both`, `-remember-me`)
+
+`middleware.RequireAuth` — what every `-protected` route wraps its handlers in — is
+generated differently depending on the app-creation-time `-auth` choice
+(`middleware/auth.go.tmpl` branches on `.AuthKind`, same `{{if}}`-per-mode style
+`handler.go.tmpl` already uses for `HTMLResponse`):
+
+- `none` (default): functionally identical to the original stub (only its doc comment
+  now points at `-auth`) — checks that an `X-Api-Key` header and a `Bearer` token were
+  *sent*, never verifies either. Existing apps/behavior are untouched by this feature.
+- `jwt`: generates `auth/jwt.go.tmpl` → `auth/jwt.go` — `IssueJWT`/`VerifyJWT`, a
+  minimal, correct HS256 JWT (stdlib-only: `crypto/hmac` + `crypto/sha256`, no
+  dependency — deliberately *not* JWE, which would mean either hand-rolled encryption
+  or breaking nexler's zero-dependency precedent). `RequireAuth` checks the
+  `Authorization: Bearer <token>` header via `VerifyJWT`.
+- `session`: generates `auth/session.go.tmpl` → `auth/session.go` — an **in-memory**
+  session store (`map[string]sessionEntry` behind a mutex) plus `StartSession`
+  (issues an `HttpOnly`/`SameSite=Lax` cookie named `{{.EnvPrefix}}_session`),
+  `SessionFromRequest`, `EndSession`. Same documented scope limitation as
+  `store.go.tmpl`'s stub: sessions are lost on restart and aren't shared across
+  instances — swap the map for a real store before scaling beyond one instance.
+  `RequireAuth` checks the session cookie via `SessionFromRequest`.
+- `both`: generates *both* `auth/jwt.go` and `auth/session.go`; `RequireAuth` tries the
+  bearer token first, falls back to the session cookie — so the same protected route
+  serves API clients (bearer) and browser/UI clients (session cookie) at once.
+
+`scaffold.go`'s `NewApp` picks which `auth/*.go.tmpl` files actually get walked: the
+whole `auth/` directory is skipped via `fs.SkipDir` when `AuthKind == "none"`; otherwise
+whichever of `jwt.go.tmpl`/`session.go.tmpl` isn't needed is skipped per-file (same
+technique `-ui` already uses to skip the unused embedded homepage). The JWT secret
+(`generateJWTSecret`, `crypto/rand`, 32 bytes) is generated once per `nexler create app`
+call and threaded through `templateData.JWTSecret` into both `config.go.tmpl` (a new
+conditional `Config.JWTSecret` field, env var `{{.EnvPrefix}}_JWT_SECRET`) and
+`dotenv.tmpl` (pre-filled, so a `-auth jwt`/`both` app works with zero manual setup).
+
+`-remember-me` only has an effect when `-auth` includes session: it adds a `rememberMe
+bool` parameter to `StartSession` that swaps its default 24h lifetime for 30 days — the
+simple form (one cookie, one lifetime toggle), not a separate rotating remember-token.
+It's silently ignored (not an error) when `-auth` is `none`/`jwt`, same as `-body` being
+irrelevant-but-harmless for GET-only routes.
+
+Deliberately **not** generated: any `/login`/`/logout` route. `-auth` only wires the
+primitives + `RequireAuth`; you call `auth.IssueJWT`/`auth.StartSession` from your own
+login handler (scaffolded separately via `nexler create /login -module ...`) once
+credentials are verified — matching every other generated handler's `// TODO: call
+<pkg>'s service` style, rather than generating a business-flavored route.
+
+### Database connections (`-db mongo,mysql,postgres,mssql`)
+
+`-db` is deliberately scoped to connection lifecycle only — opening at startup, closing
+at shutdown. No query builder, ORM, or migrations; call methods directly on the
+`*sql.DB`/`*mongo.Client` that `db.SQL`/`db.Mongo` return. It's also the **first** nexler
+feature needing real third-party dependencies: there's no stdlib driver for MongoDB or
+any SQL server, unlike the JWT work, where hand-rolling was the safe stdlib-only choice.
+
+Two separate decisions, both made at `nexler create app` time:
+- **Which driver types are compiled in** — `-db`'s value, any comma-separated subset of
+  `mongo`/`mysql`/`postgres`/`mssql`. This governs which `db/*.go.tmpl` files
+  `scaffold.go`'s `NewApp` walks (same per-file skip technique `-auth` already uses for
+  `auth/jwt.go.tmpl`/`auth/session.go.tmpl` — the whole `db/` dir is `fs.SkipDir`-skipped
+  when `-db` is empty) and which blank driver imports `db/sql.go.tmpl` emits:
+  `github.com/go-sql-driver/mysql` (mysql), `github.com/jackc/pgx/v5/stdlib` (postgres —
+  used purely as a `database/sql` driver via pgx's stdlib shim, not its richer native
+  API, so one manager handles all three SQL flavors uniformly), `github.com/microsoft/go-mssqldb`
+  (mssql, registers as driver name `"sqlserver"` — see `sqlDriverName` in `sql.go.tmpl`),
+  and `go.mongodb.org/mongo-driver/v2` (mongo, architecturally separate from
+  `database/sql` — its own file, `db/mongo.go.tmpl`).
+- **Which named connections actually exist, and where they point** — deliberately *not*
+  decided at scaffold time. This is pure `.env`/runtime config, by design (so adding or
+  removing a connection is never a re-scaffold): `{APPNAME}_DB_CONNECTIONS` lists
+  comma-separated connection names; each name gets its own `_TYPE` (must be one of the
+  types selected via `-db`) and `_DSN`. `db.Connect()` (called from `main()` at startup)
+  reads this convention and fails fast — returns an error immediately — if any listed
+  connection can't be opened, rather than failing lazily on first query.
+
+`db/db.go.tmpl` is the orchestrator (generated whenever `-db` is non-empty): `Connect()`
+dispatches each declared connection to `openSQL`/`openMongo` by its `_TYPE`; `Close()`
+calls `closeSQL()`/`closeMongo()` (whichever exist) and joins any errors via
+`errors.Join`. `db/sql.go.tmpl` and `db/mongo.go.tmpl` each keep their own
+`map[string]*sql.DB`/`map[string]*mongo.Client` behind a mutex, populated by
+`open*`/read by `SQL(name)`/`Mongo(name)`/drained by `close*`.
+
+`main.go.tmpl` branches on `.HasDB`: when `-db` is set, `main.go` gains `db.Connect()` at
+startup (fatal on error) and a graceful-shutdown sequence (SIGINT/SIGTERM →
+`http.Server.Shutdown` → `db.Close()`) that doesn't exist otherwise — today's `main.go`
+has no shutdown path at all, nothing for "close a connection" to hook into, so this is
+the minimum needed to make `Close()` meaningful; without `-db`, `main.go` is generated
+exactly as it always has been (plain `http.ListenAndServe`, no signal handling).
+
+Because the driver packages are real dependencies, `gomod.tmpl` is deliberately left
+**unchanged** (no hand-written `require` block — nexler can't verify from inside itself
+which exact driver versions are currently valid/unyanked, and a wrong pinned version is
+worse than none). The CLI's post-create output tells the user to run `go mod tidy`
+before their first build; that command resolves + pins real current versions and writes
+`go.sum` correctly, which is also exactly why nexler itself never touches the network to
+produce a `-db` app — only the generated app's one-time dependency fetch does.
+
+#### The "core" connection and `store/`
+
+Every `-db`-enabled app gets one connection pre-populated under the conventional name
+`"core"` — `.env`'s `{APPNAME}_DB_CONNECTIONS=core` plus `_DB_CORE_TYPE`/`_DB_CORE_DSN`
+(type filled in, DSN left blank for the user), instead of the empty starter it used to
+be. Which `-db` type is core is a **scaffold-time decision** (`-core <type>`, new flag
+on `create app`): automatic when `-db` selects exactly one type, otherwise required —
+defaults to `mongo` if selected, else the first type listed — resolved by
+`resolveCoreDB` in `scaffold.go`. This is deliberately *not* dynamic/DB-backed: `.env`
+stays the only source of truth for what connections exist (see above); "core" is just
+the name every app's primary connection gets by convention, nothing more.
+
+This is what makes `store/<route>/<pkg>.go.tmpl` — previously a disconnected 3-line
+stub referencing a "Store interface" that doesn't exist anywhere in code — actually
+useful: when the target app has a core connection, `route.go`'s `NewRoute` reads it
+back out of the app's `.env` (`readCoreDBType`, a lightweight text scan for a
+`_DB_CORE_TYPE=` line — the `{PREFIX}_` part varies per app, so it matches on the fixed
+suffix, same style as `detectExistingProtection`'s substring search) and
+`store.go.tmpl` renders an *informed* TODO pointing at whichever of the `mongo`/
+`mysql`/`postgres`/`mssql` packages (see below) matches the core connection's actual
+type — instead of the old generic stub. Deliberately **not** generating a package-level
+`var`/helper that actually calls `db.SQL`/`mongo.Conn` — package-level vars initialize
+before `main()` runs, i.e. before `db.Connect()` has been called, so that would
+silently always return `ok == false`; a doc-comment pointer sidesteps the trap
+entirely, and matches how `services/<pkg>.go` is already an informed TODO rather than a
+guessed-at API. An app scaffolded without `-db` still gets today's original stub text,
+unchanged.
+
+Dynamic, runtime-mutable settings (e.g. timezone — something that needs to change
+without a restart, unlike `.env`/`config.C`, which loads once at startup) are a
+documented future direction only (see `config.go.tmpl`'s doc comment) — not
+implemented.
+
+#### The `mongo` package: chainable CRUD helpers
+
+`db/mongo.go.tmpl` deliberately only ever exposes the raw `*mongo.Client`
+(`db.Mongo(name)`) — connection lifecycle, nothing query-shaped. `mongo/mongo.go.tmpl`
+(generated whenever mongo is selected via `-db` — reuses the existing `HasMongo` flag,
+same `fs.SkipDir` skip technique as `auth/`/`db/`) is the layer above that: simplified
+Get/GetOne/Set/Insert/Delete/Aggregate helpers built on top of it.
+
+Addressing is a plain method chain, assignable to a variable like any Go value:
+`mongo.Conn(name)` → `.Database(name)` → `.Collection(name)`, matching MongoDB's real
+connection→database→collection structure (not database-implicit). The six operations,
+though, are **free generic functions taking that `Collection` handle as an argument**
+(`mongo.Get[User](ctx, coll, filter)`), not methods on it (`coll.Get[User](ctx, filter)`)
+— Go does not allow a method to introduce its own type parameter, only free functions
+can, and generic decoding into the caller's own struct type was a deliberate, confirmed
+requirement here (over returning raw `bson.M`). This is the one place the API shape had
+to bend to a hard language constraint rather than pure ergonomics.
+
+`Get`/`GetOne`/`Set`/`Delete` take `filter any` — the caller's own struct, not a raw
+`bson.M` (`filterToBSON`, unexported, does the translation): a single struct's non-zero
+fields AND together; a `[]T` slice of structs ORs each element's AND-group (`$or`).
+Field→key mapping uses each field's `bson` tag, falling back to the lowercased field
+name; zero-valued fields are never part of the filter (documented limitation — can't
+filter for an explicit zero/empty value this way). `Set` upserts (replaces-or-inserts)
+the *one* document matching filter; `Delete` removes the *one* matching document — both
+confirmed choices, not the only valid reading of "set"/"delete". `Aggregate` stays
+pipeline-based (`driver.Pipeline`) — the escape hatch for anything the struct-filter
+model can't express, playing the same role `Query` plays for the SQL packages below.
+
+Scoped to exactly these six operations: no transactions, no query-builder beyond the
+struct-filter translation. A caller needing more can still drop to `db.Mongo(name)`
+directly for the full driver API.
+
+#### The `mysql`/`postgres`/`mssql` packages: struct-based SQL helpers
+
+Same motivating idea as `mongo`, but SQL can't mirror its shape 1:1: there's no shared
+filter-document model, no shared placeholder syntax across dialects (`?` / `$1` /
+`@p1`), and no portable single-statement upsert (MySQL's native upsert keys off unique
+constraints rather than an arbitrary condition) — confirmed decisions, not oversights.
+So instead of one generic package: **three fully independent packages**
+(`internal/scaffold/templates/{mysql,postgres,mssql}/*.go.tmpl`), each generated only
+when that specific type is selected via `-db` (same per-directory `fs.SkipDir` gating
+as `mongo/`, on `HasMySQL`/`HasPostgres`/`HasMSSQL`), each with its own copy of every
+helper — independence over DRY, deliberately, so each package can be read/maintained in
+total isolation from the others.
+
+Identical shape in all three, one level shorter than `mongo`'s chain since a SQL
+connection's DSN already picks the database (no separate `.Database()` hop needed):
+
+```go
+t := mysql.Conn("core").Table("users")            // or postgres./mssql.
+users, err := mysql.Get[User](ctx, t, User{Active: true})
+one, err := mysql.GetOne[User](ctx, t, User{ID: id})
+err = mysql.Insert(ctx, t, User{ID: id, Name: "x"})
+err = mysql.Update(ctx, t, User{ID: id}, User{Name: "y"})  // filter, then patch
+err = mysql.Delete(ctx, t, User{ID: id})
+rows, err := mysql.Query[Report](ctx, mysql.Conn("core"), "select * from tbl_y")
+rows, err = mysql.Call[Report](ctx, mysql.Conn("core"), "my_proc", arg1, arg2)
+```
+
+Same struct-filter convention as `mongo` (non-zero fields AND; `[]T` ORs each element's
+AND-group; zero-valued fields never filterable), field→column mapping via `db` tag
+instead of `bson`. **`Insert` vs `Update` is intentionally asymmetric** — `Insert` writes
+every mapped field's current value, zeros included (a complete new row); `Update`'s
+second argument uses non-zero fields only (a partial `SET` patch, confirmed) — call this
+out to anyone reading the generated code, it's the kind of thing that's a silent
+surprise otherwise. `Update`/`Delete` both refuse an empty filter (would otherwise touch
+every row) — a deliberate safety guard the struct-filter design needs, since an
+accidentally zero-valued filter struct would otherwise silently mean "no condition."
+
+`Query`/`Call` are the raw-SQL escape hatches (`Aggregate`'s role for `mongo`) — a
+complete hand-written statement, or a stored-procedure invocation ("provision" only, a
+single result set, not a general multi-result-set system). Per-dialect specifics, each
+verified against real driver docs rather than assumed:
+
+| | placeholder | `Call` |
+|---|---|---|
+| mysql | `?` | builds `CALL proc(?, ?, ...)` |
+| postgres | `$1, $2, ...` | builds `CALL proc($1, ...)` — PG *functions* (vs *procedures*) aren't `CALL`-able; doc comment says to use `Query("SELECT * FROM my_func($1)", ...)` for those |
+| mssql | `@p1, @p2, ...` | **no `EXEC`/`CALL` text at all** — go-mssqldb treats a query string that's just a procedure name as an RPC call with positionally-bound args; `Call` is `Query[T](ctx, conn, proc, args...)` verbatim |
+
+Each package's `scanRows[T]` decodes `*sql.Rows` into `[]T` by matching `rows.Columns()`
+names against `T`'s `db`-tagged fields via reflection (unmatched columns are discarded,
+not an error — safe for `Query`/`Call` results that may not exactly match a mapped
+struct). `Get`/`GetOne` build an explicit `SELECT col1, col2, ...` (from `T`'s own
+mapped fields) rather than `SELECT *`, so the query is self-describing. No injection
+risk: only *values* ever flow through parameterized placeholders; table/column/procedure
+names come from Go struct tags and literal `.Table("...")`/`Call(ctx, conn, "proc", ...)`
+arguments — developer-authored at compile time, never runtime data threaded
+unparameterized into query text.
+
+`route.go`'s `readCoreDBType` (already used for the "core" connection — see above) also
+threads the literal type name through as `routeData.CoreDBType`, so `store.go.tmpl`'s
+informed TODO names the right package (`mysql.Conn("core")...`, not a generic
+`db.SQL("core")`) for whichever type the app's core connection actually is.
+
+#### The `core` package + `nexler init db`: app-wide system data
+
+Independent of whatever business data an app's own `store/` packages manage, every
+`-db`-enabled app also gets `core/config.go` (`internal/scaffold/templates/core/config.go.tmpl`,
+gated on `hasDB` the same way `db/` is) — a stable, engine-independent function API
+(`core.GetSetting(ctx, key)` / `core.SetSetting(ctx, key, value)`), the first of several
+planned "core data" types (this was deliberately phased: Config first proves the whole
+pattern, the rest are mechanical repetition of it). Two more are built the same way:
+`core/errorlog.go.tmpl` (`core.LogError` — see "Request decoding and response envelope"
+and `middleware.Recover` above) and `core/kgate_channels.go.tmpl` (`core.AddKgateChannel`/
+`RemoveKgateChannel`/`ListKgateChannels` — see "`nexler init kgate`" below; unlike Config/
+ErrorLog this one is generated for every `-db` app regardless of whether `nexler init
+kgate` is ever run, same zero-cost-when-unused precedent as ErrorLog always being
+provisioned regardless of whether a panic is ever caught). Session log and API keys
+remain planned, not yet built. "Engine-independent function API" deliberately means a
+stable Go function signature, **not** a literal Go `interface` type — the core DB engine
+is already fixed per-app at `-core <type>` scaffold time, so there's only ever one
+concrete implementation compiled in; runtime polymorphism would buy nothing.
+
+For a Mongo core, `core/config.go.tmpl` just calls the `mongo` package directly
+(`GetOne`/`Set`) — no server-side stored procedures exist in modern MongoDB. For a SQL
+core, `GetSetting` is a plain parameterized `SELECT` (dialect-specific placeholder/quoting
+text precomputed in Go by `configGetQuerySQL` in `scaffold.go`, since a single-table read
+has no portability problem worth a stored procedure), but `SetSetting` calls a real
+`core_config_upsert` stored procedure via `{{.CoreDB}}.Call` — unlike the generic
+`mysql`/`postgres`/`mssql` packages (which can't assume anything about an arbitrary
+caller's table, and so dropped `Set`/upsert entirely), nexler *owns* the `core_config`
+schema, so a real dialect-native upsert (`ON DUPLICATE KEY UPDATE` / `ON CONFLICT DO
+UPDATE` / `MERGE`) is safe to hand-write.
+
+Provisioning (`CREATE TABLE IF NOT EXISTS core_config` + the `core_config_upsert`
+procedure, or a unique Mongo index) is **not** done by `create app` or by the generated
+app's own startup — it's a separate, explicit `nexler init db [-dir <app-dir>]` command
+(`cmd/nexler/initdb.go`), reading the target app's `.env` for `{PREFIX}_DB_CORE_TYPE`/`_DSN`
+the same way `route.go`'s `readCoreDBType` does. Deliberate: a physical database can be
+shared by several scaffolded apps (auto-provisioning on every app's every boot would be
+redundant), and a common production setup runs the app itself with a low-privilege DB
+user that can't run DDL at all — schema setup belongs in its own explicit,
+higher-privilege step. Every statement is idempotent (`IF NOT EXISTS` / `CREATE OR
+REPLACE PROCEDURE` / `CREATE OR ALTER PROCEDURE` / a unique index Mongo no-ops on if it
+already exists), so running it again — including against a database another app already
+provisioned — is always safe. **This is the one place nexler itself, not just generated
+apps, needs a real database connection and real third-party driver dependencies** — all
+four (`go-sql-driver/mysql`, `jackc/pgx/v5`, `microsoft/go-mssqldb`,
+`go.mongodb.org/mongo-driver/v2`) are unconditional entries in nexler's own `go.mod`,
+same trade-off reasoning as `-db` in generated apps (simpler than trying to conditionally
+compile the nexler binary itself per invocation).
+
+#### `nexler init kpass`: kpass permission-check integration
+
+`nexler init kpass [-dir <app-dir>]` (`cmd/nexler/initkpass.go` → `scaffold.NewKpass` in
+`internal/scaffold/kpass.go`) adds a client for kpass — klivolks' own permission-check
+service — to an *existing* generated app. Unlike `nexler init db`, this needs **no live
+network connection at all**: it's pure local file scaffolding, same as `nexler create
+<route>`, driven by a new embedded template tree (`kpass_templates/kpass.go.tmpl`,
+`kpassTemplateFS` in `templates.go`, same pattern as `routeTemplateFS`).
+
+It writes `kpass/kpass.go` (refusing to overwrite if it already exists — same collision
+guard `NewRoute` uses for handler/service/store/model files, so a hand-edited copy is
+never clobbered by re-running the command) and ensures `.env` declares `KPASS_URL`,
+`KPASS_CLIENT_ID`, `KPASS_API_SECRET` (blank, appended only if not already present —
+`ensureEnvVars`/`envHasKey` in `kpass.go`). These three are **deliberately not
+`{APPNAME}_`-namespaced** like nexler's other env vars (`HOST`/`PORT`/`DB_*`) — kpass
+credentials are a shared vendor convention (comparable to `STRIPE_API_KEY`), constant
+across every app talking to the same kpass instance, not something that needs per-app
+disambiguation.
+
+Generated `kpass.Check(ctx, userID, resource, extra)` posts `{user_id, resource,
+...extra}` to `{KPASS_URL}/permission/check/` (via the `apiclient` package — no new
+third-party dependency) and returns kpass's full `Result{Status, Message, Access,
+UserRole, UserType}` — deliberately **not** collapsed into a bool, so a caller can write
+its own conditions on `UserRole`/`UserType` (e.g. restricting which data a given
+role/level can fetch). `Allowed(result) bool` is the separate, simple "is this a plain
+ALLOW" helper for the common case — kept as a distinct function from `Check` on purpose,
+so code needing more than yes/no always has direct access to the raw `Result` instead of
+being funneled through a boolean.
+
+Also generated, only when the target app has a real `-auth` mechanism: `UserIDFromRequest
+(r *http.Request) (userID string, ok bool)`, extracting the request's authenticated
+subject to pass into `Check`. Since `init kpass` runs independently of `create app`
+(possibly long after), `AuthKind` isn't available as a stored flag — `detectAuthFiles`
+detects it after the fact, from whether `auth/jwt.go`/`auth/session.go` exist on disk.
+`UserIDFromRequest`'s body then branches the same three ways `middleware/auth.go.tmpl`'s
+`RequireAuth` already does for JWT-only/session-only/both (bearer token first, falling
+back to session cookie), just driven by detected files instead of `.AuthKind`. For an app
+scaffolded with `-auth none`, `UserIDFromRequest` isn't generated at all — there's no
+subject to extract — and the caller supplies `Check`'s `userID` however that app already
+identifies callers.
+
+Not built (same "primitives only" precedent as `-auth`'s missing `/login` route):
+`kpass.Check`/`Allowed` aren't wired into `-protected`/`middleware.RequireAuth`
+automatically — a handler/service calls them explicitly, typically as `userID, ok :=
+kpass.UserIDFromRequest(r)` followed by `kpass.Check(ctx, userID, "myapp.users.create",
+nil)`.
+
+#### `nexler init kgate`: kgate message-broker integration
+
+`nexler init kgate [-dir <app-dir>]` (`cmd/nexler/initkgate.go` → `scaffold.NewKgate` in
+`internal/scaffold/kgate.go`) adds a client for kgate — klivolks' message broker — to an
+*existing* generated app, the same "pure local file scaffolding, no live network needed"
+shape as `nexler init kpass` (a new embedded template tree, `kgate_templates/kgate.go.tmpl`,
+`kgateTemplateFS` in `templates.go`). Unlike `kpass`, though, **it requires the target app
+to already have a core database connection** (`-db` at `nexler create app` time) —
+`NewKgate` checks this via the existing `readCoreDBType` (`route.go`, already used for
+`store.go.tmpl`'s informed TODO) and fails fast, with a clear error, if absent.
+
+That requirement exists because channel subscriptions are deliberately **not
+static/env-driven**. The obvious design — a blocking `Subscribe(ctx, channel, handler)`
+the caller manages itself, mirroring a typical reference client — was explicitly rejected:
+a workflow (e.g. order creation) needs to start listening on a new channel *while the app
+is already running*, not just at startup from a fixed config. Instead, `Subscribe(ctx,
+channel) error` records channel in the **core kgate-channel registry**
+(`core/kgate_channels.go.tmpl` — see "The `core` package" above; `core.AddKgateChannel`)
+and starts a background goroutine maintaining a live WebSocket connection for it, returning
+immediately — safe to call from inside a request handler or any in-flight workflow.
+`Unsubscribe(ctx, channel) error` cancels that goroutine and removes the channel from the
+registry. `ResumeAll(ctx) error` re-subscribes to every channel already recorded — meant to
+be called once at startup (near `db.Connect()`), but **not wired automatically**: `main.go`
+is never edited again after the initial `create app` scaffold, and `init kgate` runs
+independently of it (possibly long after), so this is one line added by hand, same
+"primitives only" precedent as `kpass`'s `/login` route. An in-memory `activeSubs
+map[string]context.CancelFunc` behind a `sync.Mutex` (same shape `auth/session.go.tmpl`'s
+session map already established) tracks running subscription goroutines for `Unsubscribe`
+and to make a repeat `Subscribe` on an already-listening channel a no-op.
+
+Because a restart's `ResumeAll` can only recover channel *names* from the database, not
+arbitrary handler closures, every channel — whether from a live subscription or the
+webhook fallback below — is dispatched to a **single** generated `handleEvent(ctx,
+channel, payload json.RawMessage) error` stub (`// TODO: process the event`, switch on
+`channel` for per-channel behavior); this is a deliberate simplification, not an
+oversight — a per-call handler parameter would be unrecoverable after a restart. The
+WebSocket loop (`subscribeOnce`, dialing `KGATE_WS_SERVER` with `X-Client-Id`/`Origin`
+headers via `github.com/gorilla/websocket` — Go's stdlib has no WebSocket client, so this
+is a real third-party dependency in the *generated app's* `go.mod` only, same exception
+already carved out for `-db`'s SQL/Mongo drivers, needing one `go mod tidy`; nexler's own
+`go.mod` stays untouched since `init kgate` needs no live connection itself) acks an event
+back only after `handleEvent` succeeds, and `subscribeLoop` retries with capped
+exponential backoff (1s → 30s) on any connection error instead of giving up after one
+failure. `Publish(ctx, channel, payload)` is unchanged from the obvious design: a plain
+`apiclient.Post` to `{KGATE_HTTP_SERVER}/messenger/publish` with an `X-Client-Id` header.
+
+The webhook fallback (`HandleWebhook`, standard `http.HandlerFunc` signature) is the one
+piece of this feature that *is* wired automatically — `Register(mux)` is inserted into
+`routes/public/public.go` by `NewKgate` itself, reusing `route.go`'s `wireAggregator`
+(generalized from a route-specific `handlers/<relDirSlash>` importer into a plain
+`wireAggregator(appDir, group, importPath, alias)` so a non-route package like `kgate` can
+reuse the same marker-based insertion). This asymmetry is deliberate: a webhook payload
+carries its own `channel` field, so the fallback route is channel-agnostic and safe to
+wire up completely automatically, the moment `init kgate` runs — unlike `Subscribe`, which
+is inherently business logic (*which* channel matters) nexler can't know in advance.
+`HandleWebhook` verifies `X-Signature` (HMAC-SHA256 of the raw body, keyed by
+`KGATE_WEBHOOK_SECRET`, constant-time-compared) before decoding and calling `handleEvent`
+— note that registering this app's public `/webhooks/kgate` URL *with* kgate's server as
+this client's fallback endpoint is a separate, manual, out-of-band step; no such
+registration API was available to generate against, and the generated doc comment says so
+explicitly rather than silently assuming it's handled.
+
+Five env vars, all blank/appended-if-missing via `ensureEnvVars` (generalized from
+`kpass.go` to take a comment-header string, since it was hardcoded to kpass's own comment
+before): `KGATE_CLIENT_ID`, `KGATE_WS_SERVER` (the **full** WebSocket URL, unlike
+`KGATE_HTTP_SERVER` below — `Subscribe` dials it directly, with no path appended),
+`KGATE_HTTP_SERVER` (a base URL; `Publish` appends `/messenger/publish`), `KGATE_ORIGIN`
+(no automatic derivation — only the app owner knows what kgate's server actually
+allowlists for this client), `KGATE_WEBHOOK_SECRET`. Same **not** `{APPNAME}_`-namespaced
+convention as `KPASS_*` — shared vendor credentials, not per-app.
+
+`nexler init db` provisions `core_kgate_channels` alongside `core_config`/`core_error_log`
+(`kgateChannelStatements` in `cmd/nexler/initdb.go`, mirroring `errorLogStatements`'s
+per-dialect style — `core_kgate_channel_add`/`_remove` stored procedures for SQL backends,
+a unique index on `channel` for Mongo) — needed before `Subscribe`/`Unsubscribe`/
+`ResumeAll` will actually work against a real database.
+
+### `nexler add`: vendoring static assets from npm
+
+`nexler add <package>[@version] [-dir <app-dir>] [-as <name>]` (`cmd/nexler/add.go`) vendors a
+static asset package (Bootstrap, jQuery, htmx, ...) from npm into an existing generated app's
+`templates/static/vendors/<name>/`, so it can be referenced from hand-written HTML without a CDN
+dependency at runtime — the same "no CDN, no network dependency at runtime" property
+`templates.go.tmpl`'s own package doc comment already claims for nexler's built-in CSS/JS. It
+deliberately never wires a
+`<link>`/`<script>` tag into any page itself — same "primitives only" precedent as `-auth`'s
+missing `/login` route and `kpass`'s `Check`/`Allowed` not being wired into `middleware.RequireAuth`
+— add the ones you need to whichever page(s) actually use the package.
+
+Unlike every other `nexler create`/`nexler init` command, this is **not** scaffolding — there's no
+embedded template involved at all, and it's the one place besides `nexler init db` where nexler
+itself (not just the generated app) needs real network access and a real `os/exec` call (see "What
+this is" above). It's entirely self-contained in `cmd/nexler/add.go`, deliberately outside
+`internal/scaffold`, so that package's "pure, embed-only" scaffolding claim stays literally true.
+
+`runAdd` shells out to `npm install <package> --prefix <scratch-tmp-dir> --no-save --no-audit
+--no-fund` (streaming npm's own stdout/stderr live, since this is the one nexler operation that
+talks to the network and the user should see registry/progress/error output as it happens) into a
+throwaway `os.MkdirTemp` directory — never the app's own directory, so a generated app never gets a
+`package.json` or `node_modules` of its own. `parsePackageSpec` accepts exactly the four common npm
+spec forms (`name`, `name@version`, `@scope/name`, `@scope/name@version`) and rejects anything else
+(git/tarball/URL specs, `npm:` aliases, a bare `user/repo`) up front with a clear error — those
+don't have a bare name npm's own `node_modules` layout would agree with (npm derives the installed
+directory name from the resolved package's own `package.json`, which can differ arbitrarily from a
+git/URL/alias spec), so best-effort parsing would only fail confusingly later instead.
+
+**File selection** (`selectSource`): if the installed package has a `dist/` folder, its contents are
+copied flattened and completely unfiltered — dist output is a package's own build artifact, meant
+to ship as-is. Otherwise the whole package directory is copied instead, minus obvious junk
+(`isJunkEntry`): tooling/metadata directories (`node_modules`, `.git`, `.github`, `test(s)`,
+`__tests__`, `docs`, `example(s)`) and files (`package.json`, `package-lock.json`, `.npmignore`,
+`.gitignore`, `.gitattributes`, `.editorconfig`, `.babelrc`, `.npmrc`, `tsconfig.json`, and anything
+case-insensitively prefixed `README`/`CHANGELOG`/`LICENSE`/`CONTRIBUTING`/`HISTORY`/`AUTHORS`/
+`NOTICE`) — none of which is a static asset, unlike `dist/`'s output, which is never filtered at
+all since it's already exactly what the package intends to ship for browser use. `copyTree` walks
+the source with `filepath.WalkDir` (a real OS directory, not `scaffold.go`'s `embed.FS`-based
+`fs.WalkDir`) and copies bytes verbatim — deliberately **not** reusing `scaffold.go`'s
+`processFile`/`render`, which run every non-`.tmpl` file through an LF-normalizing `text/template`
+pass meant for nexler's own hand-authored templates; that would be actively wrong here; a minified
+vendored bundle can easily contain a literal `{{` that isn't a template action. Symlinks inside
+`node_modules` are skipped, not followed — a stated limitation, not a bug.
+
+`<name>` (the destination folder under `vendors/`) defaults to the bare package name with its scope
+stripped and `/` replaced by `-` (`defaultVendorName`, e.g. `@popperjs/core` → `popperjs-core`),
+overridable via `-as`; either way it's validated against `vendorNameRe` (`^[A-Za-z0-9][A-Za-z0-9._-
+]*$`, the same allow-list-regex style as `route.go`'s `pathParamNameRe`) before being joined into a
+filesystem path, so it can't smuggle in a `/`, `\`, or `..`. **Re-running `nexler add` for the same
+`<name>` always refreshes it** — `os.RemoveAll(destDir)` then recreate, no `-force` flag — since a
+vendored third-party directory isn't something a developer hand-edits in place, unlike e.g.
+`kpass/kpass.go`, which deliberately refuses to overwrite. One accepted trade-off of always-refresh:
+`destDir` is cleared *before* copying starts, so an error partway through `copyTree` (disk full, a
+permissions issue) can leave a half-copied `vendors/<name>/` with the previous good version already
+gone — a copy-to-temp-then-rename would avoid this, but adds real complexity for a low-probability
+failure mode on what's meant to be a simple, easily-rerunnable command.
+
+Because `templates/static` is embedded into the **generated app's own binary** at **its own** build
+time (`//go:embed static` in `templates/templates.go`, rendered from
+`internal/scaffold/templates/templates/templates.go.tmpl` — see `RegisterStatic` under "HTML
+responses" below), a newly vendored package isn't served until the app is rebuilt; `nexler add`'s
+own success message says so explicitly rather than leaving it to be discovered.
+
+### HTML responses (`-response html`)
+
+A route scaffolded (or extended, via `-methods`) with `-response html` gets
+`response.HTML(w, r, module, name, title, data)` instead of `response.JSON` in each method's handler
+— `module` is always the route's `RelDirSlash` (e.g. `purchase/verify`) and `name` is precomputed
+per method as `routeMethod.HTMLContentName` in `route.go` (`<pkg>-content`, or
+`<pkg>-<verb>-content` when a single `nexler create` invocation generates more than one method, to
+avoid two methods overwriting each other's content file).
+
+Unlike every other template in this repo, `response.HTML` does *not* read from the embedded
+`templateFS` — it reads a content file (`<name>.html`) and `layout.html` straight off disk, on
+every request, resolving each independently through `resolveHTMLFile(module, filename)`: a
+module's own `templates/html/<module>/<filename>` if present, else the shared
+`templates/html/shared/<filename>` fallback. This is how the layout in particular is meant to be
+shared across every module rather than duplicated. Both files (whichever copy — module or shared —
+ends up used) are written once, at CLI scaffold time, not lazily on first request; `response.HTML`
+only ever reads them, reporting a clear error naming both paths it checked if neither exists (e.g.
+hand-deleted) instead of silently recreating a placeholder.
+
+For a route, `-layout` (default `shared`; only asked/meaningful when `-response html`) picks which
+layout.html gets used: `shared` (default) relies on the app-wide `templates/html/shared/
+layout.html`, written once by `writeSharedHTMLLayout`; `module` gives this one route its own
+`templates/html/<module>/layout.html` copy instead, written by `writeHTMLTemplates` itself — a
+module's own copy always wins over the shared one at request time since `resolveHTMLFile` checks
+it first. `route.go`'s `writeHTMLTemplates` writes the content file(s) into the route's own module
+folder regardless, plus whichever layout `-layout` calls for — called from both `NewRoute` and
+`addMethodsToExistingRoute`, so adding a method later (or switching `-layout` on a later `nexler
+create` for the same route) never clobbers a hand-edited template, only ever adding what's
+missing. For the app's own homepage under `nexler create app -ui`, `scaffold.go`'s
+`writeAppUIHomepage` writes `home.html` into module `"home"` the same way, and always uses the
+shared layout (no `-layout` choice at the app level). Both ultimately reuse the same
+`defaultHTMLContent`/`defaultHTMLLayout`
+placeholder constants and the `writeIfMissing` helper (all in `route.go`, same `scaffold`
+package) — existing files are never clobbered, only missing ones created; `writeSharedHTMLLayout`
+is the one place that actually writes to `templates/html/shared/layout.html`. The default layout
+references `/static/css/styles.css` and `/static/js/site.js`, which — unlike the per-module/shared
+html/ files — *are* embedded and served by the existing `templates.RegisterStatic`; they're
+scaffolded once into every new app under `internal/scaffold/templates/templates/static/{css,js}/`.
+
+Content is rendered first (via `html/template`, so `{{.Title}}`/`{{.Data}}` are auto-escaped), then
+its output is embedded as `template.HTML` into the layout's `{{.Content}}` — there's no
+`{{define "content"}}` block convention to keep the two files in sync, which matters because the
+content file may just be a placeholder that doesn't know about its layout's structure.
+
+`nexler create app <name> -ui` wires the app's own homepage (`GET /`) through this same mechanism —
+`handlers/home/home.go.tmpl` branches on `.UI` to call `response.HTML(w, r, "home", "home", ...)`
+instead of the default `templates.ServePage("home.html")` (the embedded, compile-time homepage).
+Under `-ui`, `NewApp`'s `fs.WalkDir` callback also skips generating the now-unused embedded
+`templates/html/home.html` and `templates/static/css/home.css` entirely (see the `cfg.UI` switch
+in `NewApp`), so a `-ui` app never ships a dead, never-served homepage alongside the real one.
+
+`openapi.go.tmpl` documents this correctly via `Operation.RespContentType` (set to `"text/html"` by
+`handler.go.tmpl`/`register_methods.tmpl` when `$.HTMLResponse` is true): the `"200"` response
+becomes a plain `{"type": "string"}` body under `text/html` instead of the usual JSON
+data-envelope $ref.
+
+Note: because `.tmpl` files are themselves rendered through `text/template` at CLI build/scaffold
+time (see below), `response.go.tmpl`'s own `{{.Title}}`/`{{.Content}}`/`{{.Data}}` placeholders —
+meant to be evaluated later, at the *generated app's* runtime — are written as
+`` {{"{{.Title}}"}} `` etc., the same "print a literal `{{`" idiom used to escape any other literal
+`{{` that must survive into generated output.
+
+### Idempotent route wiring via marker comments
+
+Generated files carry fixed marker comments that later CLI invocations anchor on to insert new
+code without reparsing Go:
+
+- `// nexler:routes` in `routes/public/public.go` / `routes/protected/protected.go` — where new
+  route imports/`Register(mux)` calls get inserted (`wireAggregator` in `route.go`).
+- `// nexler:handlers` and `// nexler:register` in each route's `handlers/.../<pkg>.go` — where
+  new per-method handler functions and `mux.HandleFunc`/`openapi.Register` calls get inserted
+  when re-running `nexler create <route>` with additional `-methods` on an already-scaffolded
+  route.
+- `// nexler:models` in each route's `models/.../<pkg>.go` — where new Request/Response struct
+  pairs get inserted for the same case.
+
+If a route's handler package already exists, `NewRoute` dispatches to
+`addMethodsToExistingRoute` instead of erroring: it adds only the newly-requested HTTP methods
+(skipping any already registered, detected by an exact `"<VERB> <route>"` string marker inside the
+handler file) and leaves `services/`/`store/` untouched, since those are generic per-route, not
+per-method. Mixing `-protected` with an existing route created the other way is rejected
+(`detectExistingProtection`) — a handler package can only be registered in one of
+`routes/public`/`routes/protected`.
+
+If any marker is missing (e.g. a route scaffolded before this feature existed, or a hand-edited
+file), the corresponding insert fails with an error naming the exact marker text to add back by
+hand — it does not silently fall back to guessing a location.
+
+### Per-route code generation (`route.go`)
+
+`RouteConfig` → `routeData`/`routeMethod` precompute all identifiers in Go (handler names like
+`HandleVerifyPost`, `RegisterExpr` — either bare or wrapped in
+`middleware.RequireAuth(...)` when `-protected` — `OperationID`, content types, doc-comment
+phrasing) so the `.tmpl` files themselves stay mostly free of conditional logic; they just range
+over `.Methods`. GET always gets a query-parameter-only request struct regardless of `-body`;
+other methods follow `-body json|form|multipart`. `-response json|html` (route-level, like
+`-protected`, not per-method) picks `routeData.HTMLResponse`, the one conditional the handler
+templates do branch on — see "HTML responses" above. OPTIONS is wired automatically for every
+route via `middleware.HandleOptions` (always 200 OK) and cannot be requested explicitly —
+`parseMethods` rejects it.
+
+Route `-module`/`-submodule` values are sanitized to letters/digits only (`sanitizeIdent`) for use
+as a Go package name; the package's import alias is the concatenation of the sanitized parts
+(e.g. `-module purchase -submodule verify` → package `verify`, alias `purchaseverify`, files under
+`purchase/verify/`).
+
+### Dynamic path parameters (`{name}` segments in a route)
+
+A route's URL can carry named wildcard segments, e.g. `/admin/user/{id}/profile` — Go 1.22+'s
+`net/http.ServeMux` already routes `"METHOD /path"` patterns containing `{name}` (and a trailing
+`{name...}` catch-all) natively, so `Register`'s `mux.HandleFunc` call (`handler.go.tmpl`) needed no
+change at all: `cfg.Route` is passed through to it verbatim, same as always. What's generated around
+that routing is what's new: `parsePathParams` (`route.go`) extracts every `{name}` segment from
+`cfg.Route` at scaffold time — validating each as a legal Go identifier, rejecting duplicates, and
+requiring a `{name...}` catch-all to be the last segment (the same restriction `net/http` itself
+enforces) — into `routeData.PathParams`/`HasPathParams`/`PathParamArgs` (a precomputed Go source
+literal like `"id", "code"`, ready to splice into a variadic call) /`PathParamsCSV` (for doc
+comments). A literal `?` or `#` anywhere in the route is rejected outright with an error pointing at
+`{name}` instead — `ServeMux` patterns don't parse query strings/fragments out of a route at all, so
+what looks like one (e.g. a leftover `/admin/user/?id=u1` from before this feature existed) would
+just become part of the literal path, silently never matching a real request.
+
+Every generated handler method for such a route calls a new `request.DecodePath(r, &req,
+<names...>)` (`request.go.tmpl`) right after its primary decode call — `handler.go.tmpl` and
+`handler_methods.tmpl` both emit this call, guarded by `{{if $.HasPathParams}}`, for every HTTP
+method, not just GET, since path values exist independently of whatever a method's body/query
+decoding already populated. `DecodePath` reads each name via `r.PathValue(name)` and populates dst
+through the same `populate` helper `DecodeQuery`/`DecodeForm` already use — so a path parameter is
+matched against the Request struct by the exact same `json` tag convention as every other decode
+source; a route with `{id}` and a GET handler decoding both query and path values into one struct
+just needs one `ID string \`json:"id"\`` field to receive either. Because `model.go.tmpl`/
+`model_methods.tmpl` never auto-generate fields (see their `// TODO: add fields.` stub, unchanged),
+the Request struct's doc comment gets an extra line naming the route's path parameter(s) when any
+exist, pointing at `request.DecodePath` — the same "informed TODO" precedent `store.go.tmpl`'s core-
+DB comment already sets, rather than silently doing nothing until a developer discovers `PathValue`
+on their own.
+
+`openapi.go.tmpl`'s `Spec` documents `{name}` segments as `in: "path", required: true` parameters
+for every operation on that path (`pathParamNames`, parsed straight from `op.Path` — independent of
+`Operation.ReqType`, so it works for POST/PUT/PATCH/DELETE routes too, not just GET). For a GET
+operation, whose `ReqType` fields are otherwise documented as `in: "query"` via `queryParams`,
+`queryParams` now takes a skip-set of the path parameter names on that operation and omits them —
+without it, a GET route's `{id}` field would be listed twice (once as a path parameter, once as a
+query parameter) since one struct field is matched against both sources by the same json tag.

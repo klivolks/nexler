@@ -1,0 +1,100 @@
+# Release automation for the nexler CLI itself (not for apps it scaffolds).
+#
+# Triggered by .github/workflows/release.yml when a GitHub Release is
+# published from the `release` branch (not a raw tag push — see that
+# workflow's `if:` gate on github.event.release.target_commitish). The
+# Release itself, and its tag, already exist by the time this runs — the
+# human publishes it via the GitHub UI first. Produces raw cross-compiled
+# binaries + checksums + an auto-generated changelog, uploaded onto that
+# *same* release (see release.mode below); the release's two platform
+# installers (Inno Setup .exe, macOS .pkg) are built and attached by
+# separate CI jobs afterward — see installer/windows/BUILDING.md and
+# installer/macos/BUILDING.md for why those need their own native-OS
+# runners rather than living here.
+#
+# Scoped to exactly the two platforms/architectures requested: windows and
+# darwin, amd64 and arm64. No linux target — not asked for, and adding one
+# speculatively would just be unused surface area.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: nexler
+    main: ./cmd/nexler
+    binary: nexler
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # -X main.cliVersion must match cmd/nexler/main.go's package-level
+    # `var cliVersion` exactly (case-sensitive import path + var name) —
+    # see that file's doc comment.
+    ldflags:
+      - -s -w -X main.cliVersion={{.Version}}
+
+archives:
+  - id: default
+    formats: [zip]
+    name_template: "nexler_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+# Signs checksums.txt with cosign (key-pair based, not keyless) — signing
+# just the checksum file, rather than every individual archive, is the
+# standard cosign+goreleaser pattern: verifying checksums.txt's signature
+# and then checking each archive's sha256 against it transitively covers
+# every artifact goreleaser produces, with one signature instead of four.
+#
+# cosign.key (this repo's private key) is deliberately gitignored — see
+# CLAUDE.md's "Releasing" section for how it and its password reach CI via
+# GitHub Actions secrets, and how to verify a release with cosign.pub
+# (committed, safe to share) once you've downloaded one.
+#
+# cosign v3's `sign-blob` requires --bundle (the older --output-signature
+# flag no longer exists) — the resulting file is a Sigstore "bundle" JSON
+# document (signature + public-key hint + a Rekor transparency-log entry),
+# not a bare base64 signature, hence the .bundle extension rather than
+# .sig. COSIGN_PASSWORD is read from this job's own environment (set by
+# the CI workflow from a secret) — cosign picks it up automatically, no
+# need to template it into `env:` here.
+signs:
+  - cmd: cosign
+    args:
+      - "sign-blob"
+      - "--key=cosign.key"
+      - "--bundle=${signature}"
+      - "--yes"
+      - "${artifact}"
+    artifacts: checksum
+    signature: "${artifact}.bundle"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  github:
+    owner: klivolks
+    name: nexler
+  # "keep-existing" is goreleaser's own default, but made explicit here
+  # since it's now load-bearing: the release this uploads to was already
+  # created (and published) by a human via the GitHub UI before this
+  # workflow ever runs, so goreleaser must never try to create a
+  # competing one for the same tag — it should only attach artifacts to
+  # what's already there.
+  mode: keep-existing
+  # Lets a re-run of this workflow (e.g. after fixing a failed job)
+  # overwrite assets it already uploaded, instead of erroring because
+  # they exist.
+  replace_existing_artifacts: true

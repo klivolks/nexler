@@ -1,0 +1,32 @@
+package {{ .PkgName }}
+{{ if .HasCoreDB }}
+{{- if eq .CoreDBAccessor "Mongo" }}
+// TODO: persistence for {{ .Route }}. This app's core database
+// connection is available via the mongo package (see
+// {{ .ModulePath }}/mongo), e.g.:
+//
+//	coll := mongo.Conn("core").Database("<name>").Collection("<name>")
+//	mongo.GetOne[YourType](ctx, coll, YourType{ID: id})
+//
+// Connections open in main() before routes are registered, so it's
+// always ready by the time a request arrives — but NOT at package
+// init time (package-level vars initialize before main() runs, i.e.
+// before db.Connect() has been called), so don't call mongo.Conn from
+// a var initializer here.
+{{- else }}
+// TODO: persistence for {{ .Route }}. This app's core database
+// connection is available via the {{ .CoreDBType }} package (see
+// {{ .ModulePath }}/{{ .CoreDBType }}), e.g.:
+//
+//	t := {{ .CoreDBType }}.Conn("core").Table("<name>")
+//	{{ .CoreDBType }}.GetOne[YourType](ctx, t, YourType{ID: id})
+//
+// Connections open in main() before routes are registered, so it's
+// always ready by the time a request arrives — but NOT at package
+// init time (package-level vars initialize before main() runs, i.e.
+// before db.Connect() has been called), so don't call {{ .CoreDBType }}.Conn
+// from a var initializer here.
+{{- end }}
+{{- else }}
+// TODO: persistence for {{ .Route }}, via the nexler Store interface.
+{{- end }}

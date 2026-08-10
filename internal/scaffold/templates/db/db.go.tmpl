@@ -1,0 +1,76 @@
+// Package db manages {{ .AppName }}'s database connections — opened once
+// at startup (Connect) and closed once at shutdown (Close). Which named
+// connections exist, and where they point, is entirely runtime/env-driven
+// via {{ .EnvPrefix }}_DB_CONNECTIONS (comma-separated connection names)
+// and, per name, {{ .EnvPrefix }}_DB_<NAME>_TYPE and
+// {{ .EnvPrefix }}_DB_<NAME>_DSN — add or remove a connection by editing
+// .env, no rebuild needed. Only {{ .DBTypesCSV }} are supported: this app
+// was scaffolded with `-db {{ .DBTypesCSV }}`.
+//
+// This only covers opening and closing connections — no query builder,
+// ORM, or migrations; call methods directly on the *sql.DB/*mongo.Client
+// that SQL/Mongo return.
+package db
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+)
+
+// Connect opens every connection named in {{ .EnvPrefix }}_DB_CONNECTIONS.
+// Call this once at startup (see main.go) — it fails fast, returning an
+// error immediately if any connection can't be opened, rather than
+// failing lazily on first use.
+func Connect() error {
+	for _, name := range splitCSV(os.Getenv("{{ .EnvPrefix }}_DB_CONNECTIONS")) {
+		upper := strings.ToUpper(name)
+		dbType := os.Getenv("{{ .EnvPrefix }}_DB_" + upper + "_TYPE")
+		dsn := os.Getenv("{{ .EnvPrefix }}_DB_" + upper + "_DSN")
+		if dbType == "" || dsn == "" {
+			return fmt.Errorf("connection %q: {{ .EnvPrefix }}_DB_%s_TYPE and _DSN must both be set", name, upper)
+		}
+
+		var err error
+		switch dbType {
+{{- if or .HasMySQL .HasPostgres .HasMSSQL }}
+		case "mysql", "postgres", "mssql":
+			err = openSQL(name, dbType, dsn)
+{{- end }}
+{{- if .HasMongo }}
+		case "mongo":
+			err = openMongo(name, dsn)
+{{- end }}
+		default:
+			err = fmt.Errorf("unsupported type %q (this app was scaffolded with -db {{ .DBTypesCSV }})", dbType)
+		}
+		if err != nil {
+			return fmt.Errorf("connection %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// Close closes every open connection. Call this once at shutdown.
+func Close() error {
+	var errs []error
+{{- if or .HasMySQL .HasPostgres .HasMSSQL }}
+	errs = append(errs, closeSQL())
+{{- end }}
+{{- if .HasMongo }}
+	errs = append(errs, closeMongo())
+{{- end }}
+	return errors.Join(errs...)
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}

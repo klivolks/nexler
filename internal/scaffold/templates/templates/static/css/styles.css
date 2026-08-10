@@ -1,0 +1,9 @@
+/* Default stylesheet for response.HTML-rendered pages. Referenced by the
+   auto-created templates/html/<module>/layout.html — edit freely. */
+body {
+	font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+	background: #0b1020;
+	color: #e8ecf4;
+	margin: 0;
+	padding: 24px;
+}

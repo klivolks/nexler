@@ -1,0 +1,223 @@
+// Package request provides small helpers for decoding an incoming HTTP
+// request into the Request struct `nexler create <route>` generates in
+// models/. Each helper matches one of the shapes a route can be scaffolded
+// with — DecodeJSON/DecodeForm/DecodeMultipart for the -body kind chosen
+// at scaffold time, DecodeQuery for GET's query-parameter-only requests —
+// so generated handlers call exactly one of them, decided once up front
+// rather than sniffed per request. DecodePath is the one exception that
+// isn't exclusive with the others: a route scaffolded with "{name}" path
+// parameters (e.g. /admin/user/{id}/profile) calls it in addition to its
+// primary decode call, for every HTTP method, since path values exist
+// independently of a body.
+//
+// DecodeForm, DecodeMultipart, DecodeQuery, and DecodePath all populate a
+// struct's exported fields by matching each field's json tag (falling
+// back to the Go field name) against the incoming form/query/path values
+// — the same tag the openapi package reads to document the field, so one
+// tag drives both. Supported field kinds are string, bool, the int/uint
+// families, float32/float64, and slices of those (for repeated values); a
+// *multipart.FileHeader field is populated from an uploaded file of the
+// same name instead. Anything else is left at its zero value.
+package request
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/url"
+	"reflect"
+	"strconv"
+	"strings"
+)
+
+// DefaultMaxMemory is the maxMemory nexler-generated handlers pass to
+// DecodeMultipart: the amount of an incoming multipart body kept in
+// memory before the rest spills to temp files, per multipart.Form's own
+// semantics.
+const DefaultMaxMemory = 32 << 20 // 32 MiB
+
+// DecodeJSON decodes r's body as JSON into dst, which must be a non-nil
+// pointer. An empty body is treated as a no-op, leaving dst at its zero
+// value, since a request with no fields to send may legitimately send no
+// body at all.
+func DecodeJSON(r *http.Request, dst any) error {
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil && err != io.EOF {
+		return fmt.Errorf("decoding JSON body: %w", err)
+	}
+	return nil
+}
+
+// DecodeForm parses r's application/x-www-form-urlencoded body and
+// populates dst's fields from it.
+func DecodeForm(r *http.Request, dst any) error {
+	if err := r.ParseForm(); err != nil {
+		return fmt.Errorf("parsing form: %w", err)
+	}
+	return populate(dst, r.PostForm)
+}
+
+// DecodeMultipart parses r's multipart/form-data body, keeping up to
+// maxMemory bytes of it in memory, and populates dst's fields from the
+// non-file form values plus any *multipart.FileHeader fields.
+func DecodeMultipart(r *http.Request, dst any, maxMemory int64) error {
+	if err := r.ParseMultipartForm(maxMemory); err != nil {
+		return fmt.Errorf("parsing multipart form: %w", err)
+	}
+	if err := populate(dst, r.MultipartForm.Value); err != nil {
+		return err
+	}
+	return populateFiles(dst, r.MultipartForm.File)
+}
+
+// DecodeQuery populates dst's fields from r's URL query string. This is
+// what every generated GET handler uses, since GET requests never carry a
+// body.
+func DecodeQuery(r *http.Request, dst any) error {
+	return populate(dst, r.URL.Query())
+}
+
+// DecodePath populates dst's fields from r's URL path values — the named
+// "{name}" wildcards in the route pattern passed to mux.HandleFunc (Go
+// 1.22+ ServeMux), read via r.PathValue. names is every wildcard name in
+// that route, precomputed at scaffold time; dst's fields are matched
+// against them the same way as DecodeQuery/DecodeForm, by json tag. Every
+// generated handler for a route with path parameters calls this after its
+// primary decode call, so path values land in the same Request struct as
+// any query/body fields.
+func DecodePath(r *http.Request, dst any, names ...string) error {
+	values := url.Values{}
+	for _, name := range names {
+		if v := r.PathValue(name); v != "" {
+			values.Set(name, v)
+		}
+	}
+	return populate(dst, values)
+}
+
+var fileHeaderPtrType = reflect.TypeOf(&multipart.FileHeader{})
+
+// populate walks dst's exported struct fields, setting each one from
+// values[fieldName] when present.
+func populate(dst any, values url.Values) error {
+	v := reflect.ValueOf(dst)
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return fmt.Errorf("populate: dst must be a non-nil pointer, got %T", dst)
+	}
+	v = v.Elem()
+	if v.Kind() != reflect.Struct {
+		return fmt.Errorf("populate: dst must point to a struct, got %T", dst)
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() || f.Type == fileHeaderPtrType {
+			continue
+		}
+		name, skip := fieldName(f)
+		if skip {
+			continue
+		}
+		raw, ok := values[name]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		if err := setField(v.Field(i), raw); err != nil {
+			return fmt.Errorf("field %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// populateFiles sets each *multipart.FileHeader field on dst from the
+// first uploaded file whose form field name matches.
+func populateFiles(dst any, files map[string][]*multipart.FileHeader) error {
+	v := reflect.ValueOf(dst).Elem()
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() || f.Type != fileHeaderPtrType {
+			continue
+		}
+		name, skip := fieldName(f)
+		if skip {
+			continue
+		}
+		if hdrs := files[name]; len(hdrs) > 0 {
+			v.Field(i).Set(reflect.ValueOf(hdrs[0]))
+		}
+	}
+	return nil
+}
+
+// setField assigns raw (one value, or several for a slice field) onto
+// field, converting from string per field's kind.
+func setField(field reflect.Value, raw []string) error {
+	if field.Kind() == reflect.Slice {
+		out := reflect.MakeSlice(field.Type(), len(raw), len(raw))
+		for i, s := range raw {
+			if err := setScalar(out.Index(i), s); err != nil {
+				return err
+			}
+		}
+		field.Set(out)
+		return nil
+	}
+	return setScalar(field, raw[0])
+}
+
+// setScalar converts s per field's kind and assigns it directly onto
+// field.
+func setScalar(field reflect.Value, s string) error {
+	switch field.Kind() {
+	case reflect.String:
+		field.SetString(s)
+	case reflect.Bool:
+		b, err := strconv.ParseBool(s)
+		if err != nil {
+			return err
+		}
+		field.SetBool(b)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return err
+		}
+		field.SetInt(n)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		n, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return err
+		}
+		field.SetUint(n)
+	case reflect.Float32, reflect.Float64:
+		n, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return err
+		}
+		field.SetFloat(n)
+	default:
+		return fmt.Errorf("unsupported field type %s", field.Kind())
+	}
+	return nil
+}
+
+// fieldName returns a struct field's matching form/query key, from its
+// json tag (falling back to the Go field name) — the same convention
+// openapi's schema reflection uses, so one tag documents and decodes the
+// field. skip is true for json:"-" fields.
+func fieldName(f reflect.StructField) (name string, skip bool) {
+	tag := f.Tag.Get("json")
+	if tag == "" {
+		return f.Name, false
+	}
+	name = strings.Split(tag, ",")[0]
+	if name == "-" {
+		return "", true
+	}
+	if name == "" {
+		return f.Name, false
+	}
+	return name, false
+}

@@ -1,0 +1,10 @@
+package middleware
+
+import "net/http"
+
+// HandleOptions responds 200 OK to every OPTIONS request, regardless of
+// route — registered automatically for every route nexler create
+// scaffolds, so no per-route CORS/preflight wiring is needed.
+func HandleOptions(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
