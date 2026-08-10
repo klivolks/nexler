@@ -95,6 +95,7 @@ func runCreateApp(args []string) {
 	ui := fs.Bool("ui", false, "serve the homepage from editable templates/html/home/{home,layout}.html on disk (via response.HTML), instead of the built-in embedded homepage")
 	auth := fs.String("auth", "none", "auth method middleware.RequireAuth enforces: none (default, unverified stub), jwt (bearer token), session (cookie), or both")
 	rememberMe := fs.Bool("remember-me", false, "when -auth includes session, add a rememberMe option to auth.StartSession for a longer-lived login")
+	jwtSecret := fs.String("jwt-secret", "", "existing JWT signing secret to reuse instead of generating a new one — set this when multiple apps in the same ecosystem need to validate each other's tokens; blank (default) generates a fresh, unique secret")
 	db := fs.String("db", "", "comma-separated database drivers to generate db/ support for: mongo, mysql, postgres, mssql (any subset; blank means none)")
 	core := fs.String("core", "", "which -db type is this app's conventional default (\"core\") connection; required only when -db selects more than one type")
 	dbHost := fs.String("db-host", "", "core database host; blank (default) leaves .env's DSN blank for you to fill in by hand")
@@ -140,6 +141,11 @@ func runCreateApp(args []string) {
 	rememberMeVal := *rememberMe
 	if !set["remember-me"] && (authVal == "session" || authVal == "both") {
 		rememberMeVal = promptBool(`Support "remember me" (longer-lived login)`, rememberMeVal)
+	}
+
+	jwtSecretVal := *jwtSecret
+	if !set["jwt-secret"] && (authVal == "jwt" || authVal == "both") {
+		jwtSecretVal = prompt("Existing JWT secret to reuse (blank = generate a new one; typed in PLAIN TEXT, not masked)", jwtSecretVal)
 	}
 
 	dbVal := *db
@@ -198,6 +204,7 @@ func runCreateApp(args []string) {
 		UI:             uiVal,
 		AuthKind:       authVal,
 		RememberMe:     rememberMeVal,
+		JWTSecret:      jwtSecretVal,
 		DBTypes:        dbTypes,
 		CoreDB:         coreVal,
 		CoreDBHost:     dbHostVal,
@@ -216,13 +223,17 @@ func runCreateApp(args []string) {
 	if uiVal {
 		fmt.Println("Custom UI homepage: edit templates/html/home/home.html and templates/html/shared/layout.html")
 	}
+	jwtSecretNote := "secret pre-filled in .env"
+	if jwtSecretVal != "" {
+		jwtSecretNote = "using the secret you provided (shared across apps)"
+	}
 	switch authVal {
 	case "jwt":
-		fmt.Println("Auth: JWT bearer tokens — see auth/jwt.go (IssueJWT/VerifyJWT); secret pre-filled in .env.")
+		fmt.Printf("Auth: JWT bearer tokens — see auth/jwt.go (IssueJWT/VerifyJWT); %s.\n", jwtSecretNote)
 	case "session":
 		fmt.Println("Auth: sessions — see auth/session.go (StartSession/SessionFromRequest/EndSession); in-memory only.")
 	case "both":
-		fmt.Println("Auth: JWT bearer tokens + sessions — see auth/jwt.go and auth/session.go; secret pre-filled in .env.")
+		fmt.Printf("Auth: JWT bearer tokens + sessions — see auth/jwt.go and auth/session.go; %s.\n", jwtSecretNote)
 	}
 	if len(dbTypes) > 0 {
 		displayTypes := make([]string, len(dbTypes))
@@ -251,11 +262,14 @@ func runCreateRoute(route string, args []string) {
 	fs := flag.NewFlagSet("create route", flag.ExitOnError)
 	module := fs.String("module", "", "module (top-level group) this route belongs to, e.g. purchase")
 	submodule := fs.String("submodule", "", "submodule (nested group) this route belongs to, e.g. verify")
+	file := fs.String("file", "", "base file name for the generated handler/service/store/model files, e.g. verify; defaults to the route's package name (last of -module/-submodule)")
+	service := fs.String("service", "", "reuse an existing service package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify")
+	store := fs.String("store", "", "reuse an existing store package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify")
 	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
 	protected := fs.Bool("protected", false, "require auth for this route (registers in routes/protected instead of routes/public)")
 	methods := fs.String("methods", "GET", "comma-separated HTTP methods to generate: GET, POST, PUT, PATCH, DELETE (OPTIONS is automatic and always 200 OK)")
 	body := fs.String("body", "json", "request body shape for non-GET methods: json, form, or multipart")
-	response := fs.String("response", "json", "response kind for every method: json (response.JSON, default) or html (response.HTML)")
+	response := fs.String("response", "json", "response kind for every method: json (response.JSON, default), html (response.HTML), or raw (response.JSONRaw, no {\"data\": ...} envelope)")
 	layout := fs.String("layout", "shared", "HTML layout for -response html: shared (default; reuses templates/html/shared/layout.html) or module (this route gets its own templates/html/<module>/layout.html copy)")
 	fs.Parse(reorderFlagsFirst(fs, args))
 
@@ -270,6 +284,21 @@ func runCreateRoute(route string, args []string) {
 	submoduleVal := *submodule
 	if !set["submodule"] {
 		submoduleVal = prompt("Submodule (optional)", "")
+	}
+
+	fileVal := *file
+	if !set["file"] {
+		fileVal = prompt("File name (optional, default: package name)", "")
+	}
+
+	serviceVal := *service
+	if !set["service"] {
+		serviceVal = prompt("Reuse existing service (optional, e.g. purchase/verify)", "")
+	}
+
+	storeVal := *store
+	if !set["store"] {
+		storeVal = prompt("Reuse existing store (optional, e.g. purchase/verify)", "")
 	}
 
 	protectedVal := *protected
@@ -289,11 +318,7 @@ func runCreateRoute(route string, args []string) {
 
 	responseVal := *response
 	if !set["response"] {
-		if promptUIOrAPI("Response type", responseVal == "html") {
-			responseVal = "html"
-		} else {
-			responseVal = "json"
-		}
+		responseVal = promptChoice("Response type", []string{"json", "html", "raw"}, responseVal)
 	}
 
 	layoutVal := *layout
@@ -310,6 +335,9 @@ func runCreateRoute(route string, args []string) {
 		Route:        route,
 		Module:       moduleVal,
 		Submodule:    submoduleVal,
+		FileName:     fileVal,
+		ServiceRef:   serviceVal,
+		StoreRef:     storeVal,
 		AppDir:       dirVal,
 		Protected:    protectedVal,
 		Methods:      splitCSV(methodsVal),
@@ -335,7 +363,22 @@ func runCreateRoute(route string, args []string) {
 
 	if result.Created {
 		fmt.Printf("Added %s route %s [%s] (%s)\n", kind, route, strings.Join(result.Added, ","), group)
-		fmt.Println("Generated handler, service, store, and model files, and wired the route into routes/" + kind + "/" + kind + ".go.")
+		layers := []string{"handler"}
+		if serviceVal == "" {
+			layers = append(layers, "service")
+		}
+		if storeVal == "" {
+			layers = append(layers, "store")
+		}
+		layers = append(layers, "model")
+		fmt.Printf("Generated %s files", strings.Join(layers, ", "))
+		if serviceVal != "" {
+			fmt.Printf(", reusing service %s", serviceVal)
+		}
+		if storeVal != "" {
+			fmt.Printf(", reusing store %s", storeVal)
+		}
+		fmt.Println(", and wired the route into routes/" + kind + "/" + kind + ".go.")
 	} else {
 		fmt.Printf("Route %s (%s) already existed — added method(s): %s\n", route, group, strings.Join(result.Added, ", "))
 		if len(result.Skipped) > 0 {

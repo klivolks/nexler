@@ -19,6 +19,7 @@ package openapi
 import (
 	"mime/multipart"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -40,6 +41,16 @@ type Operation struct {
 	// `-response html` set this to "text/html", since response.HTML
 	// writes a raw HTML body instead of the JSON envelope.
 	RespContentType string
+	// RespUnwrapped is true when the handler writes RespType's shape
+	// directly (e.g. via response.JSONRaw) instead of wrapping it in
+	// response.JSON's {"data": ...} envelope. Only meaningful when
+	// RespContentType is "application/json" (or empty).
+	RespUnwrapped bool
+	// Tags groups this operation under one or more named sections in
+	// Swagger UI — nexler-generated routes set this to the route's
+	// top-level -module, so /openapi.json reads as per-module sections
+	// instead of one flat operation list. Empty means untagged.
+	Tags []string
 }
 
 var (
@@ -80,6 +91,7 @@ func Spec(title string) map[string]any {
 		},
 	}
 	needsSecurity := false
+	tagSet := map[string]bool{}
 
 	for _, op := range ops {
 		item, _ := paths[op.Path].(map[string]any)
@@ -129,7 +141,8 @@ func Spec(title string) map[string]any {
 			schemas[respSchemaName] = jsonSchema(op.RespType)
 
 			var okContent map[string]any
-			if op.RespContentType == "text/html" {
+			switch {
+			case op.RespContentType == "text/html":
 				// response.HTML writes a raw HTML body — no JSON
 				// envelope, so document it as a plain string body
 				// instead of $ref-ing the (unused) data schema.
@@ -138,7 +151,15 @@ func Spec(title string) map[string]any {
 						"schema": map[string]any{"type": "string"},
 					},
 				}
-			} else {
+			case op.RespUnwrapped:
+				// response.JSONRaw writes RespType's shape directly —
+				// no {"data": ...} envelope.
+				okContent = map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{"$ref": "#/components/schemas/" + respSchemaName},
+					},
+				}
+			default:
 				okContent = map[string]any{
 					// response.JSON wraps every success body as
 					// {"data": ...} — see the response package.
@@ -175,6 +196,13 @@ func Spec(title string) map[string]any {
 			operation["security"] = []map[string][]string{sec}
 		}
 
+		if len(op.Tags) > 0 {
+			operation["tags"] = op.Tags
+			for _, t := range op.Tags {
+				tagSet[t] = true
+			}
+		}
+
 		item[strings.ToLower(op.Method)] = operation
 		paths[op.Path] = item
 	}
@@ -187,12 +215,25 @@ func Spec(title string) map[string]any {
 		}
 	}
 
-	return map[string]any{
+	spec := map[string]any{
 		"openapi":    "3.0.3",
 		"info":       map[string]any{"title": title, "version": "0.1.0"},
 		"paths":      paths,
 		"components": components,
 	}
+	if len(tagSet) > 0 {
+		tagNames := make([]string, 0, len(tagSet))
+		for t := range tagSet {
+			tagNames = append(tagNames, t)
+		}
+		sort.Strings(tagNames)
+		tags := make([]map[string]any, 0, len(tagNames))
+		for _, t := range tagNames {
+			tags = append(tags, map[string]any{"name": t})
+		}
+		spec["tags"] = tags
+	}
+	return spec
 }
 
 // schemaName returns the Go type's own name, used as the OpenAPI

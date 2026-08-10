@@ -24,12 +24,20 @@ func Handle{{ $.Name }}{{ .VerbTitle }}(w http.ResponseWriter, r *http.Request) 
 	}
 {{- end }}
 
+{{- if $.HasServiceRef }}
+	// TODO: call the {{ $.ServicePkgName }} service package (see
+	// {{ $.ServiceImportPath }}) with req, and build a real
+	// {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response.
+{{- else }}
 	// TODO: call {{ $.PkgName }}'s service with req, and build a real
 	// {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response.
+{{- end }}
 	resp := {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response{}
 
 {{- if $.HTMLResponse }}
 	response.HTML(w, r, "{{ $.RelDirSlash }}", "{{ .HTMLContentName }}", "{{ $.Name }}", resp)
+{{- else if $.RawResponse }}
+	response.JSONRaw(w, http.StatusOK, resp)
 {{- else }}
 	response.JSON(w, http.StatusOK, resp)
 {{- end }}
@@ -61,6 +69,7 @@ func Register(mux *http.ServeMux) {
 		OperationID: "{{ .OperationID }}",
 		Summary:     "{{ .Verb }} {{ $.Route }}",
 		Protected:   {{ $.Protected }},
+		Tags:        []string{"{{ $.Module }}"},
 		ReqType:     {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Request{},
 {{- if .ReqContentType }}
 		ReqContentType: "{{ .ReqContentType }}",
@@ -68,6 +77,9 @@ func Register(mux *http.ServeMux) {
 		RespType: {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response{},
 {{- if $.HTMLResponse }}
 		RespContentType: "text/html",
+{{- end }}
+{{- if $.RawResponse }}
+		RespUnwrapped: true,
 {{- end }}
 	})
 {{- end }}
