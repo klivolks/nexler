@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Install Nexler</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="wrap topnav-inner">
+    <a class="brand" href="#top">
+      <span class="brand-mark">
+        <svg viewBox="140 104 232 304" width="14" height="18" aria-hidden="true">
+          <rect x="140" y="104" width="64" height="304" fill="#fff"/>
+          <rect x="308" y="104" width="64" height="304" fill="#fff"/>
+          <path fill="#fff" d="M140,104 L204,104 L372,408 L308,408 Z"/>
+        </svg>
+      </span>
+      Nexler
+    </a>
+    <div class="topnav-links">
+      <a href="#install">Install</a>
+      <a href="#features">Features</a>
+      <a href="#license">License</a>
+    </div>
+    <a class="topnav-cta" href="#install">Get started</a>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <span class="eyebrow"><span class="dot"></span> Self-contained · scaffolds with zero network access</span>
+    <h1>Scaffold a Go app,<br><em>in under a minute.</em></h1>
+    <p>Nexler is a scaffolding CLI for the Nexler Go web framework — like <code>django-admin startproject</code> or <code>rails new</code>. It generates the handlers/services/store/models layout your app follows, wires new routes into it, and vendors front-end assets from npm.</p>
+
+    <div class="installer" id="install">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-target="windows" role="tab"><i class="fa-brands fa-windows"></i> Windows</button>
+        <button class="tab" data-target="macos" role="tab"><i class="fa-brands fa-apple"></i> macOS</button>
+        <button class="tab" data-target="go" role="tab"><i class="fa-brands fa-golang"></i> Go install</button>
+      </div>
+
+      <div class="term">
+
+        <div class="term-panel active" data-panel="windows">
+          <div class="term-label">Download and run the installer</div>
+          <div class="term-block">
+            <pre><span class="cmt">// download the latest installer, then run it</span>
+nexler-setup.exe</pre>
+            <button class="copy-btn" data-copy="windows"><i class="fa-regular fa-copy"></i></button>
+          </div>
+          <p class="term-note">
+            <a href="https://github.com/klivolks/nexler/releases/latest">Download nexler-setup.exe</a>
+            — walks you through choosing an install location, checking for Go 1.26+/npm (and installing either if
+            missing), a Desktop + Start Menu shortcut, and adding <code>nexler</code> to your PATH.
+          </p>
+        </div>
+
+        <div class="term-panel" data-panel="macos">
+          <div class="term-label">Download and run the installer</div>
+          <div class="term-block">
+            <pre><span class="cmt"># download the latest .pkg, then run it</span>
+open Nexler.pkg</pre>
+            <button class="copy-btn" data-copy="macos"><i class="fa-regular fa-copy"></i></button>
+          </div>
+          <p class="term-note">
+            <a href="https://github.com/klivolks/nexler/releases/latest">Download Nexler.pkg</a>
+            — unsigned for now, so Gatekeeper will block it on first open; run
+            <code>xattr -d com.apple.quarantine Nexler.pkg</code> first. Links <code>nexler</code> into
+            <code>/usr/local/bin</code> and adds a Launchpad/Desktop shortcut.
+          </p>
+        </div>
+
+        <div class="term-panel" data-panel="go">
+          <div class="term-label">Install with Go</div>
+          <div class="term-block">
+            <pre><span class="cmt"># works on any platform with Go 1.26+ already installed</span>
+go install github.com/klivolks/nexler/cmd/nexler@latest</pre>
+            <button class="copy-btn" data-copy="go"><i class="fa-regular fa-copy"></i></button>
+          </div>
+          <p class="term-note">
+            Make sure <code>$(go env GOPATH)/bin</code> is on your <code>PATH</code> — that's where
+            <code>go install</code> puts the binary.
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</header>
+
+<section class="features" id="features">
+  <div class="wrap">
+    <div class="features-grid">
+      <div class="feature">
+        <div class="feature-icon blue"><i class="fa-solid fa-layer-group"></i></div>
+        <h3>Scaffolding</h3>
+        <p>Generates the handlers/services/store/models layout for a new app, and wires new routes into an existing one automatically.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon violet"><i class="fa-solid fa-wifi"></i></div>
+        <h3>Zero network to scaffold</h3>
+        <p>Every template is embedded into the binary via <code>go:embed</code> — creating an app or a route needs no network access at all.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon teal"><i class="fa-solid fa-puzzle-piece"></i></div>
+        <h3>Extensible</h3>
+        <p><code>nexler add</code> vendors front-end packages from npm; <code>nexler init kpass</code>/<code>init kgate</code> wire in Klivolks' own services.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="platforms">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="kicker">From zero to running app</div>
+      <h2>Same four commands, every platform</h2>
+      <p>Whichever way you installed it, using Nexler looks the same everywhere.</p>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">01</div>
+        <h4>Create your app</h4>
+        <p><code>nexler create app myapp</code></p>
+      </div>
+      <div class="step">
+        <div class="step-num">02</div>
+        <h4>Add a route</h4>
+        <p><code>nexler create /path -module ...</code></p>
+      </div>
+      <div class="step">
+        <div class="step-num">03</div>
+        <h4>Build and run</h4>
+        <p><code>go build ./...&nbsp;&&&nbsp;go run main.go</code></p>
+      </div>
+      <div class="step">
+        <div class="step-num">04</div>
+        <h4>Extend it</h4>
+        <p><code>nexler add bootstrap</code>, <code>nexler init kpass</code></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="license">
+  <div class="wrap">
+    <div class="license-band">
+      <div class="ic"><i class="fa-solid fa-shield-halved"></i></div>
+      <div>
+        <h3>Open source, verifiable releases</h3>
+        <p>
+          Nexler is MIT licensed — use it however you like. Every release artifact is signed with
+          <a href="https://github.com/sigstore/cosign" style="color:var(--blue); text-decoration:underline;">cosign</a>,
+          verifiable with the public key committed in the repo:
+          <code>cosign verify-blob --bundle FILE.bundle --key cosign.pub FILE</code>
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap footer-inner">
+    <div>© 2026 Klivolks</div>
+    <div class="footer-links">
+      <a href="https://klivolks.com">klivolks.com</a>
+      <a href="https://github.com/klivolks/nexler/releases">Releases</a>
+      <a href="https://github.com/klivolks/nexler">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const tabs = document.querySelectorAll('.tab');
+  const panels = document.querySelectorAll('.term-panel');
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      panels.forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.querySelector(`.term-panel[data-panel="${tab.dataset.target}"]`).classList.add('active');
+    });
+  });
+
+  document.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pre = btn.closest('.term-block').querySelector('pre');
+      const text = pre.innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        const icon = btn.querySelector('i');
+        icon.className = 'fa-solid fa-check';
+        setTimeout(() => { icon.className = 'fa-regular fa-copy'; }, 1400);
+      });
+    });
+  });
+</script>
+
+</body>
+</html>
