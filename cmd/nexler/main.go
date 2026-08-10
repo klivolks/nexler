@@ -46,6 +46,8 @@ func main() {
 		runInit(os.Args[2:])
 	case "add":
 		runAdd(os.Args[2:])
+	case "db":
+		runDb(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("nexler CLI v%s\n", cliVersion)
 	case "help", "-h", "--help":
@@ -95,6 +97,11 @@ func runCreateApp(args []string) {
 	rememberMe := fs.Bool("remember-me", false, "when -auth includes session, add a rememberMe option to auth.StartSession for a longer-lived login")
 	db := fs.String("db", "", "comma-separated database drivers to generate db/ support for: mongo, mysql, postgres, mssql (any subset; blank means none)")
 	core := fs.String("core", "", "which -db type is this app's conventional default (\"core\") connection; required only when -db selects more than one type")
+	dbHost := fs.String("db-host", "", "core database host; blank (default) leaves .env's DSN blank for you to fill in by hand")
+	dbPort := fs.String("db-port", "", "core database port; defaults to the type's conventional port (3306/5432/1433/27017) when -db-host is set")
+	dbName := fs.String("db-name", "", "core database name")
+	dbUser := fs.String("db-user", "", "core database username (blank = no auth)")
+	dbPassword := fs.String("db-password", "", "core database password (blank = no auth; passed/prompted in plain text, never masked)")
 	fs.Parse(reorderFlagsFirst(fs, args))
 
 	set := map[string]bool{}
@@ -153,15 +160,51 @@ func runCreateApp(args []string) {
 		coreVal = promptChoice("Core database", dbTypes, coreDefault)
 	}
 
+	// Real core connection details are entirely optional — hitting Enter
+	// through dbHostVal (or never passing -db-host at all) reproduces the
+	// original blank-DSN .env output exactly, for anyone who'd rather
+	// fill it in by hand. Every prompt after host is gated on host
+	// actually being non-blank, both to avoid asking pointless questions
+	// in that common case and because a bare port/name/user/password
+	// with no host wouldn't produce a usable DSN anyway.
+	dbHostVal := *dbHost
+	if len(dbTypes) > 0 && !set["db-host"] {
+		dbHostVal = prompt("Core database host (blank = leave DSN blank, fill in .env yourself later)", dbHostVal)
+	}
+	dbPortVal, dbNameVal, dbUserVal, dbPasswordVal := *dbPort, *dbName, *dbUser, *dbPassword
+	if dbHostVal != "" {
+		coreType := coreVal
+		if coreType == "" && len(dbTypes) > 0 {
+			coreType = dbTypes[0] // single -db type: core defaults to it, -core prompt never ran
+		}
+		if !set["db-port"] {
+			dbPortVal = prompt("Core database port", scaffold.DefaultDBPort(coreType))
+		}
+		if !set["db-name"] {
+			dbNameVal = prompt("Core database name", dbNameVal)
+		}
+		if !set["db-user"] {
+			dbUserVal = prompt("Core database username (blank = no auth)", dbUserVal)
+		}
+		if !set["db-password"] {
+			dbPasswordVal = prompt("Core database password (blank = no auth; typed in PLAIN TEXT, not masked)", dbPasswordVal)
+		}
+	}
+
 	cfg := scaffold.NewAppConfig{
-		AppName:    appName,
-		OutputDir:  dir,
-		ModulePath: mod,
-		UI:         uiVal,
-		AuthKind:   authVal,
-		RememberMe: rememberMeVal,
-		DBTypes:    dbTypes,
-		CoreDB:     coreVal,
+		AppName:        appName,
+		OutputDir:      dir,
+		ModulePath:     mod,
+		UI:             uiVal,
+		AuthKind:       authVal,
+		RememberMe:     rememberMeVal,
+		DBTypes:        dbTypes,
+		CoreDB:         coreVal,
+		CoreDBHost:     dbHostVal,
+		CoreDBPort:     dbPortVal,
+		CoreDBName:     dbNameVal,
+		CoreDBUser:     dbUserVal,
+		CoreDBPassword: dbPasswordVal,
 	}
 
 	if err := scaffold.NewApp(cfg); err != nil {
@@ -190,7 +233,13 @@ func runCreateApp(args []string) {
 		if displayCore == "" {
 			displayCore = displayTypes[0] // len(dbTypes) == 1: core defaults to it, no prompt ever ran
 		}
-		fmt.Printf("Databases: %s (core: %s) — see db/db.go (Connect/Close); declare more named connections in .env.\n", strings.Join(displayTypes, ", "), displayCore)
+		fmt.Printf("Databases: %s (core: %s) — see db/db.go (Connect/Close).\n", strings.Join(displayTypes, ", "), displayCore)
+		if dbHostVal != "" {
+			fmt.Println("Core connection DSN written to .env from the details you gave.")
+		} else {
+			fmt.Println("Core connection DSN left blank in .env — fill it in yourself, or re-run with -db-host.")
+		}
+		fmt.Println("Add more connections (and, if needed, a new database type) later with `nexler db add`.")
 		fmt.Println("Run `go mod tidy` before building — this pulls in the driver package(s), which needs network access once.")
 	}
 	fmt.Println("Next steps:")
@@ -371,7 +420,7 @@ interactively instead — press Enter to accept the shown default, or pass the f
 skip the question entirely (e.g. for scripts/CI).
 
 Usage:
-  nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>]
+  nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>] [-db-host <host>] [-db-port <port>] [-db-name <name>] [-db-user <user>] [-db-password <password>]
       Scaffold a new app with the standard handlers/services/store/models
       layout. Scaffolding itself is always fully self-contained: no
       network access, no git required — every template ships embedded
@@ -429,18 +478,30 @@ Usage:
 
       -core picks which -db type is "core" — the app's conventional
       default connection, pre-filled into .env as {APPNAME}_DB_CORE_TYPE
-      / _DSN (fill in the DSN yourself) under connection name "core".
-      Every route's store.go TODO comment points at
-      db.SQL("core")/db.Mongo("core") accordingly (see "nexler create
-      <route>" below). If -db selects only one type, that type is core
-      automatically and -core is never needed. If -db selects more than
-      one, -core is required to be one of them (defaults, when omitted,
-      to mongo if selected, else the first type listed).
+      / _DSN under connection name "core". Every route's store.go TODO
+      comment points at db.SQL("core")/db.Mongo("core") accordingly (see
+      "nexler create <route>" below). If -db selects only one type, that
+      type is core automatically and -core is never needed. If -db
+      selects more than one, -core is required to be one of them
+      (defaults, when omitted, to mongo if selected, else the first type
+      listed).
+
+      -db-host (default blank) lets you give the core connection's real
+      host/port/name/user/password right now instead of leaving _DSN
+      blank for you to fill in by hand afterward — -db-port/-db-name/
+      -db-user/-db-password (all optional, prompted interactively along
+      with -db-host when omitted) are only consulted when -db-host is
+      actually set; leaving it blank (the default — just press Enter)
+      reproduces the original blank-DSN .env output exactly. -db-port
+      defaults to the type's conventional port (3306/5432/1433/27017)
+      when asked interactively. Password is passed/prompted in plain
+      text, never masked — there's no hidden-input prompt in this CLI.
 
       Example: nexler create app test -ui
       Example: nexler create app test -auth jwt
       Example: nexler create app test -auth both -remember-me
       Example: nexler create app test -db postgres,mongo -core mongo
+      Example: nexler create app test -db mongo -db-host localhost -db-name test
 
   nexler create <route> -module <name> [-submodule <name>] [-protected] [-methods GET,POST] [-body json] [-response json] [-layout shared] [-dir <app-dir>]
       Scaffold a route inside an existing app: generates a handler,
@@ -479,6 +540,31 @@ Usage:
 
       Example: nexler create /purchase/verify -module purchase -submodule verify -methods GET,POST -body json -protected
       Example: nexler create /home -module home -response html
+
+  nexler db add <name> -type <mongo|mysql|postgres|mssql> [-dir <app-dir>] [-host <host>] [-port <port>] [-dbname <name>] [-user <user>] [-password <password>]
+      Adds a new named database connection to an existing app's .env — not
+      to be confused with "nexler init db" above (that provisions the core
+      schema on an already-declared connection; this declares a new
+      connection in the first place). If -type isn't a driver the app was
+      originally scaffolded with (e.g. adding mssql to an app created with
+      -db mongo), this also retrofits the missing driver support first:
+      the per-dialect helper package (mysql/mysql.go etc.), db/sql.go's
+      driver import (or a fresh db/sql.go, if this is the app's first SQL
+      dialect ever), and — only if the dialect *family* (SQL vs. mongo) is
+      new to the app as a whole — db/db.go's Connect/Close cases, inserted
+      via marker comments (// nexler:db-connect, // nexler:db-close) so
+      any hand edits elsewhere in that file survive. Works even on an app
+      that was scaffolded with no -db at all (its first-ever connection).
+      <name> must be a valid identifier and can't be "core" — that name is
+      reserved for the app's own conventional default connection, which
+      this command never touches or replaces; the new connection is
+      reachable as db.SQL("<name>")/db.Mongo("<name>") but never becomes
+      core. -host (and the other connection-detail flags) work exactly
+      like "create app"'s -db-host above — blank leaves the new
+      connection's DSN blank for you to fill in by hand.
+
+      Example: nexler db add analytics -type postgres -host localhost -dbname analytics
+      Example: nexler db add reports -type mssql -dir ./myapp
 
   nexler init db [-dir <app-dir>]
       Provisions a generated app's "core" system data on its actual core

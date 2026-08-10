@@ -45,6 +45,7 @@ CLI usage (also printed by `nexler help`):
 ```
 nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>]
 nexler create <route> -module <name> [-submodule <name>] [-dir <app-dir>] [-protected] [-methods GET,POST] [-body json] [-response json]
+nexler db add <name> -type <mongo|mysql|postgres|mssql> [-dir <app-dir>] [-host] [-port] [-dbname] [-user] [-password]
 nexler add <package>[@version] [-dir <app-dir>] [-as <name>]
 nexler version
 ```
@@ -394,13 +395,34 @@ produce a `-db` app — only the generated app's one-time dependency fetch does.
 
 Every `-db`-enabled app gets one connection pre-populated under the conventional name
 `"core"` — `.env`'s `{APPNAME}_DB_CONNECTIONS=core` plus `_DB_CORE_TYPE`/`_DB_CORE_DSN`
-(type filled in, DSN left blank for the user), instead of the empty starter it used to
+(type filled in; DSN either left blank for the user, or built for real — see below —
+depending on whether `-db-host` was given), instead of the empty starter it used to
 be. Which `-db` type is core is a **scaffold-time decision** (`-core <type>`, new flag
 on `create app`): automatic when `-db` selects exactly one type, otherwise required —
 defaults to `mongo` if selected, else the first type listed — resolved by
 `resolveCoreDB` in `scaffold.go`. This is deliberately *not* dynamic/DB-backed: `.env`
 stays the only source of truth for what connections exist (see above); "core" is just
 the name every app's primary connection gets by convention, nothing more.
+
+**Real DSNs, optionally, at scaffold time.** `-db-host`/`-db-port`/`-db-name`/`-db-user`/
+`-db-password` (new `create app` flags) let `_DB_CORE_DSN` be a real, working connection
+string instead of always-blank — `scaffold.go`'s `buildDSN` (dialect switch: mysql's
+`user:pass@tcp(host:port)/dbname`, postgres's `postgres://user:pass@host:port/dbname`
+— defaulting to `?sslmode=disable` whenever password is blank, since pgx's own default
+of `sslmode=prefer` would still connect via graceful fallback against a local no-TLS
+server but pays an extra negotiation round trip for the ambiguity — mssql's
+`sqlserver://user:pass@host:port?database=dbname`, mongo's `mongodb://user:pass@host:port/
+dbname`) plus `userinfo` (renders the `user:pass@` prefix, or `user@`, or nothing at all
+when both are blank — confirmed against each driver's actual documented grammar, not
+assumed, including the mssql-specific wrinkle that blank credentials there fall back to
+Windows/Integrated auth rather than meaning "no auth," since SQL Server has no such
+concept). **Every prompt after `-db-host` is gated on host actually being non-blank** —
+hitting Enter through the flow (or never passing any of these flags) reproduces the
+original always-blank `_DB_CORE_DSN=` output exactly, so this is purely additive, never a
+behavior change for anyone who'd rather fill `.env` in by hand. Password is prompted via
+the same plain-**visible** `prompt()` every other value uses — there's no masked-input
+helper anywhere in `cmd/nexler/prompt.go`, and the prompt label says so explicitly rather
+than silently doing something a user might assume is hidden.
 
 This is what makes `store/<route>/<pkg>.go.tmpl` — previously a disconnected 3-line
 stub referencing a "Store interface" that doesn't exist anywhere in code — actually
@@ -422,6 +444,61 @@ Dynamic, runtime-mutable settings (e.g. timezone — something that needs to cha
 without a restart, unlike `.env`/`config.C`, which loads once at startup) are a
 documented future direction only (see `config.go.tmpl`'s doc comment) — not
 implemented.
+
+#### `nexler db add`: connections (and dialects) after the fact
+
+`nexler db add <name> -type <mongo|mysql|postgres|mssql> [-dir <app-dir>] [-host] [-port]
+[-dbname] [-user] [-password]` (`internal/scaffold/db.go` → `cmd/nexler/db.go`) adds a new
+named connection to an *already-scaffolded* app — the thing `-db`'s own doc comment above
+already flags as "pure `.env`/runtime config," now with a command to do it instead of a
+hand edit, plus the ability to retrofit a driver type the app wasn't originally
+scaffolded with. Deliberately **not** named anything with "init db" in it — `nexler init
+db` already means something different (provisioning the core schema on a live database
+connection, a real network operation); this command never opens a live connection at all,
+it only edits `.env` and, when retrofitting, writes/patches Go source. `<name>` can't be
+`"core"` (reserved for the app's own conventional default connection, which this command
+never touches — the added connection is reachable as `db.SQL("<name>")`/
+`db.Mongo("<name>")` but never promoted to core) and must match `^[A-Za-z][A-Za-z0-9_]*$`
+— rejected outright rather than silently sanitized, since a mismatched sanitization would
+break hand-written `db.SQL("<name>")` call sites. `-host`/etc. work exactly like `create
+app`'s `-db-host`/etc. above — blank leaves the new connection's DSN blank.
+
+`recoverEnvPrefix` (not `route.go`'s `readCoreDBType`) recovers the app's `{PREFIX}` by
+scanning for the *unconditional* `_HOST=` line rather than `_DB_CORE_TYPE=` — deliberate,
+since `db add` needs to work on a `-db`-less app too (adding its very first database),
+which has no `_DB_CORE_TYPE` line to scan for at all. `setEnvLine` is new — `kpass.go`'s
+`ensureEnvVars` only ever appends brand-new *blank* placeholders for a fixed, known list
+of key names; it can neither update `_DB_CONNECTIONS`'s existing value in place nor
+handle a dynamically-built key name like `{PREFIX}_DB_ANALYTICS_DSN`, only known at call
+time — `setEnvLine` upserts any key, replacing in place if present, appending if not.
+
+**Retrofitting a dialect** (`dialectEnabled` checks file existence — `mysql/mysql.go`,
+`db/mongo.go`, etc. — same "detect state from what's on disk" precedent as `kpass.go`'s
+own `detectAuthFiles`) writes whatever's missing, code before `.env` (so a crash mid-
+retrofit self-heals into "dialect already enabled" on retry rather than getting stuck on
+an overwrite refusal): the per-dialect helper package always; for mongo, a fresh
+`db/mongo.go` (zero `{{ }}` references in that template at all — a plain copy); for a SQL
+type, either a patched import block in an already-existing `db/sql.go` (reusing
+`route.go`'s `insertImport` completely as-is — it was already generic, no `routeData`
+coupling, so no new insertion code was needed there — `sqlDriverName`'s own `switch` needs
+no change either, since it's unconditionally exhaustive for all three SQL dialects
+regardless of which are actually compiled in) or a freshly-rendered `db/sql.go` if this is
+the app's first SQL dialect ever.
+
+`db/db.go` only needs touching when the dialect *family* (SQL vs. mongo) is new to the
+app as a whole — a detail easy to miss since it's gated independently of `sql.go.tmpl`'s
+own imports: `Connect()`/`Close()` each have their own `{{if or .HasMySQL .HasPostgres
+.HasMSSQL}}` / `{{if .HasMongo}}` blocks. Renders fresh if the app had zero `-db`
+originally; otherwise patches the existing file via two marker comments —
+`// nexler:db-connect` (right before `Connect()`'s `default:` case) and `//
+nexler:db-close` (right before `Close()`'s `return errors.Join(errs...)`) — the same
+idempotent-marker-insertion shape `route.go` already established for handler/model/
+aggregator files, chosen deliberately over full-file regeneration even though `db.go`'s
+content is fully derived from a few booleans: these are files a developer could plausibly
+hand-edit (connection pool tuning, custom TLS config, timeouts), and silent regeneration
+on a retrofit would be a quiet, easy-to-miss way to lose that. An app scaffolded before
+these markers existed gets a clear error naming the exact marker text to add back by
+hand, same as the existing route-marker precedent.
 
 #### The `mongo` package: chainable CRUD helpers
 

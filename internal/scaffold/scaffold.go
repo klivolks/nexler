@@ -77,6 +77,14 @@ type NewAppConfig struct {
 	// has more than one and CoreDB is empty, it defaults to "mongo" if
 	// present, else DBTypes' first entry.
 	CoreDB string
+	// CoreDBHost, if non-empty, causes NewApp to build a real DSN for the
+	// "core" connection (via buildDSN) and write it to .env instead of
+	// leaving {{.EnvPrefix}}_DB_CORE_DSN= blank. CoreDBPort/CoreDBName/
+	// CoreDBUser/CoreDBPassword are only consulted when CoreDBHost is
+	// set — leaving CoreDBHost empty (the default) reproduces the
+	// original blank-DSN behavior exactly, for anyone who'd rather fill
+	// .env in by hand.
+	CoreDBHost, CoreDBPort, CoreDBName, CoreDBUser, CoreDBPassword string
 }
 
 // TargetPath returns the full path of the app directory to be created.
@@ -107,6 +115,10 @@ type templateData struct {
 	// core/config.go.tmpl's GetSetting uses — empty when CoreDBAccessor is
 	// "Mongo" (unused there). See configGetQuerySQL.
 	CoreConfigGetQuery string
+	// CoreDBDSN is the real connection string dotenv.tmpl writes to
+	// {{.EnvPrefix}}_DB_CORE_DSN — empty (the default) writes a blank
+	// value, same as before this field existed. See NewAppConfig.CoreDBHost.
+	CoreDBDSN string
 }
 
 // NewApp scaffolds a new app directory at cfg.TargetPath() by walking the
@@ -166,6 +178,10 @@ func NewApp(cfg NewAppConfig) error {
 	if hasDB && coreDB != "" && coreDB != "mongo" {
 		coreConfigGetQuery = configGetQuerySQL(coreDB)
 	}
+	coreDBDSN := ""
+	if hasDB && coreDB != "" && cfg.CoreDBHost != "" {
+		coreDBDSN = buildDSN(coreDB, cfg.CoreDBHost, cfg.CoreDBPort, cfg.CoreDBName, cfg.CoreDBUser, cfg.CoreDBPassword)
+	}
 
 	data := templateData{
 		AppName:            cfg.AppName,
@@ -185,6 +201,7 @@ func NewApp(cfg NewAppConfig) error {
 		HasCoreDB:          hasDB,
 		CoreDBAccessor:     coreDBAccessor,
 		CoreConfigGetQuery: coreConfigGetQuery,
+		CoreDBDSN:          coreDBDSN,
 	}
 
 	err = fs.WalkDir(templateFS, templatesRoot, func(path string, d fs.DirEntry, err error) error {
@@ -453,6 +470,69 @@ func configGetQuerySQL(dbType string) string {
 		return "SELECT value FROM core_config WHERE [key] = @p1"
 	default: // postgres
 		return "SELECT value FROM core_config WHERE key = $1"
+	}
+}
+
+// buildDSN constructs a real, dialect-correct connection string from
+// separate host/port/dbname/user/password fields — used both when
+// `create app -db` is given real connection details (instead of leaving
+// the DSN blank for the user to fill in by hand) and by `nexler db add`
+// when adding a new named connection.
+func buildDSN(dbType, host, port, dbname, user, password string) string {
+	switch dbType {
+	case "postgres":
+		suffix := ""
+		if password == "" {
+			// Explicit for local/no-TLS test databases: pgx's own default
+			// (sslmode=prefer) would still connect via a graceful fallback
+			// to plaintext when the server doesn't speak TLS, but this
+			// skips that extra negotiation round trip and removes any
+			// ambiguity about what actually happened.
+			suffix = "?sslmode=disable"
+		}
+		return "postgres://" + userinfo(user, password) + host + ":" + port + "/" + dbname + suffix
+	case "mssql":
+		// go-mssqldb has no true "no auth" concept — blank user/password
+		// here falls back to Windows/Integrated auth (the driver's own
+		// documented behavior when no SQL credentials are present in the
+		// URL, not something this function tries to work around).
+		return "sqlserver://" + userinfo(user, password) + host + ":" + port + "?database=" + dbname
+	case "mongo":
+		return "mongodb://" + userinfo(user, password) + host + ":" + port + "/" + dbname
+	default: // mysql
+		return userinfo(user, password) + "tcp(" + host + ":" + port + ")/" + dbname
+	}
+}
+
+// userinfo renders the "user:password@" (or "user@", or "") prefix
+// shared by all four DSN formats above. Both go-sql-driver/mysql and
+// mongo-driver document this whole segment as optional syntax — omitted
+// entirely when both user and password are blank, rather than emitting a
+// dangling "@" or empty "user:@".
+func userinfo(user, password string) string {
+	switch {
+	case user == "" && password == "":
+		return ""
+	case password == "":
+		return user + "@"
+	default:
+		return user + ":" + password + "@"
+	}
+}
+
+// DefaultDBPort returns dbType's conventional default port, used by
+// cmd/nexler to pre-fill the port prompt during `create app -db` and
+// `nexler db add`.
+func DefaultDBPort(dbType string) string {
+	switch dbType {
+	case "postgres":
+		return "5432"
+	case "mssql":
+		return "1433"
+	case "mongo":
+		return "27017"
+	default: // mysql
+		return "3306"
 	}
 }
 

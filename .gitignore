@@ -30,3 +30,5 @@
 # NOT listed here.
 /cosign.key
 /cosign.password.txt
+
+/text.txt
