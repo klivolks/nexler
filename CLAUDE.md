@@ -801,14 +801,32 @@ channel) error` records channel in the **core kgate-channel registry**
 and starts a background goroutine maintaining a live WebSocket connection for it, returning
 immediately — safe to call from inside a request handler or any in-flight workflow.
 `Unsubscribe(ctx, channel) error` cancels that goroutine and removes the channel from the
-registry. `ResumeAll(ctx) error` re-subscribes to every channel already recorded — meant to
-be called once at startup (near `db.Connect()`), but **not wired automatically**: `main.go`
-is never edited again after the initial `create app` scaffold, and `init kgate` runs
-independently of it (possibly long after), so this is one line added by hand, same
-"primitives only" precedent as `kpass`'s `/login` route. An in-memory `activeSubs
+registry. `ResumeAll(ctx) error` re-subscribes to every channel already recorded. Unlike the
+earlier "primitives only" precedent set by `kpass`'s missing `/login` route, `ResumeAll` **is**
+wired automatically — but not via `main.go` (which stays untouched: it's scaffolded once by
+`create app` and never edited again by any later command, `init kgate` included). Instead,
+`Register(mux)` — already auto-inserted into `routes/public/public.go` by `NewKgate`, and
+already called unconditionally from `main.go`'s existing one-time `routes.Register(mux)` — now
+also kicks off `ResumeAll(context.Background())` in a background goroutine the moment it runs,
+logging (never failing `Register`) if it errors. This makes resuming a fully zero-config,
+"just works" property of every kgate-enabled app: a fresh process with channels already on
+record resumes listening to them with no manual wiring at all; a process with none recorded yet
+starts nothing and stays idle until `Subscribe` records a real one. An in-memory `activeSubs
 map[string]context.CancelFunc` behind a `sync.Mutex` (same shape `auth/session.go.tmpl`'s
-session map already established) tracks running subscription goroutines for `Unsubscribe`
-and to make a repeat `Subscribe` on an already-listening channel a no-op.
+session map already established) tracks running subscription goroutines for `Unsubscribe`, to
+make a repeat `Subscribe` on an already-listening channel a no-op, and — as a side effect —
+to make a hypothetical repeat `ResumeAll` call harmless too (channels already being listened to
+are simply skipped).
+
+An app that ran `init kgate` before this behavior existed picks it up via `nexler update`
+(`ensureKgateResumeAll` in `internal/scaffold/kgate.go`, registered in `update.go`'s
+`updateChecks`) — a narrow, anchor-based patch of `Register`'s exact original body (plus adding
+a `"log"` import if missing via `route.go`'s `insertImport`), deliberately *not* a full-file
+regeneration: `handleEvent` in this same file is the documented, expected hand-edit point for
+real business logic, so the retrofit must never risk touching it. Same "has it been
+hand-rewritten?" guard as `ensureResponseJSONRaw`/`ensureJWTClaims` if `Register`'s body doesn't
+match the known original — errors out naming the file and the exact snippet to add by hand,
+rather than silently overwriting a customized `Register`.
 
 Because a restart's `ResumeAll` can only recover channel *names* from the database, not
 arbitrary handler closures, every channel — whether from a live subscription or the

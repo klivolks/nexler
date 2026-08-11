@@ -18,6 +18,7 @@ import (
 {{- if eq .CoreDBAccessor "Mongo" }}
 	"time"
 
+	"{{ .ModulePath }}/db"
 	"{{ .ModulePath }}/mongo"
 {{- else }}
 	"{{ .ModulePath }}/{{ .CoreDB }}"
@@ -37,7 +38,11 @@ func configCollection() (mongo.Collection, bool) {
 	if !ok {
 		return mongo.Collection{}, false
 	}
-	return conn.Database("core").Collection("core_config"), true
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("core_config"), true
 }
 
 // GetSetting returns key's current value, and whether it's set at all.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"{{ .ModulePath }}/db"
 	"{{ .ModulePath }}/mongo"
 )
 
@@ -21,7 +22,11 @@ func errorLogCollection() (mongo.Collection, bool) {
 	if !ok {
 		return mongo.Collection{}, false
 	}
-	return conn.Database("core").Collection("core_error_log"), true
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("core_error_log"), true
 }
 
 // LogError records an error to the core_error_log collection: message is
