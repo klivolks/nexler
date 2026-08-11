@@ -1,12 +1,22 @@
 package {{ .PkgName }}
 
-// Do{{ .Name }} contains the business logic for {{ .Route }}.
+// Do{{ .Name }} contains the business logic for {{ .RouteLabel }}.
 {{- if .HasStoreRef }}
 // TODO: implement, calling into store as needed. The store lives at
 // {{ .StoreImportPath }}.
-{{- else }}
+{{- else if .HasStore }}
 // TODO: implement, calling into store as needed. The store lives at
 // {{ .ModulePath }}/store/{{ .RelDirSlash }}.
+{{- else if .Standalone }}
+// TODO: implement. No store package is linked to this service — add one
+// via `nexler create store <module>[/<submodule>]`, then re-run this
+// command with -store <name>, or write store/{{ .RelDirSlash }} by hand,
+// if this needs persistence.
+{{- else }}
+// TODO: implement. No store package was generated for this route — add
+// one later (re-run `nexler create {{ .Route }} -module ... -store
+// <name>`), or write store/{{ .RelDirSlash }} by hand, if this needs
+// persistence.
 {{- end }}
 func Do{{ .Name }}() error {
 	return nil

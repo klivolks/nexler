@@ -61,18 +61,20 @@ func main() {
 	}
 }
 
-// runCreate dispatches `nexler create ...`. Two shapes are supported:
+// runCreate dispatches `nexler create ...`. These shapes are supported:
 //
-//	nexler create app <name> ...        scaffold a whole new app
-//	nexler create /some/path -module .. scaffold a route inside the
-//	                                     current app (path starts with "/")
+//	nexler create app <name> ...          scaffold a whole new app
+//	nexler create /some/path -module ..   scaffold a route inside the
+//	                                       current app (path starts with "/")
+//	nexler create store <name> ...        scaffold a standalone store
+//	nexler create service <name> ...      scaffold a standalone service
 //
 // The leading "/" is what distinguishes a route from a resource keyword
-// like "app"; this leaves room for e.g. `nexler create model` later
-// without a breaking CLI change.
+// like "app"/"store"/"service"; this leaves room for e.g. `nexler create
+// model` later without a breaking CLI change.
 func runCreate(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "nexler: missing argument\n\nusage:\n  nexler create app <name> [-dir <output-dir>] [-module <module-path>]\n  nexler create <route> -module <name> [-submodule <name>] [-dir <app-dir>]")
+		fmt.Fprintln(os.Stderr, "nexler: missing argument\n\nusage:\n  nexler create app <name> [-dir <output-dir>] [-module <module-path>]\n  nexler create <route> -module <name> [-submodule <name>] [-dir <app-dir>]\n  nexler create store|service <name> [-file <name>] [-dir <app-dir>]")
 		os.Exit(1)
 	}
 
@@ -84,8 +86,10 @@ func runCreate(args []string) {
 	switch args[0] {
 	case "app":
 		runCreateApp(args[1:])
+	case "store", "service":
+		runCreateLayer(args[0], args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "nexler: unknown resource %q for create\n\nsupported: app, or a route path starting with /\n", args[0])
+		fmt.Fprintf(os.Stderr, "nexler: unknown resource %q for create\n\nsupported: app, store, service, or a route path starting with /\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -265,8 +269,8 @@ func runCreateRoute(route string, args []string) {
 	module := fs.String("module", "", "module (top-level group) this route belongs to, e.g. purchase")
 	submodule := fs.String("submodule", "", "submodule (nested group) this route belongs to, e.g. verify")
 	file := fs.String("file", "", "base file name for the generated handler/service/store/model files, e.g. verify; defaults to the route's package name (last of -module/-submodule)")
-	service := fs.String("service", "", "reuse an existing service package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify")
-	store := fs.String("store", "", "reuse an existing store package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify")
+	service := fs.String("service", "", "reuse an existing service package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify; \"none\" skips generating a service for this route entirely (stop at handler+model)")
+	store := fs.String("store", "", "reuse an existing store package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify; \"none\" skips generating a store for this route entirely (stop at handler+model)")
 	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
 	protected := fs.Bool("protected", false, "require auth for this route (registers in routes/protected instead of routes/public); when adding method(s) to an already-existing route package, applies only to the newly-added method(s), independently of the rest of the package")
 	methods := fs.String("methods", "GET", "comma-separated HTTP methods to generate: GET, POST, PUT, PATCH, DELETE (OPTIONS is automatic and always 200 OK)")
@@ -294,13 +298,28 @@ func runCreateRoute(route string, args []string) {
 	}
 
 	serviceVal := *service
-	if !set["service"] {
-		serviceVal = prompt("Reuse existing service (optional, e.g. purchase/verify)", "")
-	}
-
 	storeVal := *store
-	if !set["store"] {
-		storeVal = prompt("Reuse existing store (optional, e.g. purchase/verify)", "")
+	if !set["service"] && !set["store"] {
+		// Neither flag was touched at all — ask the single yes/no gate
+		// instead of unconditionally walking through two reuse prompts
+		// (the "have to mention store and service" friction this gate
+		// exists to remove), same shape as -db's own "Use a database?"
+		// gate. Default true preserves today's behavior for anyone who
+		// just accepts every default.
+		if promptBool("Generate service and store layers for this route?", true) {
+			serviceVal = prompt("Reuse existing service (optional, e.g. purchase/verify)", "")
+			storeVal = prompt("Reuse existing store (optional, e.g. purchase/verify)", "")
+		} else {
+			serviceVal = "none"
+			storeVal = "none"
+		}
+	} else {
+		if !set["service"] {
+			serviceVal = prompt("Reuse existing service (optional, e.g. purchase/verify; \"none\" to skip)", "")
+		}
+		if !set["store"] {
+			storeVal = prompt("Reuse existing store (optional, e.g. purchase/verify; \"none\" to skip)", "")
+		}
 	}
 
 	protectedVal := *protected
@@ -334,18 +353,20 @@ func runCreateRoute(route string, args []string) {
 	}
 
 	cfg := scaffold.RouteConfig{
-		Route:        route,
-		Module:       moduleVal,
-		Submodule:    submoduleVal,
-		FileName:     fileVal,
-		ServiceRef:   serviceVal,
-		StoreRef:     storeVal,
-		AppDir:       dirVal,
-		Protected:    protectedVal,
-		Methods:      splitCSV(methodsVal),
-		BodyKind:     bodyVal,
-		ResponseKind: responseVal,
-		LayoutKind:   layoutVal,
+		Route:            route,
+		Module:           moduleVal,
+		Submodule:        submoduleVal,
+		FileName:         fileVal,
+		ServiceRef:       serviceVal,
+		StoreRef:         storeVal,
+		ServiceRequested: set["service"],
+		StoreRequested:   set["store"],
+		AppDir:           dirVal,
+		Protected:        protectedVal,
+		Methods:          splitCSV(methodsVal),
+		BodyKind:         bodyVal,
+		ResponseKind:     responseVal,
+		LayoutKind:       layoutVal,
 	}
 
 	result, err := scaffold.NewRoute(cfg)
@@ -366,30 +387,101 @@ func runCreateRoute(route string, args []string) {
 	if result.Created {
 		fmt.Printf("Added %s route %s [%s] (%s)\n", kind, route, strings.Join(result.Added, ","), group)
 		layers := []string{"handler"}
-		if serviceVal == "" {
+		var reused []string
+		switch serviceVal {
+		case "none":
+		case "":
 			layers = append(layers, "service")
+		default:
+			reused = append(reused, "service "+serviceVal)
 		}
-		if storeVal == "" {
+		switch storeVal {
+		case "none":
+		case "":
 			layers = append(layers, "store")
+		default:
+			reused = append(reused, "store "+storeVal)
 		}
 		layers = append(layers, "model")
 		fmt.Printf("Generated %s files", strings.Join(layers, ", "))
-		if serviceVal != "" {
-			fmt.Printf(", reusing service %s", serviceVal)
-		}
-		if storeVal != "" {
-			fmt.Printf(", reusing store %s", storeVal)
+		if len(reused) > 0 {
+			fmt.Printf(", reusing %s", strings.Join(reused, " and "))
 		}
 		fmt.Println(", and wired the route into routes/" + kind + "/" + kind + ".go.")
 	} else {
-		fmt.Printf("Route %s (%s) already existed — added method(s): %s (%s)\n", route, group, strings.Join(result.Added, ", "), kind)
+		if len(result.Added) > 0 {
+			fmt.Printf("Route %s (%s) already existed — added method(s): %s (%s)\n", route, group, strings.Join(result.Added, ", "), kind)
+		} else {
+			fmt.Printf("Route %s (%s) already existed — no new methods requested\n", route, group)
+		}
 		if len(result.Skipped) > 0 {
 			fmt.Printf("Already present, left unchanged: %s\n", strings.Join(result.Skipped, ", "))
+		}
+		if len(result.LayersAdded) > 0 {
+			fmt.Printf("Added missing layer(s) to the existing route: %s\n", strings.Join(result.LayersAdded, ", "))
 		}
 		if result.Note != "" {
 			fmt.Println(result.Note)
 		}
 	}
+}
+
+// runCreateLayer implements `nexler create store|service <name>` — see
+// internal/scaffold/layer.go for the actual scaffolding logic. kind is
+// "store" or "service". <name> addresses the package the same way
+// -service/-store's own reuse references do: module[/submodule].
+func runCreateLayer(kind string, args []string) {
+	fs := flag.NewFlagSet("create "+kind, flag.ExitOnError)
+	file := fs.String("file", "", "base file name for the generated file, e.g. verify; defaults to \"<pkgname>"+kind+"\" (e.g. \"appsservice\"/\"appsstore\" for <name> apps)")
+	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
+	var store *string
+	if kind == "service" {
+		store = fs.String("store", "", "link this service to an already-scaffolded store package, as module[/submodule], e.g. purchase or purchase/verify — optional, purely informational (only affects the generated TODO comment)")
+	}
+	fs.Parse(reorderFlagsFirst(fs, args))
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	name := ""
+	if fs.NArg() >= 1 {
+		name = fs.Arg(0)
+	} else {
+		name = promptRequired(strings.ToUpper(kind[:1]) + kind[1:] + " name (module[/submodule], e.g. purchase or purchase/verify)")
+	}
+
+	fileVal := *file
+	if !set["file"] {
+		fileVal = prompt("File name (optional, default: <pkgname>"+kind+")", "")
+	}
+
+	dirVal := *dir
+	if !set["dir"] {
+		dirVal = prompt("App directory", dirVal)
+	}
+
+	cfg := scaffold.LayerConfig{
+		Kind:     kind,
+		Name:     name,
+		FileName: fileVal,
+		AppDir:   dirVal,
+	}
+	if kind == "service" {
+		storeVal := *store
+		if !set["store"] {
+			storeVal = prompt("Link to an existing store (optional, e.g. purchase/verify)", "")
+		}
+		cfg.StoreRef = storeVal
+	}
+
+	result, err := scaffold.NewLayer(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "nexler: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Created standalone %s package: %s\n", kind, result.Path)
+	fmt.Println("Not wired into anything — import it by hand from wherever needs it.")
 }
 
 // reorderFlagsFirst rewrites args so every flag (and, for flags that take a

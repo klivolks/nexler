@@ -90,31 +90,12 @@ func Allowed(result *Result) bool {
 }
 {{- if or .HasJWT .HasSession }}
 
-// UserIDFromRequest extracts r's authenticated subject —
-{{- if and .HasJWT .HasSession }}
-// from its JWT bearer token (auth.Claims.Subject) if present, else its
-// session cookie's subject, the same precedence middleware.RequireAuth
-// uses —
-{{- else if .HasJWT }}
-// from its JWT bearer token's auth.Claims.Subject —
-{{- else }}
-// from its session cookie's subject (auth.SessionFromRequest) —
-{{- end }}
-// for passing as Check's userID. ok is false if the request isn't
-// authenticated.
+// UserIDFromRequest extracts r's authenticated subject — the same
+// subject middleware.RequireAuth already verified and attached to r's
+// context via auth.ContextWithSubject — for passing as Check's userID.
+// ok is false if r was never authenticated (e.g. a public route, or one
+// not wrapped in middleware.RequireAuth).
 func UserIDFromRequest(r *http.Request) (userID string, ok bool) {
-{{- if .HasJWT }}
-	if token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); found && token != "" {
-		if claims, err := auth.VerifyJWT(token); err == nil {
-			return claims.Subject, true
-		}
-	}
-{{- end }}
-{{- if .HasSession }}
-	if subject, found := auth.SessionFromRequest(r); found {
-		return subject, true
-	}
-{{- end }}
-	return "", false
+	return auth.Subject(r)
 }
 {{- end }}

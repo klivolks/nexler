@@ -45,6 +45,8 @@ CLI usage (also printed by `nexler help`):
 ```
 nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>]
 nexler create <route> -module <name> [-submodule <name>] [-dir <app-dir>] [-protected] [-methods GET,POST] [-body json] [-response json]
+nexler create store <name> [-file <name>] [-dir <app-dir>]
+nexler create service <name> [-file <name>] [-dir <app-dir>] [-store <name>]
 nexler db add <name> -type <mongo|mysql|postgres|mssql> [-dir <app-dir>] [-host] [-port] [-dbname] [-user] [-password]
 nexler add <package>[@version] [-dir <app-dir>] [-as <name>]
 nexler version
@@ -320,10 +322,40 @@ generated differently depending on the app-creation-time `-auth` choice
   bearer token first, falls back to the session cookie — so the same protected route
   serves API clients (bearer) and browser/UI clients (session cookie) at once.
 
+Whichever branch verifies the caller, `RequireAuth` attaches the resulting subject
+(userID) to the request's `context.Context` via `auth.ContextWithSubject`
+(`auth/context.go.tmpl` → `auth/context.go`, generated whenever `AuthKind != "none"` —
+unconditionally alongside whichever of `jwt.go`/`session.go` is present, not per-file
+gated like they are, since it's needed regardless of which mechanism is active) before
+calling the wrapped handler. Any protected handler reads it back with
+`auth.Subject(r) (subject string, ok bool)` — the general-purpose way to get the
+authenticated userID inside a protected route, independent of `nexler init kpass` (see
+`UserIDFromRequest` below, now a thin wrapper over this same function).
+
+An app scaffolded before this feature existed doesn't get it automatically — retrofit
+it with `nexler update [-dir <app-dir>]` (`internal/scaffold/update.go`'s
+`ensureAuthSubjectContext`, registered in its `updateChecks` alongside
+`ensureOpenAPIUpToDate`/`ensureResponseJSONRaw`). It detects the app's auth mechanism
+the same way `nexler init kpass`'s `detectAuthFiles` does (whether `auth/jwt.go`/
+`auth/session.go` exist on disk — a no-op, not an error, for an `-auth none` app or
+one predating `-auth` entirely), adds `auth/context.go` if missing, and — if
+`middleware/auth.go` predates `ContextWithSubject` — fully regenerates it from the
+current template. Full regeneration (not a marker-based patch like
+`ensureResponseJSONRaw` uses for `response.go`) is deliberate: `RequireAuth` has no
+established hand-customization pattern and its content is fully derived from
+`AuthKind`/`ModulePath` alone, the same "pure generated infra, no per-app free text"
+reasoning `ensureOpenAPIUpToDate` already relies on for `openapi.go` — the trade-off
+being that a hand-edited `RequireAuth` (extra logging, custom error messages) would be
+silently discarded. A sanity check (the existing file must still contain `func
+RequireAuth`) guards against that being *catastrophic* — an unrecognized file errors
+out instead of being overwritten, naming the file and asking the developer to
+reconcile it by hand.
+
 `scaffold.go`'s `NewApp` picks which `auth/*.go.tmpl` files actually get walked: the
 whole `auth/` directory is skipped via `fs.SkipDir` when `AuthKind == "none"`; otherwise
 whichever of `jwt.go.tmpl`/`session.go.tmpl` isn't needed is skipped per-file (same
-technique `-ui` already uses to skip the unused embedded homepage). The JWT secret
+technique `-ui` already uses to skip the unused embedded homepage) — `context.go.tmpl`
+has no such per-file skip, since both auth kinds need it. The JWT secret
 (`generateJWTSecret`, `crypto/rand`, 32 bytes) is generated once per `nexler create app`
 call and threaded through `templateData.JWTSecret` into both `config.go.tmpl` (a new
 conditional `Config.JWTSecret` field, env var `{{.EnvPrefix}}_JWT_SECRET`) and
@@ -533,6 +565,27 @@ Scoped to exactly these six operations: no transactions, no query-builder beyond
 struct-filter translation. A caller needing more can still drop to `db.Mongo(name)`
 directly for the full driver API.
 
+**`InsertID[T](ctx, coll, doc) (bson.ObjectID, T, error)`** is a seventh, additive
+function alongside `Insert` (never changing `Insert`'s own signature — a hard rule this
+repo's own commit history is explicit about: "no removals or breaking signature
+changes"), for the common real-world case a plain `Insert` can't serve:
+`Insert`/`InsertOne` still work exactly as before, but the driver assigns `_id`
+server-side and the caller's own `doc` value — passed by value — never sees it back.
+`InsertID` locates `T`'s ID field by its `bson` tag (`bsonFieldName(f) == "_id"`,
+recursing into anonymous embedded struct fields so a hand-defined "base" struct every
+model embeds — a `Base` struct holding just an `ID bson.ObjectID` field tagged
+`bson:"_id,omitempty"`, embedded as `Base` tagged `bson:",inline"` — is found the same
+way a direct field would be); if it's still zero, generates a real `bson.NewObjectID()`
+before inserting
+and returns it. If `T` has no such field at all (e.g. `core/errorlog.go.tmpl`'s
+`errorLogDoc`, which has none by design), `InsertID` just delegates to `Insert`
+unchanged and returns a zero `ObjectID` — never an error, never a requirement. Note this
+locator is intentionally more capable than `filterToBSON`/`structToBSON` above (which
+don't flatten anonymous embeds at all) — that's `InsertID`'s own reflection walk, not a
+change to the existing filter builder; a struct literal used as a `Get`/`Set` filter
+still needs the qualified embedded form and still won't match on a bare embedded field
+the way `Insert`'s own driver-level BSON marshaling already does.
+
 #### The `mysql`/`postgres`/`mssql` packages: struct-based SQL helpers
 
 Same motivating idea as `mongo`, but SQL can't mirror its shape 1:1: there's no shared
@@ -590,6 +643,39 @@ risk: only *values* ever flow through parameterized placeholders; table/column/p
 names come from Go struct tags and literal `.Table("...")`/`Call(ctx, conn, "proc", ...)`
 arguments — developer-authored at compile time, never runtime data threaded
 unparameterized into query text.
+
+**`InsertID[T](ctx, t, doc) (int64, T, error)`** is an eighth, additive function
+alongside `Insert` in each of the three packages (never changing `Insert`'s own
+signature, same "no breaking signature changes" rule as `mongo.InsertID` above) — the
+SQL-side answer to "every table should have a primary key," following the
+server-assigned auto-increment integer convention nexler's own schemas already use
+(`cmd/nexler/initdb.go`'s `core_config`/`core_error_log`/`core_kgate_channels`:
+`id INT AUTO_INCREMENT` / `id SERIAL` / `id INT IDENTITY(1,1)`), not a client-generated
+UUID (a confirmed choice — see "Design decisions" in this feature's implementation
+history). `InsertID` locates `T`'s primary-key field by `db` tag or lowercased field
+name resolving to column `"id"`, and requires it to hold a Go integer kind
+(`Int`/`Int8`/.../`Int64`) — a `findIntPKField` helper, one independent copy per
+package like every other helper here. When that field's current value is zero, it's
+omitted from the `INSERT` column list entirely (`insertColumnsSkipping`, an
+`insertColumns` variant) so the database assigns it, then read back via each dialect's
+own native mechanism — mysql `LastInsertId()`, postgres `RETURNING <col>`, mssql
+`OUTPUT INSERTED.<col>` (go-mssqldb doesn't support `LastInsertId()` reliably, so
+`OUTPUT` plays `RETURNING`'s role there) — and set back onto the returned `T`. A
+caller-supplied non-zero value is written as an ordinary column instead and echoed back
+unchanged. If `T` has no integer `"id"`-mapped field at all, `InsertID` delegates to
+`Insert` unchanged and returns `0` — never an error, same fallback precedent as the
+mongo side. Composite keys and non-integer (e.g. string/UUID) primary keys aren't
+supported by `InsertID` — a model needing one still uses the existing `Insert`.
+
+Apps scaffolded before `InsertID` existed pick it up via `nexler update` (see
+"Authentication" above for this same command's other retrofit,
+`ensureAuthSubjectContext`) — `ensureInsertIDHelpers` (`route.go`) appends `InsertID`
+and its helpers to whichever of `mongo.go`/`mysql.go`/`postgres.go`/`mssql.go` already
+exist and don't yet define it (skipping any dialect the app wasn't scaffolded with).
+Append-only, like `ensureResponseJSONRaw`'s `JSONRaw` insertion, not a full regen like
+`ensureAuthSubjectContext`'s `middleware/auth.go` rewrite: `InsertID` is wholly new code
+that never touches or replaces anything already in these files, so there's nothing to
+sanity-check before appending.
 
 `route.go`'s `readCoreDBType` (already used for the "core" connection — see above) also
 threads the literal type name through as `routeData.CoreDBType`, so `store.go.tmpl`'s
@@ -677,13 +763,16 @@ Also generated, only when the target app has a real `-auth` mechanism: `UserIDFr
 (r *http.Request) (userID string, ok bool)`, extracting the request's authenticated
 subject to pass into `Check`. Since `init kpass` runs independently of `create app`
 (possibly long after), `AuthKind` isn't available as a stored flag — `detectAuthFiles`
-detects it after the fact, from whether `auth/jwt.go`/`auth/session.go` exist on disk.
-`UserIDFromRequest`'s body then branches the same three ways `middleware/auth.go.tmpl`'s
-`RequireAuth` already does for JWT-only/session-only/both (bearer token first, falling
-back to session cookie), just driven by detected files instead of `.AuthKind`. For an app
-scaffolded with `-auth none`, `UserIDFromRequest` isn't generated at all — there's no
-subject to extract — and the caller supplies `Check`'s `userID` however that app already
-identifies callers.
+detects it after the fact, from whether `auth/jwt.go`/`auth/session.go` exist on disk,
+purely to decide *whether* to generate the function at all. Its body no longer
+re-parses the bearer token/session cookie itself — it's a thin wrapper,
+`return auth.Subject(r)`, over the same context value `middleware/auth.go.tmpl`'s
+`RequireAuth` already attached (see "Authentication" above); `kpass` keeps its own
+named `UserIDFromRequest` export purely for call-site convenience (`userID, ok :=
+kpass.UserIDFromRequest(r)` reads naturally next to `kpass.Check`), not because it
+does anything `auth.Subject` doesn't. For an app scaffolded with `-auth none`,
+`UserIDFromRequest` isn't generated at all — there's no subject to extract — and the
+caller supplies `Check`'s `userID` however that app already identifies callers.
 
 Not built (same "primitives only" precedent as `-auth`'s missing `/login` route):
 `kpass.Check`/`Allowed` aren't wired into `-protected`/`middleware.RequireAuth`
@@ -926,6 +1015,83 @@ invocation's `-protected` differs from the package's original aggregator classif
 If any marker is missing (e.g. a route scaffolded before this feature existed, or a hand-edited
 file), the corresponding insert fails with an error naming the exact marker text to add back by
 hand — it does not silently fall back to guessing a location.
+
+### Optional service/store layers (`-service`/`-store none`, and adding them later)
+
+A route doesn't have to generate all four layers. `-service`/`-store` (`resolveLayerRef` in
+`route.go`) already meant "reuse an already-scaffolded package instead of generating a new one";
+the literal value `"none"` is a third state — skip that layer entirely, so a route can stop at
+handler + model. `routeData.HasService`/`HasStore` (`true` when ref'd *or* generated, `false` only
+when explicitly skipped) drive a three-way branch in `handler.go.tmpl`/`handler_methods.tmpl`'s
+service-call TODO comment and `service.go.tmpl`'s store-reference TODO comment, so the generated
+comments never point at a layer that doesn't exist. The CLI simplifies this to a single gate —
+`promptBool("Generate service and store layers for this route?", true)` — asked only when neither
+`-service` nor `-store` was passed explicitly; answering no sets both to `"none"`, removing the
+"have to mention store and service" friction of the two unconditional reuse prompts that existed
+before this feature. Default is `true`/"generate", so nothing changes for anyone who doesn't care.
+
+**Adding a missing layer later** to an already-existing (handler-only) route reuses
+`addMethodsToExistingRoute` — re-running `nexler create <route>` with `-service`/`-store` passed
+explicitly (even as an empty string, meaning "generate a fresh one now") retrofits the missing
+layer(s), independently of whether any new HTTP method is also being added; its previous hard
+requirement of at least one new method is relaxed to "at least one new method *or* a layer to add".
+This is deliberately gated on `RouteConfig.ServiceRequested`/`StoreRequested` (`bool`, set in
+`cmd/nexler/main.go` from `flag.FlagSet.Visit` — was the flag explicitly touched on *this*
+invocation) rather than on the resolved string value: a blank `-service` means "generate fresh"
+at first creation, but a scripted `nexler create <route> -methods POST` with no `-service`/`-store`
+flags at all must never silently start generating a service/store an existing handler-only route
+never had — only an explicit flag on that specific invocation can trigger the retrofit.
+`addMethodsToExistingRoute` also re-detects `HasService`/`HasStore` from disk (`dirHasGoFile` on
+`services/store/<relDir>`, not from this invocation's flag resolution) before rendering anything,
+so a plain follow-up call's inserted methods get accurate TODO wording regardless of what
+`-service`/`-store` happened to resolve to this time — and if a retrofit *does* happen in the same
+call, `HasService`/`HasStore` are flipped to `true` before the method-insertion fragment renders,
+so a method added in that same invocation immediately gets the "service exists" wording rather than
+the stale "no service" one. The actual file write is shared with first-creation via
+`writeRouteLayerFile` (extracted from `NewRoute`'s own per-layer loop). Reported back via
+`RouteResult.LayersAdded` (e.g. `["service", "store"]`), printed by the CLI as "Added missing
+layer(s) to the existing route: ...".
+
+#### Standalone service/store (`nexler create store|service <name>`)
+
+A service/store doesn't have to belong to a route at all. `nexler create store <name>` and
+`nexler create service <name>` (`internal/scaffold/layer.go`'s `NewLayer`, dispatched from
+`cmd/nexler/main.go`'s `runCreateLayer` — `store`/`service` are new top-level resource keywords
+alongside `app` in `runCreate`'s switch, same "leading `/` means route, else a keyword" dispatch
+`app` already established) scaffold a plain, unwired package: no handler, no model, no route, no
+aggregator wiring — `NewLayer` never calls `wireAggregator`. Nothing imports it and nexler doesn't
+track any reference to it going forward; a handler, another service, or hand-written code picks it
+up later by importing it directly, the same as any other Go package — nexler's job ends at
+generating the file. `<name>` addresses the package exactly the way `-service`/`-store`'s own reuse
+references already do: `module[/submodule]`, e.g. `purchase` or `purchase/verify` (parsed the same
+`sanitizeIdent`-per-segment way `resolveLayerRef` parses a reuse reference — no separate
+`-module`/`-submodule` flags needed). `-file` overrides the generated file's base name; left blank,
+it defaults to `<pkgName><kind>` — e.g. `nexler create service apps` (no `-file`) writes
+`services/apps/appsservice.go`, `nexler create store apps` writes `store/apps/appsstore.go` — rather
+than the plain `<pkgName>.go` a route's own service/store gets. Deliberately scoped to standalone
+creation only: a route's handler/service/store/model already live in four differently-named
+directories (`handlers/x`, `services/x`, `store/x`, `models/x`) and are never confused for one
+another, but a standalone layer's file is more likely to be the only one directly under its
+directory, worth self-describing by name alone — so `NewRoute` keeps generating plain
+`<pkgName>.go` for its own service/store, unchanged.
+
+Both reuse `writeRouteLayerFile` and `service.go.tmpl`/`store.go.tmpl` — the exact same templates
+`nexler create <route>` itself renders — via a `routeData` populated directly by `NewLayer` rather
+than by `NewRoute`. Since there's no route, `routeData.Route` stays empty; `RouteLabel` (new field,
+`"this package"` when `Route` is empty, else `Route` itself) is what those two templates' TODO
+comments actually print, so "TODO: persistence for /checkout" (route-tied) and "TODO: persistence
+for this package" (standalone) share one template with no route-specific branching needed beyond
+that one field. `routeData.Standalone` (`true` only via `NewLayer`) drives one further branch:
+`service.go.tmpl`'s "no store linked" TODO points at `nexler create store <module>[/<submodule>]`
+for a standalone service, vs. "re-run `nexler create {{ .Route }} ... -store <name>`" for a
+route-tied one, since the latter command doesn't exist/make sense outside a route's context.
+`nexler create service <name> -store <ref>` (optional) links the new service's TODO comment to an
+already-scaffolded store the same way `-store` on `nexler create <route>` does — purely
+informational, resolved via the same `resolveLayerRef`; `nexler create store` takes no equivalent
+flag, since `store.go.tmpl` never references a service. A standalone service generated without
+`-store` gets `HasStore: false` unconditionally (unlike a route's own service, which defaults to
+assuming a same-path store was generated alongside it) — there's no implicit paired store for a
+standalone service the way there is for a route's first-creation service.
 
 ### Per-route code generation (`route.go`)
 

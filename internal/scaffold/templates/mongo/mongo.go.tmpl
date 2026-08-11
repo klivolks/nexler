@@ -123,6 +123,56 @@ func Insert[T any](ctx context.Context, coll Collection, doc T) error {
 	return err
 }
 
+// InsertID inserts doc as a new document into coll, same as Insert, but
+// also returns the document's _id. doc's _id field is located by its
+// bson tag (a field tagged bson:"_id" anywhere in T, including inside an
+// anonymously embedded struct — the shape a hand-defined "base" struct
+// every model embeds would take, e.g. a Base struct holding just an ID
+// bson.ObjectID field tagged bson:"_id,omitempty") and, if it's still
+// its zero value, populated with a freshly generated bson.NewObjectID()
+// before inserting — unlike a bare Insert, where the driver still
+// assigns an _id server-side but the caller's own doc value never sees
+// it, since Go passes doc by value. If T has no such field at all,
+// InsertID behaves exactly like Insert and returns a zero ObjectID.
+func InsertID[T any](ctx context.Context, coll Collection, doc T) (bson.ObjectID, T, error) {
+	idField, ok := findObjectIDField(reflect.ValueOf(&doc).Elem())
+	if !ok {
+		err := Insert(ctx, coll, doc)
+		return bson.ObjectID{}, doc, err
+	}
+	if idField.Interface().(bson.ObjectID).IsZero() {
+		idField.Set(reflect.ValueOf(bson.NewObjectID()))
+	}
+	_, err := coll.coll.InsertOne(ctx, doc)
+	return idField.Interface().(bson.ObjectID), doc, err
+}
+
+// findObjectIDField locates the bson.ObjectID-typed field mapped to "_id"
+// within v (a struct), recursing into anonymous embedded struct fields so
+// an embedded base/common struct's _id field is found the same way a
+// direct field would be. Returns the field itself (settable, since v must
+// be addressable) and whether one was found.
+func findObjectIDField(v reflect.Value) (reflect.Value, bool) {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if f.Anonymous && fv.Kind() == reflect.Struct {
+			if found, ok := findObjectIDField(fv); ok {
+				return found, true
+			}
+			continue
+		}
+		if bsonFieldName(f) == "_id" && fv.Type() == reflect.TypeOf(bson.ObjectID{}) {
+			return fv, true
+		}
+	}
+	return reflect.Value{}, false
+}
+
 // Delete removes the one document in coll matching filter.
 func Delete(ctx context.Context, coll Collection, filter any) error {
 	q, err := filterToBSON(filter)

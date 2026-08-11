@@ -143,6 +143,39 @@ func Insert[T any](ctx context.Context, t Table, doc T) error {
 	return err
 }
 
+// InsertID inserts doc as a new row into t, same as Insert, but also
+// returns its primary key. The primary key is T's field mapped (by db
+// tag, or its lowercased field name) to column "id" and holding a Go
+// integer kind — the server-assigned auto-increment (SERIAL) convention
+// nexler's own generated schemas use (see cmd/nexler/initdb.go). When
+// that field's current value is zero, it's omitted from the INSERT
+// entirely (letting the SERIAL sequence assign it) and populated via a
+// RETURNING clause afterward; a caller-supplied non-zero value is
+// written and echoed back the same way (RETURNING confirms whatever
+// value the row ended up with either way). If T has no such field,
+// InsertID behaves exactly like Insert and returns 0.
+func InsertID[T any](ctx context.Context, t Table, doc T) (int64, T, error) {
+	v := reflect.ValueOf(&doc).Elem()
+	pk, pkCol, ok := findIntPKField(v)
+	if !ok {
+		err := Insert(ctx, t, doc)
+		return 0, doc, err
+	}
+
+	omitPK := pk.Int() == 0
+	cols, placeholders, args, err := insertColumnsSkipping(doc, pkCol, omitPK)
+	if err != nil {
+		return 0, doc, err
+	}
+	query := "INSERT INTO " + t.name + " (" + strings.Join(cols, ", ") + ") VALUES (" + strings.Join(placeholders, ", ") + ") RETURNING " + pkCol
+	var id int64
+	if err := t.db.QueryRowContext(ctx, query, args...).Scan(&id); err != nil {
+		return 0, doc, err
+	}
+	pk.SetInt(id)
+	return id, doc, nil
+}
+
 // Update sets every non-zero field of doc (a partial patch — zero
 // fields are left untouched) on every row in t matching filter. Refuses
 // an empty filter (would update every row) and a doc with no non-zero
@@ -289,6 +322,63 @@ func insertColumns(doc any) (cols, placeholders []string, args []any, err error)
 		placeholders = append(placeholders, "$"+strconv.Itoa(len(args)))
 	}
 	return cols, placeholders, args, nil
+}
+
+// insertColumnsSkipping is insertColumns, but omits skipCol entirely when
+// omit is true — used by InsertID to leave an auto-increment (SERIAL)
+// primary key column out of the INSERT so PostgreSQL assigns it.
+func insertColumnsSkipping(doc any, skipCol string, omit bool) (cols, placeholders []string, args []any, err error) {
+	v := reflect.ValueOf(doc)
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, nil, nil, fmt.Errorf("postgres: doc must be a struct, got %s", v.Kind())
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col == "-" {
+			continue
+		}
+		if omit && col == skipCol {
+			continue
+		}
+		cols = append(cols, col)
+		args = append(args, v.Field(i).Interface())
+		placeholders = append(placeholders, "$"+strconv.Itoa(len(args)))
+	}
+	return cols, placeholders, args, nil
+}
+
+// findIntPKField locates T's primary key field — the one mapped (by db
+// tag, or its lowercased field name) to column "id" and holding a Go
+// integer kind, the convention nexler's own generated schemas use for a
+// server-assigned auto-increment primary key (see cmd/nexler/initdb.go).
+// Returns the field itself (settable, since v must be addressable), its
+// column name, and whether one was found.
+func findIntPKField(v reflect.Value) (reflect.Value, string, bool) {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col != "id" {
+			continue
+		}
+		fv := v.Field(i)
+		switch fv.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return fv, col, true
+		}
+	}
+	return reflect.Value{}, "", false
 }
 
 // updateSet lists doc's non-zero mapped columns for a SET clause,

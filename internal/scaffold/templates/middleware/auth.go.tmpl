@@ -39,7 +39,9 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 {{ else if eq .AuthKind "jwt" }}
 // RequireAuth wraps a handler so every protected route requires a valid
 // JWT bearer token (Authorization: Bearer <token>), verified via
-// auth.VerifyJWT.
+// auth.VerifyJWT. The token's subject is attached to the request context
+// (auth.ContextWithSubject) so the wrapped handler can read it back via
+// auth.Subject(r).
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -47,24 +49,28 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
 		}
-		if _, err := auth.VerifyJWT(token); err != nil {
+		claims, err := auth.VerifyJWT(token)
+		if err != nil {
 			http.Error(w, "invalid or expired token", http.StatusUnauthorized)
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
 	}
 }
 {{ else if eq .AuthKind "session" }}
 // RequireAuth wraps a handler so every protected route requires a valid
 // session, identified by the auth.SessionCookieName cookie and looked
-// up via auth.SessionFromRequest.
+// up via auth.SessionFromRequest. The session's subject is attached to
+// the request context (auth.ContextWithSubject) so the wrapped handler
+// can read it back via auth.Subject(r).
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := auth.SessionFromRequest(r); !ok {
+		subject, ok := auth.SessionFromRequest(r)
+		if !ok {
 			http.Error(w, "not logged in", http.StatusUnauthorized)
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(auth.ContextWithSubject(r.Context(), subject)))
 	}
 }
 {{ else }}
@@ -72,16 +78,19 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 // valid JWT bearer token (auth.VerifyJWT) or a valid session cookie
 // (auth.SessionFromRequest) — so the same protected route serves both
 // API clients (bearer token) and browser/UI clients (session cookie).
+// Whichever one succeeds, its subject is attached to the request context
+// (auth.ContextWithSubject) so the wrapped handler can read it back via
+// auth.Subject(r).
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
-			if _, err := auth.VerifyJWT(token); err == nil {
-				next(w, r)
+			if claims, err := auth.VerifyJWT(token); err == nil {
+				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
 				return
 			}
 		}
-		if _, ok := auth.SessionFromRequest(r); ok {
-			next(w, r)
+		if subject, ok := auth.SessionFromRequest(r); ok {
+			next(w, r.WithContext(auth.ContextWithSubject(r.Context(), subject)))
 			return
 		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)

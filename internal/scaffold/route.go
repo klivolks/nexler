@@ -50,6 +50,10 @@ type RouteResult struct {
 	// Skipped lists requested methods that were already registered for
 	// this route and were left untouched (only set when Created is false).
 	Skipped []string
+	// LayersAdded lists which of "service"/"store" were retrofitted onto
+	// an already-existing route this call (only set when Created is
+	// false) — see RouteConfig.ServiceRequested/StoreRequested.
+	LayersAdded []string
 	// Note is an optional informational message about something worth
 	// telling the caller that isn't an error — e.g. that the newly-added
 	// method(s) have a different auth requirement than the rest of an
@@ -79,9 +83,23 @@ type RouteConfig struct {
 	// reference addressed the same way Module/Submodule are, e.g. "purchase"
 	// or "purchase/verify". The referenced package must already exist.
 	// Empty (default) generates a fresh service for this route, as before.
+	// The literal value "none" skips the service layer entirely — no
+	// generation, no reuse; a route can stop at handler + model.
 	ServiceRef string
 	// StoreRef is the same as ServiceRef, for the store layer.
 	StoreRef string
+	// ServiceRequested records whether -service was explicitly passed on
+	// this invocation (even as an empty string), independent of what it
+	// resolved to. Only consulted when adding to an already-existing route
+	// (see addMethodsToExistingRoute): distinguishes "the user asked me to
+	// (re)consider the service layer this time" — which can retrofit a
+	// missing service onto an existing handler-only route — from "the user
+	// didn't mention it, leave whatever's there alone". Ignored for a
+	// brand-new route, where ServiceRef's own value already fully decides
+	// behavior. Set by the CLI via flag.FlagSet.Visit.
+	ServiceRequested bool
+	// StoreRequested is the same as ServiceRequested, for the store layer.
+	StoreRequested bool
 	// AppDir is the path to the generated app's root (the directory
 	// containing its go.mod). Defaults to "." by the caller if unset.
 	AppDir string
@@ -132,25 +150,29 @@ type routeMethod struct {
 
 // routeData is what's available to route_templates/*.tmpl placeholders.
 type routeData struct {
-	PkgName           string // e.g. "verify"
-	Name              string // e.g. "Verify" — used in identifiers like HandleVerify
-	Route             string // e.g. "/asd"
-	ModulePath        string // the app's own module path, from its go.mod
-	RelDirSlash       string // e.g. "purchase/verify", forward-slashed for import paths
-	Protected         bool   // whether handlers wrap themselves with middleware.RequireAuth
-	Alias             string // e.g. "purchaseverify" — used as the models package import alias
-	Module            string // e.g. "purchase" — the top-level module, always set regardless of Submodule; used as the OpenAPI operation tag
-	HasServiceRef     bool   // true when this route reuses an existing service package instead of generating its own
-	ServiceImportPath string // e.g. "example.com/app/services/purchase/verify" — the reused service's import path
-	ServicePkgName    string // e.g. "verify" — the reused service's package name
-	HasStoreRef       bool   // true when this route reuses an existing store package instead of generating its own
-	StoreImportPath   string // e.g. "example.com/app/store/purchase/verify" — the reused store's import path
-	StorePkgName      string // e.g. "verify" — the reused store's package name
-	HTMLResponse      bool   // whether every method responds via response.HTML instead of response.JSON
-	RawResponse       bool   // whether every method responds via response.JSONRaw (no {"data": ...} envelope) instead of response.JSON
-	HasCoreDB         bool   // whether the app has a "core" database connection (see readCoreDBType)
-	CoreDBAccessor    string // "SQL" or "Mongo" — which db.<Accessor>("core") the store TODO comment points at
-	CoreDBType        string // "mongo", "mysql", "postgres", or "mssql" — which package (matching name) the store TODO comment points at
+	PkgName           string   // e.g. "verify"
+	Name              string   // e.g. "Verify" — used in identifiers like HandleVerify
+	Route             string   // e.g. "/asd" — empty for a standalone service/store, not tied to any route
+	RouteLabel        string   // descriptive text for service.go.tmpl/store.go.tmpl's TODO comments: Route when set, else "this package"
+	Standalone        bool     // true when this service/store was generated via `nexler create service|store` (NewLayer), not as part of a route
+	ModulePath        string   // the app's own module path, from its go.mod
+	RelDirSlash       string   // e.g. "purchase/verify", forward-slashed for import paths
+	Protected         bool     // whether handlers wrap themselves with middleware.RequireAuth
+	Alias             string   // e.g. "purchaseverify" — used as the models package import alias
+	Module            string   // e.g. "purchase" — the top-level module, always set regardless of Submodule; used as the OpenAPI operation tag
+	HasServiceRef     bool     // true when this route reuses an existing service package instead of generating its own
+	ServiceImportPath string   // e.g. "example.com/app/services/purchase/verify" — the reused service's import path
+	ServicePkgName    string   // e.g. "verify" — the reused service's package name
+	HasService        bool     // whether this route has a service layer at all — ref'd or generated (false only when the service layer was explicitly skipped)
+	HasStoreRef       bool     // true when this route reuses an existing store package instead of generating its own
+	StoreImportPath   string   // e.g. "example.com/app/store/purchase/verify" — the reused store's import path
+	StorePkgName      string   // e.g. "verify" — the reused store's package name
+	HasStore          bool     // whether this route has a store layer at all — ref'd or generated (false only when the store layer was explicitly skipped)
+	HTMLResponse      bool     // whether every method responds via response.HTML instead of response.JSON
+	RawResponse       bool     // whether every method responds via response.JSONRaw (no {"data": ...} envelope) instead of response.JSON
+	HasCoreDB         bool     // whether the app has a "core" database connection (see readCoreDBType)
+	CoreDBAccessor    string   // "SQL" or "Mongo" — which db.<Accessor>("core") the store TODO comment points at
+	CoreDBType        string   // "mongo", "mysql", "postgres", or "mssql" — which package (matching name) the store TODO comment points at
 	PathParams        []string // e.g. ["id"] — names of every "{name}" wildcard segment in Route, in order
 	HasPathParams     bool     // len(PathParams) > 0
 	PathParamArgs     string   // e.g. `"id", "code"` — Go source for request.DecodePath's variadic names argument
@@ -206,11 +228,11 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		}
 	}
 
-	serviceImportPath, servicePkgName, hasServiceRef, err := resolveLayerRef(appDir, modulePath, "service", "services", cfg.ServiceRef)
+	serviceImportPath, servicePkgName, hasServiceRef, skipService, err := resolveLayerRef(appDir, modulePath, "service", "services", cfg.ServiceRef)
 	if err != nil {
 		return RouteResult{}, err
 	}
-	storeImportPath, storePkgName, hasStoreRef, err := resolveLayerRef(appDir, modulePath, "store", "store", cfg.StoreRef)
+	storeImportPath, storePkgName, hasStoreRef, skipStore, err := resolveLayerRef(appDir, modulePath, "store", "store", cfg.StoreRef)
 	if err != nil {
 		return RouteResult{}, err
 	}
@@ -295,6 +317,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		PkgName:           pkgName,
 		Name:              name,
 		Route:             cfg.Route,
+		RouteLabel:        cfg.Route,
 		ModulePath:        modulePath,
 		RelDirSlash:       relDirSlash,
 		Protected:         cfg.Protected,
@@ -303,9 +326,11 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		HasServiceRef:     hasServiceRef,
 		ServiceImportPath: serviceImportPath,
 		ServicePkgName:    servicePkgName,
+		HasService:        hasServiceRef || !skipService,
 		HasStoreRef:       hasStoreRef,
 		StoreImportPath:   storeImportPath,
 		StorePkgName:      storePkgName,
+		HasStore:          hasStoreRef || !skipStore,
 		HTMLResponse:      htmlResponse,
 		RawResponse:       rawResponse,
 		HasCoreDB:         hasCoreDB,
@@ -330,7 +355,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 	if _, found, err := findMarkedFile(filepath.Join(appDir, "handlers", relDir), handlerMarker); err != nil {
 		return RouteResult{}, err
 	} else if found {
-		return addMethodsToExistingRoute(appDir, modulePath, data, cfg)
+		return addMethodsToExistingRoute(appDir, modulePath, relDir, fileName, data, cfg)
 	}
 
 	type routeFile struct {
@@ -339,36 +364,19 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		fs       embed.FS
 	}
 	files := []routeFile{{"handlers", routeHandlerTmpl, routeTemplateFS}}
-	if !hasServiceRef {
+	if !hasServiceRef && !skipService {
 		files = append(files, routeFile{"services", routeServiceTmpl, routeTemplateFS})
 	}
-	if !hasStoreRef {
+	if !hasStoreRef && !skipStore {
 		files = append(files, routeFile{"store", routeStoreTmpl, routeTemplateFS})
 	}
 	files = append(files, routeFile{"models", routeModelTmpl, routeTemplateFS})
 
 	var written []string
 	for _, f := range files {
-		destDir := filepath.Join(appDir, f.layer, relDir)
-		destFile := filepath.Join(destDir, fileName+".go")
-
-		if _, err := os.Stat(destFile); err == nil {
-			return RouteResult{}, fmt.Errorf("%s already exists — pick a different -file name (or -module/-submodule), or edit it directly", destFile)
-		}
-
-		raw, err := f.fs.ReadFile(f.tmplPath)
+		destFile, err := writeRouteLayerFile(appDir, f.layer, f.tmplPath, f.fs, relDir, fileName, data)
 		if err != nil {
-			return RouteResult{}, fmt.Errorf("reading embedded template %s: %w", f.tmplPath, err)
-		}
-		content, err := processFile(f.tmplPath, raw, data)
-		if err != nil {
-			return RouteResult{}, fmt.Errorf("rendering %s: %w", f.tmplPath, err)
-		}
-		if err := os.MkdirAll(destDir, 0o755); err != nil {
-			return RouteResult{}, fmt.Errorf("creating %s: %w", destDir, err)
-		}
-		if err := os.WriteFile(destFile, content, 0o644); err != nil {
-			return RouteResult{}, fmt.Errorf("writing %s: %w", destFile, err)
+			return RouteResult{}, err
 		}
 		written = append(written, destFile)
 	}
@@ -392,6 +400,37 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 	}
 
 	return RouteResult{Created: true, Added: verbs}, nil
+}
+
+// writeRouteLayerFile renders tmplPath (from fs) against data and writes it
+// to appDir/layer/relDir/fileName.go, erroring if that file already
+// exists — the same read-embedded/render/mkdir/write shape NewRoute's own
+// per-file loop used before this was extracted, now shared with the
+// existing-route layer retrofit in addMethodsToExistingRoute. Returns the
+// path written.
+func writeRouteLayerFile(appDir, layer, tmplPath string, fs embed.FS, relDir, fileName string, data routeData) (string, error) {
+	destDir := filepath.Join(appDir, layer, relDir)
+	destFile := filepath.Join(destDir, fileName+".go")
+
+	if _, err := os.Stat(destFile); err == nil {
+		return "", fmt.Errorf("%s already exists — pick a different -file name (or -module/-submodule), or edit it directly", destFile)
+	}
+
+	raw, err := fs.ReadFile(tmplPath)
+	if err != nil {
+		return "", fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
+	}
+	content, err := processFile(tmplPath, raw, data)
+	if err != nil {
+		return "", fmt.Errorf("rendering %s: %w", tmplPath, err)
+	}
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating %s: %w", destDir, err)
+	}
+	if err := os.WriteFile(destFile, content, 0o644); err != nil {
+		return "", fmt.Errorf("writing %s: %w", destFile, err)
+	}
+	return destFile, nil
 }
 
 // defaultHTMLLayout is written by writeSharedHTMLLayout to
@@ -494,7 +533,7 @@ func writeIfMissing(path, content string) error {
 // not an error: detectExistingProtection is used only to build an
 // informational RouteResult.Note when this invocation's cfg.Protected
 // differs from the package's original aggregator classification.
-func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg RouteConfig) (RouteResult, error) {
+func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data routeData, cfg RouteConfig) (RouteResult, error) {
 	existingProtected, existingProtectionFound, err := detectExistingProtection(appDir, modulePath, data.RelDirSlash)
 	if err != nil {
 		existingProtectionFound = false
@@ -515,6 +554,36 @@ func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg Ro
 		return RouteResult{}, fmt.Errorf("no existing model file found containing the %q marker under models/%s — it may predate this feature; add the marker manually or edit the route directly", modelMarker, data.RelDirSlash)
 	}
 
+	// Detect service/store presence from disk, not from this invocation's
+	// flag resolution — a plain follow-up call (no -service/-store passed)
+	// must reflect what's actually there, not silently assume "generated"
+	// or "skipped" from stale/default flag values. Overrides data.HasService/
+	// HasStore (initially set from THIS call's resolveLayerRef result) so
+	// any newly-inserted methods' TODO comments below are accurate.
+	hasServiceOnDisk := dirHasGoFile(filepath.Join(appDir, "services", relDir))
+	hasStoreOnDisk := dirHasGoFile(filepath.Join(appDir, "store", relDir))
+	data.HasService = data.HasServiceRef || hasServiceOnDisk
+	data.HasStore = data.HasStoreRef || hasStoreOnDisk
+
+	// A layer is only retrofitted when THIS invocation explicitly asked
+	// about it (ServiceRequested/StoreRequested, set from flag.Visit) —
+	// never inferred from a blank/default value, so a plain
+	// `nexler create <route> -methods POST` never silently generates a
+	// service/store an existing handler-only route never had.
+	addService := cfg.ServiceRequested && !data.HasServiceRef && !skipLayerRef(cfg.ServiceRef) && !hasServiceOnDisk
+	addStore := cfg.StoreRequested && !data.HasStoreRef && !skipLayerRef(cfg.StoreRef) && !hasStoreOnDisk
+
+	// Reflect this call's own retrofit in data *before* rendering the
+	// method-insertion fragment below, so a method added in the same
+	// invocation that adds the missing layer gets the accurate TODO
+	// wording immediately, not the stale "no service/store" text.
+	if addService {
+		data.HasService = true
+	}
+	if addStore {
+		data.HasStore = true
+	}
+
 	handlerRaw, err := os.ReadFile(handlerPath)
 	if err != nil {
 		return RouteResult{}, fmt.Errorf("reading %s: %w", handlerPath, err)
@@ -531,62 +600,78 @@ func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg Ro
 		}
 		newMethods = append(newMethods, m)
 	}
-	if len(newMethods) == 0 {
+	if len(newMethods) == 0 && !addService && !addStore {
 		return RouteResult{}, fmt.Errorf("method(s) %s already registered for this route", strings.Join(skipped, ", "))
 	}
 	data.Methods = newMethods
 
-	if data.HTMLResponse {
-		layoutKind := cfg.LayoutKind
-		if layoutKind == "" {
-			layoutKind = "shared"
+	var added []string
+	if len(newMethods) > 0 {
+		if data.HTMLResponse {
+			layoutKind := cfg.LayoutKind
+			if layoutKind == "" {
+				layoutKind = "shared"
+			}
+			if err := validateLayoutKind(layoutKind); err != nil {
+				return RouteResult{}, err
+			}
+			if err := writeHTMLTemplates(appDir, data.RelDirSlash, newMethods, layoutKind); err != nil {
+				return RouteResult{}, fmt.Errorf("could not write HTML templates for the new method(s): %w", err)
+			}
 		}
-		if err := validateLayoutKind(layoutKind); err != nil {
+
+		handlerContent, err = insertFragment(handlerContent, routeHandlerMethodsFragment, data,
+			handlerMarker,
+			fmt.Sprintf("could not find the handler-insertion marker in %s — it may predate this feature. Add a line `// nexler:handlers (do not remove this marker)` right before the `// Register wires...` comment, or add the new method's handler manually.", handlerPath))
+		if err != nil {
 			return RouteResult{}, err
 		}
-		if err := writeHTMLTemplates(appDir, data.RelDirSlash, newMethods, layoutKind); err != nil {
-			return RouteResult{}, fmt.Errorf("could not write HTML templates for the new method(s): %w", err)
+		handlerContent, err = insertFragment(handlerContent, routeRegisterMethodsFragment, data,
+			"\t// nexler:register (do not remove this marker)",
+			fmt.Sprintf("could not find the register-insertion marker in %s — it may predate this feature. Add a line `\t// nexler:register (do not remove this marker)` right before Register's closing brace, or wire the new method manually.", handlerPath))
+		if err != nil {
+			return RouteResult{}, err
+		}
+		if err := os.WriteFile(handlerPath, []byte(handlerContent), 0o644); err != nil {
+			return RouteResult{}, fmt.Errorf("writing %s: %w", handlerPath, err)
+		}
+
+		modelRaw, err := os.ReadFile(modelPath)
+		if err != nil {
+			return RouteResult{}, fmt.Errorf("reading %s: %w", modelPath, err)
+		}
+		modelContent := strings.ReplaceAll(string(modelRaw), "\r\n", "\n")
+		modelContent, err = insertFragment(modelContent, routeModelMethodsFragment, data,
+			modelMarker,
+			fmt.Sprintf("could not find the model-insertion marker in %s — it may predate this feature. Add a line `// nexler:models (do not remove this marker)` at the end of the file, or add the new structs manually.", modelPath))
+		if err != nil {
+			return RouteResult{}, err
+		}
+		if err := os.WriteFile(modelPath, []byte(modelContent), 0o644); err != nil {
+			return RouteResult{}, fmt.Errorf("writing %s: %w", modelPath, err)
+		}
+
+		for _, m := range newMethods {
+			added = append(added, m.Verb)
 		}
 	}
 
-	handlerContent, err = insertFragment(handlerContent, routeHandlerMethodsFragment, data,
-		handlerMarker,
-		fmt.Sprintf("could not find the handler-insertion marker in %s — it may predate this feature. Add a line `// nexler:handlers (do not remove this marker)` right before the `// Register wires...` comment, or add the new method's handler manually.", handlerPath))
-	if err != nil {
-		return RouteResult{}, err
+	var layersAdded []string
+	if addService {
+		if _, err := writeRouteLayerFile(appDir, "services", routeServiceTmpl, routeTemplateFS, relDir, fileName, data); err != nil {
+			return RouteResult{}, fmt.Errorf("could not add a service layer to this existing route: %w", err)
+		}
+		layersAdded = append(layersAdded, "service")
 	}
-	handlerContent, err = insertFragment(handlerContent, routeRegisterMethodsFragment, data,
-		"\t// nexler:register (do not remove this marker)",
-		fmt.Sprintf("could not find the register-insertion marker in %s — it may predate this feature. Add a line `\t// nexler:register (do not remove this marker)` right before Register's closing brace, or wire the new method manually.", handlerPath))
-	if err != nil {
-		return RouteResult{}, err
-	}
-	if err := os.WriteFile(handlerPath, []byte(handlerContent), 0o644); err != nil {
-		return RouteResult{}, fmt.Errorf("writing %s: %w", handlerPath, err)
-	}
-
-	modelRaw, err := os.ReadFile(modelPath)
-	if err != nil {
-		return RouteResult{}, fmt.Errorf("reading %s: %w", modelPath, err)
-	}
-	modelContent := strings.ReplaceAll(string(modelRaw), "\r\n", "\n")
-	modelContent, err = insertFragment(modelContent, routeModelMethodsFragment, data,
-		modelMarker,
-		fmt.Sprintf("could not find the model-insertion marker in %s — it may predate this feature. Add a line `// nexler:models (do not remove this marker)` at the end of the file, or add the new structs manually.", modelPath))
-	if err != nil {
-		return RouteResult{}, err
-	}
-	if err := os.WriteFile(modelPath, []byte(modelContent), 0o644); err != nil {
-		return RouteResult{}, fmt.Errorf("writing %s: %w", modelPath, err)
-	}
-
-	var added []string
-	for _, m := range newMethods {
-		added = append(added, m.Verb)
+	if addStore {
+		if _, err := writeRouteLayerFile(appDir, "store", routeStoreTmpl, routeTemplateFS, relDir, fileName, data); err != nil {
+			return RouteResult{}, fmt.Errorf("could not add a store layer to this existing route: %w", err)
+		}
+		layersAdded = append(layersAdded, "store")
 	}
 
 	var note string
-	if existingProtectionFound && existingProtected != cfg.Protected {
+	if existingProtectionFound && existingProtected != cfg.Protected && len(added) > 0 {
 		existingLabel, addedLabel := "public", "protected"
 		if existingProtected {
 			existingLabel, addedLabel = "protected", "public"
@@ -594,7 +679,15 @@ func addMethodsToExistingRoute(appDir, modulePath string, data routeData, cfg Ro
 		note = fmt.Sprintf("note: this route package was already registered as %s; the newly added method(s) (%s) are %s instead — only those handlers wrap themselves with middleware.RequireAuth, the rest of the package is untouched", existingLabel, strings.Join(added, ", "), addedLabel)
 	}
 
-	return RouteResult{Created: false, Added: added, Skipped: skipped, Note: note}, nil
+	return RouteResult{Created: false, Added: added, Skipped: skipped, LayersAdded: layersAdded, Note: note}, nil
+}
+
+// skipLayerRef reports whether ref is the "none" sentinel — resolveLayerRef's
+// own skip signal, re-derivable from the raw RouteConfig.ServiceRef/StoreRef
+// string without another resolveLayerRef call (which would also re-validate
+// an existing reuse reference unnecessarily).
+func skipLayerRef(ref string) bool {
+	return ref == "none"
 }
 
 // handlerMarker and modelMarker are the stable marker comments left in
@@ -660,27 +753,34 @@ func dirHasGoFile(dir string) bool {
 // themselves are (sanitizeIdent per segment, joined into a directory under
 // layer — "services" or "store"). has is false when ref is empty, meaning
 // "generate a fresh file for this route" (today's default behavior) rather
-// than reusing one. A non-empty ref that doesn't point at an
-// already-scaffolded package is a clear error, not a silent no-op — a typo
-// here would otherwise leave a route's TODO comment pointing at nothing.
-func resolveLayerRef(appDir, modulePath, flagName, layer, ref string) (importPath, pkgName string, has bool, err error) {
+// than reusing one. ref == "none" is the third state — skip is true and
+// has is false, meaning "don't generate this layer at all, and don't
+// reuse anything either" (see the "Authentication"-style optional-layer
+// docs on RouteConfig.ServiceRef/StoreRef). A non-empty ref that isn't
+// "none" and doesn't point at an already-scaffolded package is a clear
+// error, not a silent no-op — a typo here would otherwise leave a route's
+// TODO comment pointing at nothing.
+func resolveLayerRef(appDir, modulePath, flagName, layer, ref string) (importPath, pkgName string, has, skip bool, err error) {
 	if ref == "" {
-		return "", "", false, nil
+		return "", "", false, false, nil
+	}
+	if ref == "none" {
+		return "", "", false, true, nil
 	}
 	var refParts []string
 	for _, p := range strings.SplitN(ref, "/", 2) {
 		sp := sanitizeIdent(p)
 		if sp == "" {
-			return "", "", false, fmt.Errorf("-%s %q is invalid — module/submodule must contain at least one letter or digit", flagName, ref)
+			return "", "", false, false, fmt.Errorf("-%s %q is invalid — module/submodule must contain at least one letter or digit", flagName, ref)
 		}
 		refParts = append(refParts, sp)
 	}
 	refRelDir := filepath.Join(refParts...)
 	dir := filepath.Join(appDir, layer, refRelDir)
 	if !dirHasGoFile(dir) {
-		return "", "", false, fmt.Errorf("-%s %q points at %s, but no package exists there yet — scaffold it first, or omit -%s to generate a new one here", flagName, ref, filepath.Join(layer, refRelDir), flagName)
+		return "", "", false, false, fmt.Errorf("-%s %q points at %s, but no package exists there yet — scaffold it first, or omit -%s to generate a new one here", flagName, ref, filepath.Join(layer, refRelDir), flagName)
 	}
-	return modulePath + "/" + layer + "/" + filepath.ToSlash(refRelDir), refParts[len(refParts)-1], true, nil
+	return modulePath + "/" + layer + "/" + filepath.ToSlash(refRelDir), refParts[len(refParts)-1], true, false, nil
 }
 
 // insertFragment renders the embedded fragment template at fragmentPath
@@ -836,6 +936,474 @@ func ensureResponseJSONRaw(appDir string) (bool, error) {
 	}
 	return true, nil
 }
+
+// ensureAuthSubjectContext brings an app scaffolded before RequireAuth
+// started attaching the verified subject (userID) to the request context
+// up to date: it adds auth/context.go if missing (ContextWithSubject/
+// Subject — see auth/context.go.tmpl) and, if middleware/auth.go predates
+// this feature, fully regenerates it from the current template. Apps
+// scaffolded with -auth none (or before -auth existed at all) have
+// neither auth/jwt.go nor auth/session.go — detectAuthFiles reports both
+// false, and there's nothing to upgrade.
+//
+// middleware/auth.go is regenerated wholesale rather than marker-patched
+// (contrast ensureResponseJSONRaw's append-only insertion above): unlike
+// response.go, RequireAuth has no established hand-customization pattern,
+// and its content is fully derived from AuthKind/ModulePath alone — the
+// same "pure generated infra, no per-app free text" reasoning
+// ensureOpenAPIUpToDate already relies on for openapi.go. A sanity check
+// (the file still contains "func RequireAuth") guards against silently
+// overwriting a file that's been hand-rewritten beyond recognition —
+// that case errors out instead, same tone as ensureResponseJSONRaw's own
+// "has it been hand-rewritten?" fallback.
+func ensureAuthSubjectContext(appDir string) (bool, error) {
+	hasJWT, hasSession := detectAuthFiles(appDir)
+	if !hasJWT && !hasSession {
+		return false, nil
+	}
+
+	modulePath, err := readModulePath(appDir)
+	if err != nil {
+		return false, err
+	}
+
+	contextPath := filepath.Join(appDir, "auth", "context.go")
+	addedContext := false
+	if _, err := os.Stat(contextPath); os.IsNotExist(err) {
+		data := struct{ AppName, ModulePath string }{
+			AppName:    filepath.Base(modulePath),
+			ModulePath: modulePath,
+		}
+		tmplPath := templatesRoot + "/auth/context.go.tmpl"
+		if err := writeTemplateFile(tmplPath, contextPath, data); err != nil {
+			return false, err
+		}
+		addedContext = true
+	} else if err != nil {
+		return false, err
+	}
+
+	authGoPath := filepath.Join(appDir, "middleware", "auth.go")
+	raw, err := os.ReadFile(authGoPath)
+	if err != nil {
+		return addedContext, fmt.Errorf("%s does not exist — is %s a nexler app directory? %w", authGoPath, appDir, err)
+	}
+	content := string(raw)
+	if strings.Contains(content, "ContextWithSubject") {
+		return addedContext, nil
+	}
+	if !strings.Contains(content, "func RequireAuth") {
+		return addedContext, fmt.Errorf("%s doesn't look like a generated RequireAuth (no \"func RequireAuth\" found) — has it been hand-rewritten? Regenerate it manually to attach the subject via auth.ContextWithSubject, or restore it from a fresh scaffold and reapply your changes", authGoPath)
+	}
+
+	authKind := "session"
+	switch {
+	case hasJWT && hasSession:
+		authKind = "both"
+	case hasJWT:
+		authKind = "jwt"
+	}
+	data := struct{ AuthKind, ModulePath string }{AuthKind: authKind, ModulePath: modulePath}
+	tmplPath := templatesRoot + "/middleware/auth.go.tmpl"
+	tmplRaw, err := templateFS.ReadFile(tmplPath)
+	if err != nil {
+		return addedContext, fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
+	}
+	rendered, err := render(tmplPath, tmplRaw, data)
+	if err != nil {
+		return addedContext, fmt.Errorf("rendering %s: %w", tmplPath, err)
+	}
+	if err := os.WriteFile(authGoPath, rendered, 0o644); err != nil {
+		return addedContext, err
+	}
+	return true, nil
+}
+
+// insertIDRetrofit describes one InsertID retrofit target: the
+// dialect's directory/file name (mongo/mongo.go, mysql/mysql.go, ...)
+// and the exact source to append when the file exists but doesn't yet
+// define InsertID.
+type insertIDRetrofit struct {
+	dir  string
+	code string
+}
+
+var insertIDRetrofits = []insertIDRetrofit{
+	{"mongo", mongoInsertIDCode},
+	{"mysql", mysqlInsertIDCode},
+	{"postgres", postgresInsertIDCode},
+	{"mssql", mssqlInsertIDCode},
+}
+
+// ensureInsertIDHelpers appends InsertID (and its supporting unexported
+// helpers) to whichever of appDir's mongo/mysql/postgres/mssql packages
+// already exist and don't yet define it. An app not scaffolded with a
+// given dialect at all simply has no such file — silently skipped, same
+// as ensureAuthSubjectContext skipping -auth none. Append-only, like
+// ensureResponseJSONRaw's JSONRaw insertion above: InsertID is wholly
+// new code that doesn't touch or replace anything already in these
+// files, so (unlike ensureAuthSubjectContext's middleware/auth.go full
+// regen) there's no hand-edit-clobbering risk to guard against — nothing
+// to sanity-check before appending.
+func ensureInsertIDHelpers(appDir string) (bool, error) {
+	changed := false
+	for _, r := range insertIDRetrofits {
+		path := filepath.Join(appDir, r.dir, r.dir+".go")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return changed, err
+		}
+		content := string(raw)
+		if strings.Contains(content, "func InsertID") {
+			continue
+		}
+		content = strings.TrimRight(content, "\n") + "\n" + r.code
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+	return changed, nil
+}
+
+const mongoInsertIDCode = `
+// InsertID inserts doc as a new document into coll, same as Insert, but
+// also returns the document's _id. doc's _id field is located by its
+// bson tag (a field tagged bson:"_id" anywhere in T, including inside an
+// anonymously embedded struct — the shape a hand-defined "base" struct
+// every model embeds would take, e.g. a Base struct holding just an ID
+// bson.ObjectID field tagged bson:"_id,omitempty") and, if it's still
+// its zero value, populated with a freshly generated bson.NewObjectID()
+// before inserting — unlike a bare Insert, where the driver still
+// assigns an _id server-side but the caller's own doc value never sees
+// it, since Go passes doc by value. If T has no such field at all,
+// InsertID behaves exactly like Insert and returns a zero ObjectID.
+func InsertID[T any](ctx context.Context, coll Collection, doc T) (bson.ObjectID, T, error) {
+	idField, ok := findObjectIDField(reflect.ValueOf(&doc).Elem())
+	if !ok {
+		err := Insert(ctx, coll, doc)
+		return bson.ObjectID{}, doc, err
+	}
+	if idField.Interface().(bson.ObjectID).IsZero() {
+		idField.Set(reflect.ValueOf(bson.NewObjectID()))
+	}
+	_, err := coll.coll.InsertOne(ctx, doc)
+	return idField.Interface().(bson.ObjectID), doc, err
+}
+
+// findObjectIDField locates the bson.ObjectID-typed field mapped to "_id"
+// within v (a struct), recursing into anonymous embedded struct fields so
+// an embedded base/common struct's _id field is found the same way a
+// direct field would be. Returns the field itself (settable, since v must
+// be addressable) and whether one was found.
+func findObjectIDField(v reflect.Value) (reflect.Value, bool) {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if f.Anonymous && fv.Kind() == reflect.Struct {
+			if found, ok := findObjectIDField(fv); ok {
+				return found, true
+			}
+			continue
+		}
+		if bsonFieldName(f) == "_id" && fv.Type() == reflect.TypeOf(bson.ObjectID{}) {
+			return fv, true
+		}
+	}
+	return reflect.Value{}, false
+}
+`
+
+const mysqlInsertIDCode = `
+// InsertID inserts doc as a new row into t, same as Insert, but also
+// returns its primary key. The primary key is T's field mapped (by db
+// tag, or its lowercased field name) to column "id" and holding a Go
+// integer kind — the server-assigned auto-increment convention nexler's
+// own generated schemas use (see cmd/nexler/initdb.go). When that
+// field's current value is zero, it's omitted from the INSERT entirely
+// (letting MySQL assign it) and populated from the driver's
+// LastInsertId() afterward; a caller-supplied non-zero value is written
+// and echoed back unchanged. If T has no such field, InsertID behaves
+// exactly like Insert and returns 0.
+func InsertID[T any](ctx context.Context, t Table, doc T) (int64, T, error) {
+	v := reflect.ValueOf(&doc).Elem()
+	pk, pkCol, ok := findIntPKField(v)
+	if !ok {
+		err := Insert(ctx, t, doc)
+		return 0, doc, err
+	}
+
+	omitPK := pk.Int() == 0
+	cols, placeholders, args, err := insertColumnsSkipping(doc, pkCol, omitPK)
+	if err != nil {
+		return 0, doc, err
+	}
+	query := "INSERT INTO " + t.name + " (" + strings.Join(cols, ", ") + ") VALUES (" + strings.Join(placeholders, ", ") + ")"
+	res, err := t.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, doc, err
+	}
+	if !omitPK {
+		return pk.Int(), doc, nil
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, doc, err
+	}
+	pk.SetInt(id)
+	return id, doc, nil
+}
+
+// insertColumnsSkipping is insertColumns, but omits skipCol entirely when
+// omit is true — used by InsertID to leave an auto-increment primary key
+// column out of the INSERT so MySQL assigns it.
+func insertColumnsSkipping(doc any, skipCol string, omit bool) (cols, placeholders []string, args []any, err error) {
+	v := reflect.ValueOf(doc)
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, nil, nil, fmt.Errorf("mysql: doc must be a struct, got %s", v.Kind())
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col == "-" {
+			continue
+		}
+		if omit && col == skipCol {
+			continue
+		}
+		cols = append(cols, col)
+		placeholders = append(placeholders, "?")
+		args = append(args, v.Field(i).Interface())
+	}
+	return cols, placeholders, args, nil
+}
+
+// findIntPKField locates T's primary key field — the one mapped (by db
+// tag, or its lowercased field name) to column "id" and holding a Go
+// integer kind, the convention nexler's own generated schemas use for a
+// server-assigned auto-increment primary key (see cmd/nexler/initdb.go).
+// Returns the field itself (settable, since v must be addressable), its
+// column name, and whether one was found.
+func findIntPKField(v reflect.Value) (reflect.Value, string, bool) {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col != "id" {
+			continue
+		}
+		fv := v.Field(i)
+		switch fv.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return fv, col, true
+		}
+	}
+	return reflect.Value{}, "", false
+}
+`
+
+const postgresInsertIDCode = `
+// InsertID inserts doc as a new row into t, same as Insert, but also
+// returns its primary key. The primary key is T's field mapped (by db
+// tag, or its lowercased field name) to column "id" and holding a Go
+// integer kind — the server-assigned auto-increment (SERIAL) convention
+// nexler's own generated schemas use (see cmd/nexler/initdb.go). When
+// that field's current value is zero, it's omitted from the INSERT
+// entirely (letting the SERIAL sequence assign it) and populated via a
+// RETURNING clause afterward; a caller-supplied non-zero value is
+// written and echoed back the same way (RETURNING confirms whatever
+// value the row ended up with either way). If T has no such field,
+// InsertID behaves exactly like Insert and returns 0.
+func InsertID[T any](ctx context.Context, t Table, doc T) (int64, T, error) {
+	v := reflect.ValueOf(&doc).Elem()
+	pk, pkCol, ok := findIntPKField(v)
+	if !ok {
+		err := Insert(ctx, t, doc)
+		return 0, doc, err
+	}
+
+	omitPK := pk.Int() == 0
+	cols, placeholders, args, err := insertColumnsSkipping(doc, pkCol, omitPK)
+	if err != nil {
+		return 0, doc, err
+	}
+	query := "INSERT INTO " + t.name + " (" + strings.Join(cols, ", ") + ") VALUES (" + strings.Join(placeholders, ", ") + ") RETURNING " + pkCol
+	var id int64
+	if err := t.db.QueryRowContext(ctx, query, args...).Scan(&id); err != nil {
+		return 0, doc, err
+	}
+	pk.SetInt(id)
+	return id, doc, nil
+}
+
+// insertColumnsSkipping is insertColumns, but omits skipCol entirely when
+// omit is true — used by InsertID to leave an auto-increment (SERIAL)
+// primary key column out of the INSERT so PostgreSQL assigns it.
+func insertColumnsSkipping(doc any, skipCol string, omit bool) (cols, placeholders []string, args []any, err error) {
+	v := reflect.ValueOf(doc)
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, nil, nil, fmt.Errorf("postgres: doc must be a struct, got %s", v.Kind())
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col == "-" {
+			continue
+		}
+		if omit && col == skipCol {
+			continue
+		}
+		cols = append(cols, col)
+		args = append(args, v.Field(i).Interface())
+		placeholders = append(placeholders, "$"+strconv.Itoa(len(args)))
+	}
+	return cols, placeholders, args, nil
+}
+
+// findIntPKField locates T's primary key field — the one mapped (by db
+// tag, or its lowercased field name) to column "id" and holding a Go
+// integer kind, the convention nexler's own generated schemas use for a
+// server-assigned auto-increment primary key (see cmd/nexler/initdb.go).
+// Returns the field itself (settable, since v must be addressable), its
+// column name, and whether one was found.
+func findIntPKField(v reflect.Value) (reflect.Value, string, bool) {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col != "id" {
+			continue
+		}
+		fv := v.Field(i)
+		switch fv.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return fv, col, true
+		}
+	}
+	return reflect.Value{}, "", false
+}
+`
+
+const mssqlInsertIDCode = `
+// InsertID inserts doc as a new row into t, same as Insert, but also
+// returns its primary key. The primary key is T's field mapped (by db
+// tag, or its lowercased field name) to column "id" and holding a Go
+// integer kind — the server-assigned auto-increment (IDENTITY)
+// convention nexler's own generated schemas use (see
+// cmd/nexler/initdb.go). When that field's current value is zero, it's
+// omitted from the INSERT entirely (letting the IDENTITY column assign
+// it) and populated via an OUTPUT clause afterward (go-mssqldb doesn't
+// support LastInsertId() reliably, so OUTPUT is the dialect-native
+// mechanism here, same role RETURNING plays for postgres); a
+// caller-supplied non-zero value is written and echoed back the same
+// way. If T has no such field, InsertID behaves exactly like Insert and
+// returns 0.
+func InsertID[T any](ctx context.Context, t Table, doc T) (int64, T, error) {
+	v := reflect.ValueOf(&doc).Elem()
+	pk, pkCol, ok := findIntPKField(v)
+	if !ok {
+		err := Insert(ctx, t, doc)
+		return 0, doc, err
+	}
+
+	omitPK := pk.Int() == 0
+	cols, placeholders, args, err := insertColumnsSkipping(doc, pkCol, omitPK)
+	if err != nil {
+		return 0, doc, err
+	}
+	query := "INSERT INTO " + t.name + " (" + strings.Join(cols, ", ") + ") OUTPUT INSERTED." + pkCol + " VALUES (" + strings.Join(placeholders, ", ") + ")"
+	var id int64
+	if err := t.db.QueryRowContext(ctx, query, args...).Scan(&id); err != nil {
+		return 0, doc, err
+	}
+	pk.SetInt(id)
+	return id, doc, nil
+}
+
+// insertColumnsSkipping is insertColumns, but omits skipCol entirely when
+// omit is true — used by InsertID to leave an auto-increment (IDENTITY)
+// primary key column out of the INSERT so SQL Server assigns it.
+func insertColumnsSkipping(doc any, skipCol string, omit bool) (cols, placeholders []string, args []any, err error) {
+	v := reflect.ValueOf(doc)
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, nil, nil, fmt.Errorf("mssql: doc must be a struct, got %s", v.Kind())
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col == "-" {
+			continue
+		}
+		if omit && col == skipCol {
+			continue
+		}
+		cols = append(cols, col)
+		args = append(args, v.Field(i).Interface())
+		placeholders = append(placeholders, "@p"+strconv.Itoa(len(args)))
+	}
+	return cols, placeholders, args, nil
+}
+
+// findIntPKField locates T's primary key field — the one mapped (by db
+// tag, or its lowercased field name) to column "id" and holding a Go
+// integer kind, the convention nexler's own generated schemas use for a
+// server-assigned auto-increment primary key (see cmd/nexler/initdb.go).
+// Returns the field itself (settable, since v must be addressable), its
+// column name, and whether one was found.
+func findIntPKField(v reflect.Value) (reflect.Value, string, bool) {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		col := dbFieldName(f)
+		if col != "id" {
+			continue
+		}
+		fv := v.Field(i)
+		switch fv.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return fv, col, true
+		}
+	}
+	return reflect.Value{}, "", false
+}
+`
 
 // wireAggregator inserts an import for importPath (aliased as alias) and a
 // call to its Register(mux) into routes/<group>/<group>.go (group is

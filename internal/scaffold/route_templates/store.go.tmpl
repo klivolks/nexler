@@ -1,7 +1,7 @@
 package {{ .PkgName }}
 {{ if .HasCoreDB }}
 {{- if eq .CoreDBAccessor "Mongo" }}
-// TODO: persistence for {{ .Route }}. This app's core database
+// TODO: persistence for {{ .RouteLabel }}. This app's core database
 // connection is available via the mongo package (see
 // {{ .ModulePath }}/mongo), e.g.:
 //
@@ -14,7 +14,7 @@ package {{ .PkgName }}
 // before db.Connect() has been called), so don't call mongo.Conn from
 // a var initializer here.
 {{- else }}
-// TODO: persistence for {{ .Route }}. This app's core database
+// TODO: persistence for {{ .RouteLabel }}. This app's core database
 // connection is available via the {{ .CoreDBType }} package (see
 // {{ .ModulePath }}/{{ .CoreDBType }}), e.g.:
 //
@@ -28,5 +28,5 @@ package {{ .PkgName }}
 // from a var initializer here.
 {{- end }}
 {{- else }}
-// TODO: persistence for {{ .Route }}, via the nexler Store interface.
+// TODO: persistence for {{ .RouteLabel }}, via the nexler Store interface.
 {{- end }}
