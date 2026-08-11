@@ -1,0 +1,31 @@
+// Package auth implements {{ .AppName }}'s authentication. This file
+// carries the authenticated subject (userID) — already verified by
+// middleware.RequireAuth via VerifyJWT/SessionFromRequest — into the
+// request context, so any protected handler can read it back via Subject
+// instead of re-parsing the bearer token or session cookie itself.
+package auth
+
+import (
+	"context"
+	"net/http"
+)
+
+type subjectKeyType struct{}
+
+var subjectKey = subjectKeyType{}
+
+// ContextWithSubject returns a copy of ctx carrying subject as the
+// authenticated user ID. Called by middleware.RequireAuth once a request
+// passes its JWT/session check — application code normally reads the
+// subject back via Subject instead of calling this directly.
+func ContextWithSubject(ctx context.Context, subject string) context.Context {
+	return context.WithValue(ctx, subjectKey, subject)
+}
+
+// Subject returns r's authenticated subject (userID), as attached by
+// middleware.RequireAuth. ok is false for a request that never passed
+// through RequireAuth (e.g. a public route).
+func Subject(r *http.Request) (subject string, ok bool) {
+	subject, ok = r.Context().Value(subjectKey).(string)
+	return subject, ok
+}

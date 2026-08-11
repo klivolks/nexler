@@ -13,8 +13,20 @@ func Handle{{ $.Name }}{{ .VerbTitle }}(w http.ResponseWriter, r *http.Request) 
 	}
 {{- end }}
 
+{{- if $.HasServiceRef }}
+	// TODO: call the {{ $.ServicePkgName }} service package (see
+	// {{ $.ServiceImportPath }}) with req, and build a real
+	// {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response.
+{{- else if $.HasService }}
 	// TODO: call {{ $.PkgName }}'s service with req, and build a real
 	// {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response.
+{{- else }}
+	// TODO: implement {{ $.PkgName }}'s request handling directly here —
+	// no service package was generated for this route (re-run
+	// `nexler create {{ $.Route }} -module ... -service <name>` to add
+	// one later, or write services/{{ $.RelDirSlash }} by hand) — and
+	// build a real {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response.
+{{- end }}
 	resp := {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response{}
 
 {{- if $.HTMLResponse }}
