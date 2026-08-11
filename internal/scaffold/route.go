@@ -1019,6 +1019,67 @@ func ensureAuthSubjectContext(appDir string) (bool, error) {
 	return true, nil
 }
 
+// ensureJWTClaims brings an app scaffolded before Claims followed RFC
+// 7519 up to date: it fully regenerates auth/jwt.go from the current
+// template if the file predates the IssuedAt (iat) claim. Apps scaffolded
+// with -auth none/session only (no JWT at all) simply have no auth/jwt.go
+// — silently skipped, same as ensureAuthSubjectContext skipping -auth
+// none.
+//
+// Regenerated wholesale, not marker-patched (contrast
+// ensureResponseJSONRaw's append-only insertion): jwt.go.tmpl's own doc
+// comment invites hand-added Claims fields ("Add fields as your app needs
+// them"), same as response.go inviting hand-added helpers — but unlike
+// JSONRaw, this change also rewrites IssueJWT's signature and Claims'
+// existing fields, which can't be expressed as a pure append. A sanity
+// check (the file must still contain "func IssueJWT") guards against
+// silently overwriting a file that's been hand-rewritten beyond
+// recognition — that case errors out instead, same tone as
+// ensureAuthSubjectContext's own "has it been hand-rewritten?" guard on
+// middleware/auth.go. The trade-off, same one documented there: any
+// hand-added Claims field or IssueJWT customization is silently
+// discarded by the regeneration.
+func ensureJWTClaims(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "auth", "jwt.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No JWT auth in this app — nothing to upgrade.
+			return false, nil
+		}
+		return false, err
+	}
+	content := string(raw)
+	if strings.Contains(content, "IssuedAt") {
+		return false, nil
+	}
+	if !strings.Contains(content, "func IssueJWT") {
+		return false, fmt.Errorf("%s doesn't look like a generated jwt.go (no \"func IssueJWT\" found) — has it been hand-rewritten? Regenerate it manually to add RFC 7519's sub/exp/iat claims, or restore it from a fresh scaffold and reapply your changes", path)
+	}
+
+	modulePath, err := readModulePath(appDir)
+	if err != nil {
+		return false, err
+	}
+	data := struct{ AppName, ModulePath string }{
+		AppName:    filepath.Base(modulePath),
+		ModulePath: modulePath,
+	}
+	tmplPath := templatesRoot + "/auth/jwt.go.tmpl"
+	tmplRaw, err := templateFS.ReadFile(tmplPath)
+	if err != nil {
+		return false, fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
+	}
+	rendered, err := render(tmplPath, tmplRaw, data)
+	if err != nil {
+		return false, fmt.Errorf("rendering %s: %w", tmplPath, err)
+	}
+	if err := os.WriteFile(path, rendered, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // insertIDRetrofit describes one InsertID retrofit target: the
 // dialect's directory/file name (mongo/mongo.go, mysql/mysql.go, ...)
 // and the exact source to append when the file exists but doesn't yet

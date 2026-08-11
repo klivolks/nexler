@@ -17,19 +17,37 @@ import (
 	"{{ .ModulePath }}/config"
 )
 
-// Claims is the payload encoded into every issued JWT. Add fields as
-// your app needs them (e.g. Roles []string) — Subject/ExpiresAt are the
-// only ones nexler assumes.
+// Claims is the payload encoded into every issued JWT: RFC 7519's
+// registered sub/exp/iat claims, plus a small set of nexler's own
+// application claims (Name/Org/UserType/UserRole). Add more fields as
+// your app needs them — Subject/ExpiresAt/IssuedAt are the only ones
+// nexler itself assumes.
 type Claims struct {
 	Subject   string `json:"sub"`
 	ExpiresAt int64  `json:"exp"`
+	IssuedAt  int64  `json:"iat"`
+	Name      string `json:"name,omitempty"`
+	Org       string `json:"org,omitempty"`
+	UserType  string `json:"usertype,omitempty"`
+	UserRole  string `json:"userrole,omitempty"`
 }
 
 // IssueJWT signs claims for subject, valid for ttl, and returns the
 // compact JWT string (base64url(header).base64url(payload).base64url(signature)).
-// Call this from your own login handler once credentials are verified.
-func IssueJWT(subject string, ttl time.Duration) (string, error) {
-	claims := Claims{Subject: subject, ExpiresAt: time.Now().Add(ttl).Unix()}
+// name/org/userType/userRole are application claims — pass "" for any
+// you don't have yet. Call this from your own login handler once
+// credentials are verified.
+func IssueJWT(subject, name, org, userType, userRole string, ttl time.Duration) (string, error) {
+	now := time.Now()
+	claims := Claims{
+		Subject:   subject,
+		ExpiresAt: now.Add(ttl).Unix(),
+		IssuedAt:  now.Unix(),
+		Name:      name,
+		Org:       org,
+		UserType:  userType,
+		UserRole:  userRole,
+	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
