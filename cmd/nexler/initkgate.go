@@ -31,6 +31,6 @@ func runInitKgate(args []string) {
 	fmt.Println("  1. Fill in .env's KGATE_* values.")
 	fmt.Println("  2. Run \"go mod tidy\" — this pulls in github.com/gorilla/websocket, which needs network access once.")
 	fmt.Println("  3. Run (or re-run) \"nexler init db\" to provision core_kgate_channels on your core database.")
-	fmt.Println("  4. Add kgate.ResumeAll(ctx) near db.Connect() in main.go, so subscriptions persist across restarts.")
-	fmt.Println("  5. Call kgate.Subscribe(ctx, channel) / kgate.Publish(ctx, channel, payload) from your own code, and edit kgate.handleEvent.")
+	fmt.Println("  4. Call kgate.Subscribe(ctx, channel) / kgate.Publish(ctx, channel, payload) from your own code, and edit kgate.handleEvent.")
+	fmt.Println("     (kgate.Register already resumes any previously recorded channel automatically on startup — no manual wiring needed.)")
 }

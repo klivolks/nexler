@@ -1080,6 +1080,112 @@ func ensureJWTClaims(appDir string) (bool, error) {
 	return true, nil
 }
 
+// ensureMongoDatabaseName brings an app scaffolded before nexler correctly
+// derived a Mongo connection's database name from its own DSN up to date.
+// Previously db/mongo.go never retained the database name embedded in a
+// connection's DSN at all, and every "core" package file (core/config.go,
+// core/errorlog.go, core/kgate_channels.go) hardcoded the literal database
+// name "core" instead — so both `nexler init db` and the running app
+// always read/wrote a Mongo database literally named "core", silently
+// ignoring whatever database the DSN's own path actually named (e.g.
+// mongodb://host:27017/mydb). This regenerates db/mongo.go (if present)
+// and, for an app whose core connection is mongo, the three core/*.go
+// files that used to reference the hardcoded name.
+//
+// Full regeneration, not marker-patched: db/mongo.go.tmpl has zero
+// per-app templating at all (same reasoning ensureOpenAPIUpToDate already
+// relies on for openapi.go), and the core/*.go files are pure generated
+// infra with no established hand-customization pattern (same reasoning
+// ensureAuthSubjectContext relies on for middleware/auth.go). A sanity
+// check per file guards against silently overwriting one that's been
+// hand-rewritten beyond recognition — that case errors out instead,
+// naming the file and asking the developer to reconcile it by hand.
+func ensureMongoDatabaseName(appDir string) (bool, error) {
+	changed := false
+
+	mongoGoPath := filepath.Join(appDir, "db", "mongo.go")
+	raw, err := os.ReadFile(mongoGoPath)
+	if err != nil && !os.IsNotExist(err) {
+		return changed, err
+	}
+	if err == nil {
+		content := string(raw)
+		if !strings.Contains(content, "MongoDatabaseName") {
+			if !strings.Contains(content, "func Mongo(") {
+				return changed, fmt.Errorf("%s doesn't look like a generated db/mongo.go (no \"func Mongo(\" found) — has it been hand-rewritten? Regenerate it manually to add MongoDatabaseName (deriving the database name from the connection's own DSN instead of a hardcoded literal), or restore it from a fresh scaffold and reapply your changes", mongoGoPath)
+			}
+			tmplPath := templatesRoot + "/db/mongo.go.tmpl"
+			tmplRaw, err := templateFS.ReadFile(tmplPath)
+			if err != nil {
+				return changed, fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
+			}
+			rendered, err := render(tmplPath, tmplRaw, nil)
+			if err != nil {
+				return changed, fmt.Errorf("rendering %s: %w", tmplPath, err)
+			}
+			if err := os.WriteFile(mongoGoPath, rendered, 0o644); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
+	}
+
+	coreDBType, ok := readCoreDBType(appDir)
+	if !ok || coreDBType != "mongo" {
+		return changed, nil
+	}
+
+	modulePath, err := readModulePath(appDir)
+	if err != nil {
+		return changed, err
+	}
+	data := struct{ AppName, ModulePath, CoreDBAccessor string }{
+		AppName:        filepath.Base(modulePath),
+		ModulePath:     modulePath,
+		CoreDBAccessor: "Mongo",
+	}
+
+	coreFiles := []struct {
+		file, tmpl, marker string
+	}{
+		{"config.go", "core/config.go.tmpl", "func configCollection("},
+		{"errorlog.go", "core/errorlog.go.tmpl", "func errorLogCollection("},
+		{"kgate_channels.go", "core/kgate_channels.go.tmpl", "func kgateChannelCollection("},
+	}
+	for _, cf := range coreFiles {
+		path := filepath.Join(appDir, "core", cf.file)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return changed, err
+		}
+		content := string(raw)
+		if strings.Contains(content, "MongoDatabaseName") {
+			continue
+		}
+		if !strings.Contains(content, cf.marker) {
+			return changed, fmt.Errorf("%s doesn't look like a generated file (no %q found) — has it been hand-rewritten? Regenerate it manually to read the database name via db.MongoDatabaseName instead of the hardcoded literal \"core\", or restore it from a fresh scaffold and reapply your changes", path, cf.marker)
+		}
+		tmplPath := templatesRoot + "/" + cf.tmpl
+		tmplRaw, err := templateFS.ReadFile(tmplPath)
+		if err != nil {
+			return changed, fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
+		}
+		rendered, err := render(tmplPath, tmplRaw, data)
+		if err != nil {
+			return changed, fmt.Errorf("rendering %s: %w", tmplPath, err)
+		}
+		if err := os.WriteFile(path, rendered, 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	return changed, nil
+}
+
 // insertIDRetrofit describes one InsertID retrofit target: the
 // dialect's directory/file name (mongo/mongo.go, mysql/mysql.go, ...)
 // and the exact source to append when the file exists but doesn't yet
@@ -1505,7 +1611,9 @@ func wireAggregator(appDir, group, importPath, alias string) error {
 }
 
 // insertImport adds `alias "importPath"` to content's single import block,
-// just before its closing paren.
+// just before its closing paren. alias may be "" for a bare import (e.g.
+// a stdlib package referenced by its own package name) — the added line
+// omits the alias entirely rather than leaving a stray blank one.
 //
 // The anchor is the block's opening ("import (\n") and closing ("\n)")
 // delimiters, not the stdlib "net/http" line itself — unlike the
@@ -1538,7 +1646,12 @@ func insertImport(content, alias, importPath string) (string, error) {
 	if strings.TrimSpace(content[blockStart:insertAt]) == `"net/http"` {
 		prefix = "\n\n"
 	}
-	line := fmt.Sprintf("%s\t%s %q", prefix, alias, importPath)
+	var line string
+	if alias == "" {
+		line = fmt.Sprintf("%s\t%q", prefix, importPath)
+	} else {
+		line = fmt.Sprintf("%s\t%s %q", prefix, alias, importPath)
+	}
 
 	return content[:insertAt] + line + content[insertAt:], nil
 }

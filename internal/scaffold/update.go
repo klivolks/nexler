@@ -9,16 +9,19 @@
 // (route.go) were both originally built to run silently inside NewRoute;
 // ensureAuthSubjectContext (route.go) is the same idea for
 // middleware.RequireAuth's context-attached subject (see "Authentication"
-// in CLAUDE.md), and ensureJWTClaims (route.go) brings auth/jwt.go's
-// Claims up to RFC 7519 (sub/exp/iat, plus Name/Org/UserType/UserRole).
-// Update just runs these functions directly, unconditionally, and reports
-// what happened. Deliberately never touches anything a developer is
-// expected to hand-edit — handlers/services/store/models, main.go, .env,
-// templates/html/* — only ever the same narrow set of files those
-// functions already know how to safely upgrade (full regeneration for
-// pure generated infra like openapi.go, middleware/auth.go, and
-// auth/jwt.go; append-only insertion for files that are realistically
-// hand-extended, like response.go).
+// in CLAUDE.md), ensureJWTClaims (route.go) brings auth/jwt.go's
+// Claims up to RFC 7519 (sub/exp/iat, plus Name/Org/UserType/UserRole),
+// and ensureKgateResumeAll (kgate.go) patches kgate/kgate.go's Register
+// to auto-resume recorded channels on startup. Update just runs these
+// functions directly, unconditionally, and reports what happened.
+// Deliberately never touches anything a developer is expected to
+// hand-edit — handlers/services/store/models, main.go, .env,
+// templates/html/*, kgate.go's handleEvent — only ever the same narrow
+// set of files/regions those functions already know how to safely
+// upgrade (full regeneration for pure generated infra like openapi.go,
+// middleware/auth.go, and auth/jwt.go; append-only or surgical-anchor
+// patching for files that are realistically hand-extended, like
+// response.go and kgate.go).
 package scaffold
 
 // UpdateResult reports which of Update's checks changed something vs.
@@ -43,6 +46,8 @@ var updateChecks = []updateCheck{
 	{"auth: subject in request context", ensureAuthSubjectContext},
 	{"auth: RFC 7519 JWT claims (sub/exp/iat)", ensureJWTClaims},
 	{"db: InsertID helpers", ensureInsertIDHelpers},
+	{"db: mongo database name from DSN", ensureMongoDatabaseName},
+	{"kgate: resume subscriptions on startup (Register)", ensureKgateResumeAll},
 }
 
 // Update runs every registered check against appDir in order, stopping at

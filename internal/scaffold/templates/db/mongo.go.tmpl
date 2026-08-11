@@ -3,6 +3,9 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,9 +16,20 @@ import (
 var (
 	mongoMu    sync.Mutex
 	mongoConns = map[string]*mongo.Client{}
+	// mongoDBNames holds, per connection name, the database name parsed
+	// out of that connection's own DSN (see mongoDatabaseName) — the
+	// Mongo driver has no "default database" concept of its own, so
+	// anything needing one (e.g. the core package) reads it back via
+	// MongoDatabaseName instead of assuming/hardcoding a name.
+	mongoDBNames = map[string]string{}
 )
 
 func openMongo(name, uri string) error {
+	dbName, err := mongoDatabaseName(uri)
+	if err != nil {
+		return fmt.Errorf("mongo connection %q: %w", name, err)
+	}
+
 	client, err := mongo.Connect(options.Client().ApplyURI(uri))
 	if err != nil {
 		return err
@@ -30,6 +44,7 @@ func openMongo(name, uri string) error {
 
 	mongoMu.Lock()
 	mongoConns[name] = client
+	mongoDBNames[name] = dbName
 	mongoMu.Unlock()
 	return nil
 }
@@ -40,6 +55,34 @@ func Mongo(name string) (*mongo.Client, bool) {
 	defer mongoMu.Unlock()
 	client, ok := mongoConns[name]
 	return client, ok
+}
+
+// MongoDatabaseName returns the database name embedded in the named
+// Mongo connection's own DSN (e.g. "mydb" for a DSN ending in
+// "/mydb"), and whether that connection exists.
+func MongoDatabaseName(name string) (string, bool) {
+	mongoMu.Lock()
+	defer mongoMu.Unlock()
+	dbName, ok := mongoDBNames[name]
+	return dbName, ok
+}
+
+// mongoDatabaseName extracts the database name from a Mongo connection
+// string's path segment — e.g. "mydb" from
+// "mongodb://host:27017/mydb?retryWrites=true". Required because the
+// Mongo Go driver never exposes a "default database from the URI" of
+// its own; every mongo.Database() call needs an explicit name, so this
+// is parsed once, up front, rather than assumed by any caller.
+func mongoDatabaseName(uri string) (string, error) {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return "", fmt.Errorf("parsing DSN: %w", err)
+	}
+	dbName := strings.TrimPrefix(u.Path, "/")
+	if dbName == "" {
+		return "", fmt.Errorf("DSN has no database name in its path (expected mongodb://.../<dbname>)")
+	}
+	return dbName, nil
 }
 
 func closeMongo() error {

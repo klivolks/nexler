@@ -18,6 +18,14 @@
 // dispatched to the single handleEvent function below; edit that for your
 // event-processing logic.
 //
+// Register also resumes every channel already recorded in the registry
+// (ResumeAll) in the background the moment it's called — which happens
+// automatically at every app startup, since `nexler init kgate` wires
+// Register(mux) into routes/public/public.go, called from main.go's own
+// routes.Register(mux). So a fresh process with channels already on
+// record resumes listening to them with no manual wiring; a process with
+// none recorded yet does nothing until Subscribe records a real one.
+//
 // Go's stdlib has no WebSocket client, so this package needs
 // github.com/gorilla/websocket — run `go mod tidy` once before your first
 // build (same one-time step -db's SQL/Mongo drivers already need).
@@ -31,6 +39,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -120,12 +129,10 @@ func Unsubscribe(ctx context.Context, channel string) error {
 }
 
 // ResumeAll re-subscribes (each in its own background goroutine) to every
-// channel already recorded in the registry — call this once at startup
-// (e.g. in main.go, near db.Connect()) so subscriptions persist across
-// restarts. Not called automatically: main.go is never edited again after
-// the initial `nexler create app` scaffold, and `nexler init kgate` runs
-// independently of it (possibly long after), so this is one line to add
-// by hand.
+// channel already recorded in the registry, so subscriptions persist
+// across restarts. Called automatically by Register (in a background
+// goroutine, best-effort) — there's normally no need to call this
+// directly yourself.
 func ResumeAll(ctx context.Context) error {
 	channels, err := core.ListKgateChannels(ctx)
 	if err != nil {
@@ -275,7 +282,19 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// Register wires HandleWebhook onto mux at POST /webhooks/kgate.
+// Register wires HandleWebhook onto mux at POST /webhooks/kgate, and
+// kicks off ResumeAll in the background so any channel already recorded
+// in the registry — including one Subscribe'd before a prior restart —
+// resumes listening automatically. If nothing's recorded yet, ResumeAll
+// starts nothing: the package stays idle until Subscribe records a real
+// channel. Runs fire-and-forget (logs, never fails Register) since this
+// is a best-effort background resume, not something that should block
+// or fail app startup.
 func Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /webhooks/kgate", HandleWebhook)
+	go func() {
+		if err := ResumeAll(context.Background()); err != nil {
+			log.Printf("kgate: resuming channels: %v", err)
+		}
+	}()
 }

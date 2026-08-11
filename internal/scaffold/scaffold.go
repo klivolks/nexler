@@ -593,11 +593,20 @@ func envPrefix(appName string) string {
 // live inside the templates/ source tree, because the Go toolchain treats
 // any go.mod as a module boundary — that would silently break `go:embed`
 // and the build of the nexler CLI itself. "dotenv.tmpl" is special-cased
-// to ".env" for a different reason: go:embed silently excludes any file
-// whose name starts with "." (or "_"), so a literal ".env.tmpl" would
-// never be embedded at all. Every other file just has its ".tmpl" suffix
-// stripped.
+// to ".env" for the same underlying reason as "vscode/launch.json.tmpl"
+// below: go:embed silently excludes any file *or directory* whose name
+// starts with "." (or "_"), so a literal ".env.tmpl" — or a source tree
+// rooted at ".vscode/" — would never be embedded at all. The template
+// therefore lives at the dot-free source path "vscode/launch.json.tmpl"
+// and is mapped here to its real destination, ".vscode/launch.json" (VS
+// Code's fixed, non-configurable location for a workspace's debug
+// configurations). Every other file just has its ".tmpl" suffix stripped.
 func destPath(rel string) string {
+	relSlash := filepath.ToSlash(rel)
+	switch relSlash {
+	case "vscode/launch.json.tmpl":
+		return filepath.Join(".vscode", "launch.json")
+	}
 	switch filepath.Base(rel) {
 	case "gomod.tmpl":
 		return filepath.Join(filepath.Dir(rel), "go.mod")

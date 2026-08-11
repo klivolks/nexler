@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"{{ .ModulePath }}/db"
 	"{{ .ModulePath }}/mongo"
 )
 
@@ -19,7 +20,11 @@ func kgateChannelCollection() (mongo.Collection, bool) {
 	if !ok {
 		return mongo.Collection{}, false
 	}
-	return conn.Database("core").Collection("core_kgate_channels"), true
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("core_kgate_channels"), true
 }
 
 // AddKgateChannel idempotently records channel in the kgate channel

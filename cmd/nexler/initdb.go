@@ -24,6 +24,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -339,6 +340,11 @@ func kgateChannelStatements(dbType string) []string {
 }
 
 func provisionMongo(ctx context.Context, uri string) error {
+	dbName, err := mongoDatabaseName(uri)
+	if err != nil {
+		return err
+	}
+
 	client, err := mongo.Connect(options.Client().ApplyURI(uri))
 	if err != nil {
 		return err
@@ -351,7 +357,7 @@ func provisionMongo(ctx context.Context, uri string) error {
 	// Indexes().CreateOne implicitly creates the collection if it doesn't
 	// exist yet, and no-ops (no error) if this exact index already exists
 	// — no separate CreateCollection call, and no IF NOT EXISTS needed.
-	configColl := client.Database("core").Collection("core_config")
+	configColl := client.Database(dbName).Collection("core_config")
 	if _, err := configColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "key", Value: 1}},
 		Options: options.Index().SetUnique(true),
@@ -362,7 +368,7 @@ func provisionMongo(ctx context.Context, uri string) error {
 	// Not unique — core_error_log has no natural key, just a
 	// non-unique index on occurred_at for a future "recent errors" query
 	// to sort/filter on efficiently.
-	errorLogColl := client.Database("core").Collection("core_error_log")
+	errorLogColl := client.Database(dbName).Collection("core_error_log")
 	if _, err := errorLogColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "occurred_at", Value: -1}},
 	}); err != nil {
@@ -372,10 +378,30 @@ func provisionMongo(ctx context.Context, uri string) error {
 	// Unique on channel — kgate.Subscribe's AddKgateChannel upserts on
 	// this same field, so re-subscribing to an already-recorded channel
 	// stays a no-op rather than creating a duplicate row.
-	kgateChannelColl := client.Database("core").Collection("core_kgate_channels")
+	kgateChannelColl := client.Database(dbName).Collection("core_kgate_channels")
 	_, err = kgateChannelColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "channel", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 	return err
+}
+
+// mongoDatabaseName extracts the database name from a Mongo connection
+// string's path segment — e.g. "mydb" from
+// "mongodb://host:27017/mydb?retryWrites=true" — mirroring
+// db/mongo.go.tmpl's own mongoDatabaseName in the generated app template
+// (same reasoning: the Mongo driver has no "default database from the
+// URI" concept, so nexler must parse it out itself rather than assume a
+// name). Without this, provisioning always wrote to a database literally
+// named "core", ignoring whatever database the DSN actually pointed at.
+func mongoDatabaseName(uri string) (string, error) {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return "", fmt.Errorf("parsing core DSN: %w", err)
+	}
+	dbName := strings.TrimPrefix(u.Path, "/")
+	if dbName == "" {
+		return "", fmt.Errorf("core DSN has no database name in its path (expected mongodb://.../<dbname>)")
+	}
+	return dbName, nil
 }
