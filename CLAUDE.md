@@ -52,6 +52,26 @@ nexler add <package>[@version] [-dir <app-dir>] [-as <name>]
 nexler version
 ```
 
+## Documentation site (`docs/`)
+
+`docs/` (`index.html`, `css/theme.css`, `js/site.js`, `assets/logo.png`) is a standalone, static
+HTML/CSS/JS site — no build step, no dependency on anything else in this repo — that publishes
+Nexler's end-user guide: installation, every command and flag, the generated-app architecture, and
+a running changelog. It exists to be published to klivolks.com once Nexler ships; until then it's
+just opened as a local file. Its design (tokens in `docs/css/theme.css`: brand blue `#22A7F0`, navy
+`#0E2A44`, the `0 32px 0 32px` signature corner radius, Space Grotesk/Inter/JetBrains Mono) is
+deliberately adapted from the klivolks.com marketing site's own theme, so it reads as one family
+with the rest of klivolks.com rather than a generic docs template.
+
+**Keep it current.** Whenever a command, flag, default, or documented behavior changes in this
+repo, update the matching section of `docs/index.html` in the same change, and append a dated entry
+to the Changelog section (`#changelog`) describing what changed — newest entry first. Source every
+fact from the actual Go code (`cmd/nexler/*.go`'s flag definitions and `printUsage()`, plus the
+relevant `internal/scaffold/*.go`), not from this file's own prose, which can and has drifted out of
+sync with the CLI (e.g. the compact usage block above omits `init db`/`init kpass`/`init kgate`/
+`init docker`/`init ci`/`update` entirely, and is missing several `create app`/`create <route>`
+flags — don't propagate that same gap into `docs/`).
+
 ## Releasing
 
 Building/releasing the nexler CLI itself (not any app it scaffolds) is deliberately **not** a raw
