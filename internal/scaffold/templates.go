@@ -20,10 +20,11 @@ const templatesRoot = "templates"
 var routeTemplateFS embed.FS
 
 const (
-	routeHandlerTmpl = "route_templates/handler.go.tmpl"
-	routeServiceTmpl = "route_templates/service.go.tmpl"
-	routeStoreTmpl   = "route_templates/store.go.tmpl"
-	routeModelTmpl   = "route_templates/model.go.tmpl"
+	routeHandlerTmpl     = "route_templates/handler.go.tmpl"
+	routeHandlerFileTmpl = "route_templates/handler_file.tmpl"
+	routeServiceTmpl     = "route_templates/service.go.tmpl"
+	routeStoreTmpl       = "route_templates/store.go.tmpl"
+	routeModelTmpl       = "route_templates/model.go.tmpl"
 
 	routeHandlerMethodsFragment  = "route_templates/handler_methods.tmpl"
 	routeRegisterMethodsFragment = "route_templates/register_methods.tmpl"

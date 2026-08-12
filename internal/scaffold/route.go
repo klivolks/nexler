@@ -11,7 +11,7 @@
 // selectable.
 //
 // If the route's handler package already exists, running this again adds
-// only the newly-requested methods to it (see addMethodsToExistingRoute)
+// only the newly-requested methods to it (see addToExistingRoute)
 // instead of erroring — new handler functions, Register(mux) lines, and
 // model structs are inserted before stable marker comments left in the
 // generated files ("// nexler:handlers", "// nexler:register",
@@ -59,6 +59,21 @@ type RouteResult struct {
 	// method(s) have a different auth requirement than the rest of an
 	// already-existing route package (only set when Created is false).
 	Note string
+	// NewFile is the base file name (e.g. "verify.go") of a brand-new
+	// secondary handler+model file pair this invocation created inside an
+	// already-existing route package — set only when addToExistingRoute
+	// wrote a fresh file pair for -file's value rather than appending to
+	// one that already existed. Empty when Created is true (the whole
+	// package, including its one file, is new — see Created) or when this
+	// invocation appended to an already-existing file instead.
+	NewFile string
+	// PrimaryFile is the base file name (e.g. "provisioning.go") of the
+	// package's Register-holding file — set whenever Created is false and
+	// at least one method was added, so the caller can report where the
+	// new method(s)' mux.HandleFunc/openapi.Register wiring actually
+	// landed, independently of which file (NewFile, or -file's existing
+	// target) their handler function(s)/model(s) landed in.
+	PrimaryFile string
 }
 
 // RouteConfig holds the parameters for scaffolding one route.
@@ -78,6 +93,17 @@ type RouteConfig struct {
 	// from Module/Submodule (or IdentName below, when set) as before.
 	// Defaults to the route's own package name (the last of
 	// Module/Submodule) when empty.
+	//
+	// When Module/Submodule already name an existing route package, a
+	// FileName that names a file that doesn't exist yet in that package
+	// creates a genuine second handler+model file pair for this
+	// invocation's method(s) (see addToExistingRoute) — the package's
+	// Go package name, handlers, and everything else about it are
+	// unaffected, but its code now spans more than one file. A FileName
+	// that matches an already-existing file appends to it instead, same as
+	// today. Either way, this invocation's mux.HandleFunc/openapi.Register
+	// wiring always lands in the package's one primary (Register-holding)
+	// file, since Go permits only one func Register per package.
 	FileName string
 	// IdentName optionally overrides the identifier base normally derived
 	// from Module/Submodule — used to build every handler function name,
@@ -88,7 +114,7 @@ type RouteConfig struct {
 	// generated code lives on disk — package, directory, and models import
 	// alias all still derive from Module/Submodule as before. This exists
 	// for adding a second, distinct route to an already-scaffolded package
-	// (see addMethodsToExistingRoute) whose Module/Submodule-derived
+	// (see addToExistingRoute) whose Module/Submodule-derived
 	// identifiers would otherwise collide with the first route's; leave
 	// empty (the default) for the common case of one route per package.
 	IdentName string
@@ -105,7 +131,7 @@ type RouteConfig struct {
 	// ServiceRequested records whether -service was explicitly passed on
 	// this invocation (even as an empty string), independent of what it
 	// resolved to. Only consulted when adding to an already-existing route
-	// (see addMethodsToExistingRoute): distinguishes "the user asked me to
+	// (see addToExistingRoute): distinguishes "the user asked me to
 	// (re)consider the service layer this time" — which can retrofit a
 	// missing service onto an existing handler-only route — from "the user
 	// didn't mention it, leave whatever's there alone". Ignored for a
@@ -153,7 +179,7 @@ type RouteConfig struct {
 type routeMethod struct {
 	Verb            string // "GET", "POST", ...
 	VerbTitle       string // "Get", "Post", ... — used in identifiers
-	HandlerName     string // e.g. "HandleXGet" — the bare handler function name, before any middleware.RequireAuth wrapping. Single source of truth for this identifier: templates reference it directly instead of re-deriving "Handle"+Name+VerbTitle themselves, and addMethodsToExistingRoute's collision check matches against it exactly.
+	HandlerName     string // e.g. "HandleXGet" — the bare handler function name, before any middleware.RequireAuth wrapping. Single source of truth for this identifier: templates reference it directly instead of re-deriving "Handle"+Name+VerbTitle themselves, and addToExistingRoute's collision check matches against it exactly.
 	ReqTypeName     string // e.g. "GetXRequest" — same single-source-of-truth reasoning as HandlerName, for the Request struct type
 	RespTypeName    string // e.g. "GetXResponse" — same, for the Response struct type
 	RegisterExpr    string // e.g. "HandleXGet" or "middleware.RequireAuth(HandleXGet)"
@@ -201,7 +227,7 @@ type routeData struct {
 // inside cfg.AppDir, then wires the new route into the right routes/
 // aggregator. If the route's handler package already exists, it instead
 // adds only the requested methods that aren't already registered — see
-// addMethodsToExistingRoute.
+// addToExistingRoute.
 func NewRoute(cfg RouteConfig) (RouteResult, error) {
 	if !strings.HasPrefix(cfg.Route, "/") {
 		return RouteResult{}, fmt.Errorf("route %q must start with /", cfg.Route)
@@ -315,9 +341,18 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		if v != "GET" {
 			reqContentType = openAPIContentType(bodyKind)
 		}
-		htmlContentName := pkgName + "-content"
+		// Based on name (the identifier base — -name's value when set, else
+		// derived from pkgName), not pkgName directly: name is already the
+		// one thing -name exists to disambiguate whenever two routes would
+		// otherwise collide in the same package (see detectIdentifierCollisions),
+		// so keying HTMLContentName off it too means it can never collide in
+		// any case nexler currently allows to proceed. sanitizeIdent already
+		// lowercases, so strings.ToLower(name) equals pkgName exactly
+		// whenever -name isn't used — no behavior change for the common
+		// single-route case.
+		htmlContentName := strings.ToLower(name) + "-content"
 		if len(verbs) > 1 {
-			htmlContentName = pkgName + "-" + strings.ToLower(v) + "-content"
+			htmlContentName = strings.ToLower(name) + "-" + strings.ToLower(v) + "-content"
 		}
 		methods = append(methods, routeMethod{
 			Verb:            v,
@@ -380,10 +415,10 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		}
 	}
 
-	if _, found, err := findMarkedFile(filepath.Join(appDir, "handlers", relDir), handlerMarker); err != nil {
+	if _, found, err := findMarkedFile(filepath.Join(appDir, "handlers", relDir), registerMarker); err != nil {
 		return RouteResult{}, err
 	} else if found {
-		return addMethodsToExistingRoute(appDir, modulePath, relDir, fileName, data, cfg)
+		return addToExistingRoute(appDir, modulePath, relDir, fileName, data, cfg)
 	}
 
 	type routeFile struct {
@@ -434,7 +469,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 // to appDir/layer/relDir/fileName.go, erroring if that file already
 // exists — the same read-embedded/render/mkdir/write shape NewRoute's own
 // per-file loop used before this was extracted, now shared with the
-// existing-route layer retrofit in addMethodsToExistingRoute. Returns the
+// existing-route layer retrofit in addToExistingRoute. Returns the
 // path written.
 func writeRouteLayerFile(appDir, layer, tmplPath string, fs embed.FS, relDir, fileName string, data routeData) (string, error) {
 	destDir := filepath.Join(appDir, layer, relDir)
@@ -546,12 +581,25 @@ func writeIfMissing(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-// addMethodsToExistingRoute adds only the methods in data.Methods that
-// aren't already registered for this route, to the already-existing
-// handler and model files — leaving services/store untouched (they're
-// generic, not per-method) and skipping aggregator wiring entirely
-// (the route package is already imported and registered there, and which
-// aggregator file that is never changes after a route's first creation).
+// addToExistingRoute adds the methods in data.Methods that aren't already
+// registered for this route to an already-existing route package —
+// leaving services/store untouched (they're generic, not per-method) and
+// skipping aggregator wiring entirely (the route package is already
+// imported and registered there, and which aggregator file that is never
+// changes after a route's first creation).
+//
+// A package's handler/model code can now span more than one file: fileName
+// (from -file, defaulting to the package name) names the specific
+// handler/model file this invocation targets. If that file already exists
+// (and carries handlerMarker/modelMarker), the new method(s) are appended
+// to it, same as before this feature existed. If it doesn't exist yet, a
+// brand-new handler+model file pair is created holding just the new
+// method(s) — this is what makes a second, distinct -file value on an
+// already-scaffolded package actually produce a second file. Either way,
+// the new method(s)' mux.HandleFunc/openapi.Register wiring always lands
+// in the package's single primary file (the one file containing
+// registerMarker — Go permits only one func Register per package), never
+// in a secondary file.
 //
 // Each newly-added method wraps itself with middleware.RequireAuth (or
 // not) according to this invocation's own cfg.Protected, independently of
@@ -561,25 +609,66 @@ func writeIfMissing(path, content string) error {
 // not an error: detectExistingProtection is used only to build an
 // informational RouteResult.Note when this invocation's cfg.Protected
 // differs from the package's original aggregator classification.
-func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data routeData, cfg RouteConfig) (RouteResult, error) {
+func addToExistingRoute(appDir, modulePath, relDir, fileName string, data routeData, cfg RouteConfig) (RouteResult, error) {
 	existingProtected, existingProtectionFound, err := detectExistingProtection(appDir, modulePath, data.RelDirSlash)
 	if err != nil {
 		existingProtectionFound = false
 	}
 
-	handlerPath, found, err := findMarkedFile(filepath.Join(appDir, "handlers", filepath.FromSlash(data.RelDirSlash)), handlerMarker)
+	handlersDir := filepath.Join(appDir, "handlers", filepath.FromSlash(data.RelDirSlash))
+	modelsDir := filepath.Join(appDir, "models", filepath.FromSlash(data.RelDirSlash))
+
+	primaryPath, found, err := findMarkedFile(handlersDir, registerMarker)
 	if err != nil {
 		return RouteResult{}, err
 	}
 	if !found {
-		return RouteResult{}, fmt.Errorf("no existing handler file found containing the %q marker under handlers/%s — it may predate this feature; add the marker manually or edit the route directly", handlerMarker, data.RelDirSlash)
+		return RouteResult{}, fmt.Errorf("no existing handler file found containing the %q marker under handlers/%s — it may predate this feature; add the marker manually or edit the route directly", registerMarker, data.RelDirSlash)
 	}
-	modelPath, found, err := findMarkedFile(filepath.Join(appDir, "models", filepath.FromSlash(data.RelDirSlash)), modelMarker)
+	primaryRaw, err := os.ReadFile(primaryPath)
 	if err != nil {
-		return RouteResult{}, err
+		return RouteResult{}, fmt.Errorf("reading %s: %w", primaryPath, err)
 	}
-	if !found {
-		return RouteResult{}, fmt.Errorf("no existing model file found containing the %q marker under models/%s — it may predate this feature; add the marker manually or edit the route directly", modelMarker, data.RelDirSlash)
+	primaryContent := strings.ReplaceAll(string(primaryRaw), "\r\n", "\n")
+
+	// Resolve fileName's own target handler/model files directly — never
+	// via a directory-wide marker scan, so a -file value naming a file
+	// that doesn't exist yet is recognized as "create a new file" rather
+	// than silently redirected to whichever file a scan happens to find
+	// first (the root cause of the bug this function now fixes).
+	targetHandlerPath := filepath.Join(handlersDir, fileName+".go")
+	targetModelPath := filepath.Join(modelsDir, fileName+".go")
+	targetIsPrimary := targetHandlerPath == primaryPath
+
+	var targetHandlerContent string
+	targetExists := false
+	switch {
+	case targetIsPrimary:
+		targetHandlerContent, targetExists = primaryContent, true
+	default:
+		raw, statErr := os.ReadFile(targetHandlerPath)
+		switch {
+		case statErr == nil && strings.Contains(string(raw), handlerMarker):
+			targetHandlerContent, targetExists = strings.ReplaceAll(string(raw), "\r\n", "\n"), true
+		case statErr == nil:
+			return RouteResult{}, fmt.Errorf("%s already exists but doesn't contain the %q marker — it may predate this feature or be hand-written; pick a different -file name, or add the marker manually if it should be extended", targetHandlerPath, handlerMarker)
+		case !os.IsNotExist(statErr):
+			return RouteResult{}, statErr
+		}
+	}
+
+	var targetModelContent string
+	modelExists := false
+	if raw, statErr := os.ReadFile(targetModelPath); statErr == nil {
+		if !strings.Contains(string(raw), modelMarker) {
+			return RouteResult{}, fmt.Errorf("%s already exists but doesn't contain the %q marker — it may predate this feature or be hand-written; pick a different -file name, or add the marker manually if it should be extended", targetModelPath, modelMarker)
+		}
+		targetModelContent, modelExists = strings.ReplaceAll(string(raw), "\r\n", "\n"), true
+	} else if !os.IsNotExist(statErr) {
+		return RouteResult{}, statErr
+	}
+	if targetExists != modelExists {
+		return RouteResult{}, fmt.Errorf("inconsistent state: %s exists=%v but %s exists=%v — this handler/model pair should always be created or extended together; reconcile manually before re-running", targetHandlerPath, targetExists, targetModelPath, modelExists)
 	}
 
 	// Detect service/store presence from disk, not from this invocation's
@@ -612,23 +701,17 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 		data.HasStore = true
 	}
 
-	handlerRaw, err := os.ReadFile(handlerPath)
-	if err != nil {
-		return RouteResult{}, fmt.Errorf("reading %s: %w", handlerPath, err)
-	}
-	handlerContent := strings.ReplaceAll(string(handlerRaw), "\r\n", "\n")
-
-	modelRaw, err := os.ReadFile(modelPath)
-	if err != nil {
-		return RouteResult{}, fmt.Errorf("reading %s: %w", modelPath, err)
-	}
-	modelContent := strings.ReplaceAll(string(modelRaw), "\r\n", "\n")
-
+	// The "already registered" dedup marker only ever appears inside
+	// Register's own Summary: "VERB /route" line, which only ever lives in
+	// the primary file — so this must always check primaryContent, never
+	// targetHandlerContent: checking a secondary file here would silently
+	// let a duplicate route/verb slip through and panic mux.HandleFunc on
+	// a duplicate pattern at runtime.
 	var newMethods []routeMethod
 	var skipped []string
 	for _, m := range data.Methods {
 		marker := fmt.Sprintf("%q", m.Verb+" "+data.Route)
-		if strings.Contains(handlerContent, marker) {
+		if strings.Contains(primaryContent, marker) {
 			skipped = append(skipped, m.Verb)
 			continue
 		}
@@ -637,12 +720,26 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 	if len(newMethods) == 0 && !addService && !addStore {
 		return RouteResult{}, fmt.Errorf("method(s) %s already registered for this route", strings.Join(skipped, ", "))
 	}
-	if err := detectIdentifierCollisions(handlerContent, modelContent, newMethods, data.Route); err != nil {
+
+	// Collisions are checked package-wide, not just against the file this
+	// invocation happens to be touching — a package can now span several
+	// handler/model files, so a colliding identifier might live in any of
+	// them.
+	allHandlerContent, err := concatGoFiles(handlersDir)
+	if err != nil {
+		return RouteResult{}, err
+	}
+	allModelContent, err := concatGoFiles(modelsDir)
+	if err != nil {
+		return RouteResult{}, err
+	}
+	if err := detectIdentifierCollisions(allHandlerContent, allModelContent, newMethods, data.Route); err != nil {
 		return RouteResult{}, err
 	}
 	data.Methods = newMethods
 
 	var added []string
+	newFileCreated := false
 	if len(newMethods) > 0 {
 		if data.HTMLResponse {
 			layoutKind := cfg.LayoutKind
@@ -657,30 +754,48 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 			}
 		}
 
-		handlerContent, err = insertFragment(handlerContent, routeHandlerMethodsFragment, data,
-			handlerMarker,
-			fmt.Sprintf("could not find the handler-insertion marker in %s — it may predate this feature. Add a line `// nexler:handlers (do not remove this marker)` right before the `// Register wires...` comment, or add the new method's handler manually.", handlerPath))
-		if err != nil {
-			return RouteResult{}, err
-		}
-		handlerContent, err = insertFragment(handlerContent, routeRegisterMethodsFragment, data,
-			"\t// nexler:register (do not remove this marker)",
-			fmt.Sprintf("could not find the register-insertion marker in %s — it may predate this feature. Add a line `\t// nexler:register (do not remove this marker)` right before Register's closing brace, or wire the new method manually.", handlerPath))
-		if err != nil {
-			return RouteResult{}, err
-		}
-		if err := os.WriteFile(handlerPath, []byte(handlerContent), 0o644); err != nil {
-			return RouteResult{}, fmt.Errorf("writing %s: %w", handlerPath, err)
+		if targetExists {
+			targetHandlerContent, err = insertFragment(targetHandlerContent, routeHandlerMethodsFragment, data,
+				handlerMarker,
+				fmt.Sprintf("could not find the handler-insertion marker in %s — it may predate this feature. Add a line `// nexler:handlers (do not remove this marker)` right before the `// Register wires...` comment (or the file's end, for a secondary file), or add the new method's handler manually.", targetHandlerPath))
+			if err != nil {
+				return RouteResult{}, err
+			}
+			if targetIsPrimary {
+				primaryContent = targetHandlerContent
+			} else if err := os.WriteFile(targetHandlerPath, []byte(targetHandlerContent), 0o644); err != nil {
+				return RouteResult{}, fmt.Errorf("writing %s: %w", targetHandlerPath, err)
+			}
+
+			targetModelContent, err = insertFragment(targetModelContent, routeModelMethodsFragment, data,
+				modelMarker,
+				fmt.Sprintf("could not find the model-insertion marker in %s — it may predate this feature. Add a line `// nexler:models (do not remove this marker)` at the end of the file, or add the new structs manually.", targetModelPath))
+			if err != nil {
+				return RouteResult{}, err
+			}
+			if err := os.WriteFile(targetModelPath, []byte(targetModelContent), 0o644); err != nil {
+				return RouteResult{}, fmt.Errorf("writing %s: %w", targetModelPath, err)
+			}
+		} else {
+			if _, err := writeRouteLayerFile(appDir, "handlers", routeHandlerFileTmpl, routeTemplateFS, relDir, fileName, data); err != nil {
+				return RouteResult{}, err
+			}
+			if _, err := writeRouteLayerFile(appDir, "models", routeModelTmpl, routeTemplateFS, relDir, fileName, data); err != nil {
+				return RouteResult{}, err
+			}
+			newFileCreated = true
 		}
 
-		modelContent, err = insertFragment(modelContent, routeModelMethodsFragment, data,
-			modelMarker,
-			fmt.Sprintf("could not find the model-insertion marker in %s — it may predate this feature. Add a line `// nexler:models (do not remove this marker)` at the end of the file, or add the new structs manually.", modelPath))
+		// Register wiring always targets the primary file, regardless of
+		// which file the new handler function(s)/model(s) above landed in.
+		primaryContent, err = insertFragment(primaryContent, routeRegisterMethodsFragment, data,
+			registerMarker,
+			fmt.Sprintf("could not find the register-insertion marker in %s — it may predate this feature. Add a line `\t// nexler:register (do not remove this marker)` right before Register's closing brace, or wire the new method manually.", primaryPath))
 		if err != nil {
 			return RouteResult{}, err
 		}
-		if err := os.WriteFile(modelPath, []byte(modelContent), 0o644); err != nil {
-			return RouteResult{}, fmt.Errorf("writing %s: %w", modelPath, err)
+		if err := os.WriteFile(primaryPath, []byte(primaryContent), 0o644); err != nil {
+			return RouteResult{}, fmt.Errorf("writing %s: %w", primaryPath, err)
 		}
 
 		for _, m := range newMethods {
@@ -711,7 +826,14 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 		note = fmt.Sprintf("note: this route package was already registered as %s; the newly added method(s) (%s) are %s instead — only those handlers wrap themselves with middleware.RequireAuth, the rest of the package is untouched", existingLabel, strings.Join(added, ", "), addedLabel)
 	}
 
-	return RouteResult{Created: false, Added: added, Skipped: skipped, LayersAdded: layersAdded, Note: note}, nil
+	result := RouteResult{Created: false, Added: added, Skipped: skipped, LayersAdded: layersAdded, Note: note}
+	if newFileCreated {
+		result.NewFile = fileName + ".go"
+	}
+	if len(added) > 0 {
+		result.PrimaryFile = filepath.Base(primaryPath)
+	}
+	return result, nil
 }
 
 // detectIdentifierCollisions checks whether any of methods' generated
@@ -732,6 +854,12 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 // error; the identifiers themselves are matched via the exact literal text
 // the templates emit, so this only fires on a real collision, never a
 // same-route re-run (already filtered out by the caller before this runs).
+// Since a package can now span more than one handler/model file (see
+// addToExistingRoute), handlerContent/modelContent are normally the
+// concatenated content of every .go file in handlers/<relDir> and
+// models/<relDir> respectively (via concatGoFiles) — a colliding
+// identifier can live in any file in the package, not just the one this
+// invocation happens to be reading or writing.
 func detectIdentifierCollisions(handlerContent, modelContent string, methods []routeMethod, route string) error {
 	var collisions []string
 	for _, m := range methods {
@@ -767,10 +895,18 @@ func skipLayerRef(ref string) bool {
 // insertions on them, and findMarkedFile (below) reuses the same text to
 // recognize an already-scaffolded route file regardless of its base name
 // (the default pkgName-derived name, a -file override, or a hand-renamed
-// file), instead of assuming a fixed file name.
+// file), instead of assuming a fixed file name. A package can now span
+// several handler files (see addToExistingRoute) — handlerMarker appears in
+// every one of them, so it can no longer be used to find "the" handler
+// file. registerMarker exists for that: Go allows only one func Register
+// per package, so exactly one file in handlers/<relDir> ever contains it —
+// that file is the "primary" file, where every method's mux.HandleFunc/
+// openapi.Register wiring lives regardless of which file its handler
+// function itself is defined in.
 const (
-	handlerMarker = "// nexler:handlers (do not remove this marker)"
-	modelMarker   = "// nexler:models (do not remove this marker)"
+	handlerMarker  = "// nexler:handlers (do not remove this marker)"
+	modelMarker    = "// nexler:models (do not remove this marker)"
+	registerMarker = "\t// nexler:register (do not remove this marker)"
 )
 
 // findMarkedFile scans dir's top-level *.go files for one whose content
@@ -818,6 +954,35 @@ func dirHasGoFile(dir string) bool {
 		}
 	}
 	return false
+}
+
+// concatGoFiles reads and concatenates every top-level *.go file in dir —
+// used by addToExistingRoute to scan an entire package (which may now span
+// several handler or model files) for identifier collisions, instead of
+// just the one file a given invocation happens to be reading/writing. A
+// non-existent dir simply returns "", nil — same non-error treatment
+// dirHasGoFile/findMarkedFile give "nothing here yet".
+func concatGoFiles(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return "", fmt.Errorf("reading %s: %w", filepath.Join(dir, e.Name()), err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	return b.String(), nil
 }
 
 // resolveLayerRef parses a "module[/submodule]" reference passed to
@@ -876,7 +1041,7 @@ func insertFragment(content, fragmentPath string, data routeData, marker, missin
 
 // detectExistingProtection checks whether a route's handler package is
 // currently imported by routes/public/public.go or
-// routes/protected/protected.go, so addMethodsToExistingRoute can note
+// routes/protected/protected.go, so addToExistingRoute can note
 // when this invocation's -protected setting differs from the package's
 // original aggregator classification. Informational only — mixed
 // protection within one package is supported (see routeMethod.Protected).

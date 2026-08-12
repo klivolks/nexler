@@ -414,7 +414,12 @@ func runCreateRoute(route string, args []string) {
 		fmt.Println(", and wired the route into routes/" + kind + "/" + kind + ".go.")
 	} else {
 		if len(result.Added) > 0 {
-			fmt.Printf("Route %s (%s) already existed — added method(s): %s (%s)\n", route, group, strings.Join(result.Added, ", "), kind)
+			if result.NewFile != "" {
+				fmt.Printf("Route %s (%s) already existed — added method(s) %s in a new file %s (Register wiring added to %s) (%s)\n",
+					route, group, strings.Join(result.Added, ", "), result.NewFile, result.PrimaryFile, kind)
+			} else {
+				fmt.Printf("Route %s (%s) already existed — added method(s): %s (%s)\n", route, group, strings.Join(result.Added, ", "), kind)
+			}
 		} else {
 			fmt.Printf("Route %s (%s) already existed — no new methods requested\n", route, group)
 		}

@@ -238,7 +238,7 @@ nexler create app test -db mongo -db-host localhost -db-name test</pre></div>
             <tbody>
               <tr><td class="flag-name">-module</td><td class="flag-default">required</td><td class="flag-desc">Top-level group this route belongs to, e.g. <code>purchase</code>.</td></tr>
               <tr><td class="flag-name">-submodule</td><td class="flag-default">""</td><td class="flag-desc">Nested group, e.g. <code>verify</code>.</td></tr>
-              <tr><td class="flag-name">-file</td><td class="flag-default">package name</td><td class="flag-desc">Base file name for the generated handler/service/store/model files.</td></tr>
+              <tr><td class="flag-name">-file</td><td class="flag-default">package name</td><td class="flag-desc">Base file name for the generated handler/service/store/model files. Naming a file that doesn't exist yet in an already-scaffolded package creates a genuine second handler+model file pair for this invocation's method(s), instead of appending to the original file.</td></tr>
               <tr><td class="flag-name">-name</td><td class="flag-default">package name</td><td class="flag-desc">Overrides the identifier base for handler function names, Request/Response types, and OperationIDs (not the file/package location, which stays <code>-module</code>/<code>-submodule</code>-derived). Needed when adding a second, distinct route to an already-scaffolded package whose identifiers would otherwise collide with the first route's.</td></tr>
               <tr><td class="flag-name">-service</td><td class="flag-default">""</td><td class="flag-desc">Reuse an existing service package as <code>module[/submodule]</code>; <code>"none"</code> skips generating a service entirely (stop at handler + model).</td></tr>
               <tr><td class="flag-name">-store</td><td class="flag-default">""</td><td class="flag-desc">Reuse an existing store package the same way; <code>"none"</code> skips it.</td></tr>
@@ -345,8 +345,8 @@ nexler add @popperjs/core</pre></div>
         <h3><code>nexler init kpass</code></h3>
         <span class="badge badge-local">local only</span>
         <div class="cmd-line">nexler init kpass [-dir &lt;app-dir&gt;]</div>
-        <p>Adds a client for KPass (Klivolks' permission-check service) to an existing app: <code>kpass/kpass.go</code> (<code>Check</code>/<code>Allowed</code>, plus <code>UserIDFromRequest</code> when the app has <code>-auth jwt|session|both</code>) and <code>KPASS_URL</code>/<code>KPASS_CLIENT_ID</code>/<code>KPASS_API_SECRET</code> added to <code>.env</code> (blank, for you to fill in) if not already present.</p>
-        <p><code>Check(ctx, userID, resource, extra)</code> posts to <code>{KPASS_URL}/permission/check/</code> and returns KPass's full response (status, message, access, user role, user type) — kept separate from <code>Allowed</code> (a plain yes/no helper) so callers needing more, e.g. restricting data by role, call <code>Check</code> directly. Unlike <code>init db</code>, this needs no network access — pure local file scaffolding, safe to re-run.</p>
+        <p>Adds a client for KPass (Klivolks' permission-check service) to an existing app: <code>kpass/kpass.go</code> (<code>Check</code>/<code>Allowed</code>/<code>Authorise</code>, plus <code>UserIDFromRequest</code> when the app has <code>-auth jwt|session|both</code>) and <code>KPASS_URL</code>/<code>KPASS_CLIENT_ID</code>/<code>KPASS_API_SECRET</code> added to <code>.env</code> (blank, for you to fill in) if not already present.</p>
+        <p><code>Check(ctx, userID, resource, extra)</code> posts to <code>{KPASS_URL}/permission/check/</code> and returns KPass's full response (status, message, access, user role, user type) — kept separate from <code>Allowed</code> (a plain yes/no helper) so callers needing more, e.g. restricting data by role, call <code>Check</code> directly. <code>Authorise(ctx, code)</code> is a separate capability: it GETs <code>{KPASS_URL}/api/v1/authorise?code=...&amp;client_id=...</code> (query params, not headers — <code>api_secret</code> only sent if set) to resolve a one-time login/auth code from the frontend into the user's identity, returning a flat <code>AuthoriseResult{UserId, UserType, UserName, UserRole, OrgId}</code>. Unlike <code>init db</code>, this needs no network access — pure local file scaffolding, safe to re-run.</p>
         <div class="code-block"><pre>nexler init kpass -dir ./myapp</pre></div>
         <p>Usage — call this from any handler you want permission-gated, typically right after (or instead of) <code>middleware.RequireAuth</code>:</p>
         <div class="code-block"><pre>func HandleUsersCreate(w http.ResponseWriter, r *http.Request) {
@@ -362,6 +362,20 @@ nexler add @popperjs/core</pre></div>
 	}
 	<span class="cmt">// result.UserRole / result.UserType are also available for finer-grained checks</span>
 	<span class="cmt">// ... proceed with the real handler logic</span>
+}</pre></div>
+        <p>A login-style handler that trades a frontend-supplied code for the user's identity:</p>
+        <div class="code-block"><pre>func HandleLoginPost(w http.ResponseWriter, r *http.Request) {
+	var req loginmodels.PostLoginRequest  <span class="cmt">// req.Code from the frontend</span>
+	if err := request.DecodeJSON(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	identity, err := kpass.Authorise(r.Context(), req.Code)
+	if err != nil {
+		response.Error(w, r, http.StatusUnauthorized, "invalid code")
+		return
+	}
+	<span class="cmt">// identity.UserId/UserName/UserRole/UserType/OrgId — start a session or issue a JWT here</span>
 }</pre></div>
       </div>
     </section>
@@ -498,14 +512,15 @@ config/      <span class="c">loads {APPNAME}_-prefixed env vars once, at startup
           <thead><tr><th>Marker</th><th>Where</th><th>What gets inserted there</th></tr></thead>
           <tbody>
             <tr><td class="flag-name">// nexler:routes</td><td class="flag-desc">routes/public(or protected)/*.go</td><td class="flag-desc">New route imports and <code>Register(mux)</code> calls.</td></tr>
-            <tr><td class="flag-name">// nexler:handlers</td><td class="flag-desc">handlers/.../&lt;pkg&gt;.go</td><td class="flag-desc">New per-method handler functions when adding <code>-methods</code> to an existing route.</td></tr>
-            <tr><td class="flag-name">// nexler:register</td><td class="flag-desc">handlers/.../&lt;pkg&gt;.go</td><td class="flag-desc">New <code>mux.HandleFunc</code>/<code>openapi.Register</code> calls.</td></tr>
-            <tr><td class="flag-name">// nexler:models</td><td class="flag-desc">models/.../&lt;pkg&gt;.go</td><td class="flag-desc">New Request/Response struct pairs.</td></tr>
+            <tr><td class="flag-name">// nexler:handlers</td><td class="flag-desc">handlers/.../&lt;file&gt;.go (one or more per package)</td><td class="flag-desc">New per-method handler functions when adding <code>-methods</code> to an already-scaffolded <code>-file</code>.</td></tr>
+            <tr><td class="flag-name">// nexler:register</td><td class="flag-desc">handlers/.../&lt;file&gt;.go (exactly one per package — the package's primary file)</td><td class="flag-desc">New <code>mux.HandleFunc</code>/<code>openapi.Register</code> calls, for every method regardless of which file its handler is defined in.</td></tr>
+            <tr><td class="flag-name">// nexler:models</td><td class="flag-desc">models/.../&lt;file&gt;.go (one or more per package)</td><td class="flag-desc">New Request/Response struct pairs.</td></tr>
           </tbody>
         </table>
       </div>
       <div class="callout warn">If a marker is missing (e.g. a route scaffolded before this feature existed, or a hand-edited file), the insert fails with an error naming the exact marker text to add back by hand — it never silently guesses a location.</div>
-      <div class="callout warn">Adding a second, distinct route to an already-scaffolded package (same <code>-module</code>/<code>-submodule</code>, different path, overlapping verb) is checked for handler/type/OperationID collisions <em>before</em> anything is written — since identifiers are derived from <code>-module</code>/<code>-submodule</code> + verb, not the URL path, two different routes sharing those would otherwise generate duplicate/colliding code. Pass <code>-name</code> to give the new route distinct identifiers.</div>
+      <div class="callout">A package's handler/model code can span more than one file. <code>-file</code> names the specific handler/model file this invocation targets: if it already exists, new methods are appended to it; if it doesn't, a genuine new file pair is created for them (with no <code>Register</code> func of its own, since Go permits only one per package). Either way, registration wiring always lands in the package's one primary file.</div>
+      <div class="callout warn">Adding a second, distinct route to an already-scaffolded package (same <code>-module</code>/<code>-submodule</code>, different path, overlapping verb) is checked for handler/type/OperationID collisions across every file in the package <em>before</em> anything is written — since identifiers are derived from <code>-module</code>/<code>-submodule</code> + verb, not the URL path, two different routes sharing those would otherwise generate duplicate/colliding code. Pass <code>-name</code> to give the new route distinct identifiers (this also disambiguates its HTML content file, for <code>-response html</code> routes).</div>
     </section>
 
     <!-- ============================= KEY CONCEPTS ============================= -->
@@ -618,6 +633,18 @@ err = resp.JSON(&amp;out)</pre></div>
       <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
 
       <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-13</div>
+          <h4><code>kpass.Authorise</code> — resolve a login code via kpass</h4>
+          <p>New function in the generated <code>kpass</code> client (<code>nexler init kpass</code>): <code>Authorise(ctx, code)</code> GETs kpass's separate <code>{KPASS_URL}/api/v1/authorise</code> endpoint (query params, not headers) to resolve a one-time login/auth code from the frontend into the calling user's identity, returning a flat <code>AuthoriseResult{UserId, UserType, UserName, UserRole, OrgId}</code>. Generated unconditionally, same as <code>Check</code>/<code>Allowed</code> — independent of the app's <code>-auth</code> choice.</p>
+          <div class="change-tags"><span class="change-tag">kpass</span><span class="change-tag">auth</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4><code>-file</code> on <code>create &lt;route&gt;</code> now creates a real second file</h4>
+          <p>Fixed: adding a second, distinct route to an already-scaffolded <code>-module</code>/<code>-submodule</code> package with a different <code>-file</code> value used to silently ignore that value and append everything into the original file. It now creates a genuine new handler+model file pair when <code>-file</code> names one that doesn't exist yet, while <code>Register</code>/OpenAPI wiring stays centralized in the package's one primary file (Go permits only one <code>Register</code> per package). Identifier-collision checks (<code>-name</code>) and HTML content-file naming are now scoped to the whole package instead of a single file, closing a related bug where a second <code>-response html</code> route could silently reuse the first route's content file.</p>
+          <div class="change-tags"><span class="change-tag">cli</span><span class="change-tag">routes</span><span class="change-tag">bugfix</span></div>
+        </div>
         <div class="change-entry">
           <div class="change-date">2026-08-12</div>
           <h4>Admin API for users/services; hidden Swagger button when off; usage examples added</h4>
