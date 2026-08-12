@@ -1054,6 +1054,36 @@ If any marker is missing (e.g. a route scaffolded before this feature existed, o
 file), the corresponding insert fails with an error naming the exact marker text to add back by
 hand — it does not silently fall back to guessing a location.
 
+#### Cross-invocation identifier collisions (`-name`)
+
+Every generated identifier for a method — its handler function name, Request/Response type
+names, and OperationID — is built purely from `-module`/`-submodule` + the HTTP verb
+(`routeMethod.HandlerName`/`ReqTypeName`/`RespTypeName`/`OperationID`, all computed once in
+`NewRoute`'s per-verb loop and referenced directly by the `.tmpl` files as the single source of
+truth, rather than each template re-deriving `VerbTitle`+`Name` on its own). The URL route itself
+never feeds into any identifier — only into the `"<VERB> <route>"` marker `addMethodsToExistingRoute`
+already uses to detect "this exact method is already registered" (see above). That means a second
+`nexler create <route>` invocation targeting a **different** route but the same
+`-module`/`-submodule`/verb as an already-scaffolded one would, without a check, sail past the
+already-registered marker (it's a different route string) and generate identifiers identical to the
+first route's — `insertFragment` would then append a second `func HandleXGet(...)`/`type
+GetXRequest struct` into the same file: Go-illegal at best (duplicate declaration), a silent
+`/openapi.json`-breaking duplicate `OperationID` at worst.
+
+`addMethodsToExistingRoute` guards against this with `detectIdentifierCollisions`, run against the
+already-loaded handler/model file contents *before* any insertion happens (matching the same
+"error instead of silently guessing/corrupting" precedent as the missing-marker errors above): for
+every method about to be added, it checks whether that method's `HandlerName`/`ReqTypeName`/
+`RespTypeName`/`OperationID` already appears in the file, and if so, aborts the whole call with an
+error naming every colliding identifier — no partial writes. The fix is `-name` (`RouteConfig.IdentName`),
+a new per-route flag that overrides just the identifier base (not the file/package location, which
+stays `-module`/`-submodule`-derived, same as `-file` already does for the on-disk file name) — e.g.
+adding `/purchase/new` to a package that already has `/purchase/verify` (both POST) needs
+`-name New` so the new route gets `HandleNewPost`/`PostNewRequest`/OperationID `"postNew"` instead
+of colliding with the existing `HandlePurchasePost`. Not interactively prompted (same as `-file`
+isn't proactively surfaced beyond its own optional prompt) — the collision error itself is what
+tells a developer to pass it, since the flag is only ever needed in this one situation.
+
 ### Optional service/store layers (`-service`/`-store none`, and adding them later)
 
 A route doesn't have to generate all four layers. `-service`/`-store` (`resolveLayerRef` in

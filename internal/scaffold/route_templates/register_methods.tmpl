@@ -7,11 +7,11 @@
 		Summary:     "{{ .Verb }} {{ $.Route }}",
 		Protected:   {{ .Protected }},
 		Tags:        []string{"{{ $.Module }}"},
-		ReqType:     {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Request{},
+		ReqType:     {{ $.Alias }}models.{{ .ReqTypeName }}{},
 {{- if .ReqContentType }}
 		ReqContentType: "{{ .ReqContentType }}",
 {{- end }}
-		RespType: {{ $.Alias }}models.{{ .VerbTitle }}{{ $.Name }}Response{},
+		RespType: {{ $.Alias }}models.{{ .RespTypeName }}{},
 {{- if $.HTMLResponse }}
 		RespContentType: "text/html",
 {{- end }}

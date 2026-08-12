@@ -1,15 +1,15 @@
 {{ range .Methods }}
-// {{ .VerbTitle }}{{ $.Name }}Request is the {{ .BodyDescription }} for {{ .Verb }} {{ $.Route }}.
+// {{ .ReqTypeName }} is the {{ .BodyDescription }} for {{ .Verb }} {{ $.Route }}.
 {{- if $.PathParams }}
 // Path parameter(s) {{ $.PathParamsCSV }} are populated by request.DecodePath —
 // add a matching json-tagged field per name to receive them.
 {{- end }}
-type {{ .VerbTitle }}{{ $.Name }}Request struct {
+type {{ .ReqTypeName }} struct {
 	// TODO: add fields.
 }
 
-// {{ .VerbTitle }}{{ $.Name }}Response is the response payload for {{ .Verb }} {{ $.Route }}.
-type {{ .VerbTitle }}{{ $.Name }}Response struct {
+// {{ .RespTypeName }} is the response payload for {{ .Verb }} {{ $.Route }}.
+type {{ .RespTypeName }} struct {
 	// TODO: add fields.
 }
 {{ end }}

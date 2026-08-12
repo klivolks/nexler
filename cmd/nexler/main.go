@@ -269,6 +269,7 @@ func runCreateRoute(route string, args []string) {
 	module := fs.String("module", "", "module (top-level group) this route belongs to, e.g. purchase")
 	submodule := fs.String("submodule", "", "submodule (nested group) this route belongs to, e.g. verify")
 	file := fs.String("file", "", "base file name for the generated handler/service/store/model files, e.g. verify; defaults to the route's package name (last of -module/-submodule)")
+	name := fs.String("name", "", "override the identifier base used for handler function names, Request/Response types, and OperationIDs (default: derived from -module/-submodule); needed when adding a second, distinct route to an already-scaffolded package whose identifiers would otherwise collide with the first route's")
 	service := fs.String("service", "", "reuse an existing service package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify; \"none\" skips generating a service for this route entirely (stop at handler+model)")
 	store := fs.String("store", "", "reuse an existing store package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify; \"none\" skips generating a store for this route entirely (stop at handler+model)")
 	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
@@ -296,6 +297,8 @@ func runCreateRoute(route string, args []string) {
 	if !set["file"] {
 		fileVal = prompt("File name (optional, default: package name)", "")
 	}
+
+	nameVal := *name
 
 	serviceVal := *service
 	storeVal := *store
@@ -357,6 +360,7 @@ func runCreateRoute(route string, args []string) {
 		Module:           moduleVal,
 		Submodule:        submoduleVal,
 		FileName:         fileVal,
+		IdentName:        nameVal,
 		ServiceRef:       serviceVal,
 		StoreRef:         storeVal,
 		ServiceRequested: set["service"],
@@ -677,9 +681,17 @@ Usage:
       route already exists, this instead adds only the newly-requested
       methods to it (skipping any already registered) rather than
       erroring.
+      Handler function names, Request/Response types, and OperationIDs are
+      derived from -module/-submodule + verb, not the URL path — adding a
+      second, distinct route under the same -module/-submodule as an
+      existing one (different path, overlapping verb) fails with an error
+      naming the colliding identifier(s); pass -name <value> to override
+      the identifier base for this route (e.g. -name New) without changing
+      where its files live.
 
       Example: nexler create /purchase/verify -module purchase -submodule verify -methods GET,POST -body json -protected
       Example: nexler create /home -module home -response html
+      Example: nexler create /purchase/new -module purchase -submodule verify -methods POST -name New
 
   nexler db add <name> -type <mongo|mysql|postgres|mssql> [-dir <app-dir>] [-host <host>] [-port <port>] [-dbname <name>] [-user <user>] [-password <password>]
       Adds a new named database connection to an existing app's .env — not

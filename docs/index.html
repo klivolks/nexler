@@ -236,6 +236,7 @@ nexler create app test -db mongo -db-host localhost -db-name test</pre></div>
               <tr><td class="flag-name">-module</td><td class="flag-default">required</td><td class="flag-desc">Top-level group this route belongs to, e.g. <code>purchase</code>.</td></tr>
               <tr><td class="flag-name">-submodule</td><td class="flag-default">""</td><td class="flag-desc">Nested group, e.g. <code>verify</code>.</td></tr>
               <tr><td class="flag-name">-file</td><td class="flag-default">package name</td><td class="flag-desc">Base file name for the generated handler/service/store/model files.</td></tr>
+              <tr><td class="flag-name">-name</td><td class="flag-default">package name</td><td class="flag-desc">Overrides the identifier base for handler function names, Request/Response types, and OperationIDs (not the file/package location, which stays <code>-module</code>/<code>-submodule</code>-derived). Needed when adding a second, distinct route to an already-scaffolded package whose identifiers would otherwise collide with the first route's.</td></tr>
               <tr><td class="flag-name">-service</td><td class="flag-default">""</td><td class="flag-desc">Reuse an existing service package as <code>module[/submodule]</code>; <code>"none"</code> skips generating a service entirely (stop at handler + model).</td></tr>
               <tr><td class="flag-name">-store</td><td class="flag-default">""</td><td class="flag-desc">Reuse an existing store package the same way; <code>"none"</code> skips it.</td></tr>
               <tr><td class="flag-name">-dir</td><td class="flag-default">"."</td><td class="flag-desc">Path to the app directory (must contain <code>go.mod</code>).</td></tr>
@@ -250,8 +251,11 @@ nexler create app test -db mongo -db-host localhost -db-name test</pre></div>
 
         <p>A route's URL can carry named path parameters — <code>/admin/user/{id}/profile</code>, or a trailing <code>{name...}</code> catch-all (Go 1.22+ <code>ServeMux</code> wildcards). Every generated handler decodes them via <code>request.DecodePath</code>, matched to your Request struct by the same <code>json</code> tag convention as query/body fields, and they're documented as OpenAPI path parameters automatically. A literal <code>?</code> or <code>#</code> in the route is rejected — use a path parameter instead.</p>
 
+        <p>Handler function names, Request/Response types, and OperationIDs are derived from <code>-module</code>/<code>-submodule</code> + HTTP verb, never the URL path — so adding a second, distinct route under the same <code>-module</code>/<code>-submodule</code> as an existing one (different path, overlapping verb) fails fast with an error naming the colliding identifier(s), instead of silently generating duplicate/broken code. Pass <code>-name</code> to disambiguate.</p>
+
         <div class="code-block"><pre>nexler create /purchase/verify -module purchase -submodule verify -methods GET,POST -body json -protected
-nexler create /home -module home -response html</pre></div>
+nexler create /home -module home -response html
+nexler create /purchase/new -module purchase -submodule verify -methods POST -name New</pre></div>
       </div>
     </section>
 
@@ -451,6 +455,7 @@ config/      <span class="c">loads {APPNAME}_-prefixed env vars once, at startup
         </table>
       </div>
       <div class="callout warn">If a marker is missing (e.g. a route scaffolded before this feature existed, or a hand-edited file), the insert fails with an error naming the exact marker text to add back by hand — it never silently guesses a location.</div>
+      <div class="callout warn">Adding a second, distinct route to an already-scaffolded package (same <code>-module</code>/<code>-submodule</code>, different path, overlapping verb) is checked for handler/type/OperationID collisions <em>before</em> anything is written — since identifiers are derived from <code>-module</code>/<code>-submodule</code> + verb, not the URL path, two different routes sharing those would otherwise generate duplicate/colliding code. Pass <code>-name</code> to give the new route distinct identifiers.</div>
     </section>
 
     <!-- ============================= KEY CONCEPTS ============================= -->
@@ -517,6 +522,12 @@ err = resp.JSON(&amp;out)</pre></div>
       <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
 
       <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4><code>-name</code> flag; cross-invocation identifier collision fix</h4>
+          <p>Fixed a scaffolding bug where re-running <code>nexler create &lt;route&gt;</code> to add a second, distinct route under an already-scaffolded package's <code>-module</code>/<code>-submodule</code> could silently generate the same handler function, Request/Response types, and OperationID as an existing route (identifiers were derived purely from <code>-module</code>/<code>-submodule</code> + verb, never the URL path). This now fails fast with an error naming every colliding identifier, before anything is written. New <code>-name</code> flag on <code>nexler create &lt;route&gt;</code> disambiguates identifiers for this case without changing where the route's files live.</p>
+          <div class="change-tags"><span class="change-tag">create-route</span><span class="change-tag">fix</span></div>
+        </div>
         <div class="change-entry">
           <div class="change-date">2026-08-12</div>
           <h4>Docs site published</h4>

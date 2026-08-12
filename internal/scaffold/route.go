@@ -75,9 +75,23 @@ type RouteConfig struct {
 	// Sanitized the same way as Module/Submodule. Only affects the file
 	// name on disk — the Go package name, exported handler functions, the
 	// models import alias, and the OpenAPI operationId all keep deriving
-	// from Module/Submodule as before. Defaults to the route's own package
-	// name (the last of Module/Submodule) when empty.
+	// from Module/Submodule (or IdentName below, when set) as before.
+	// Defaults to the route's own package name (the last of
+	// Module/Submodule) when empty.
 	FileName string
+	// IdentName optionally overrides the identifier base normally derived
+	// from Module/Submodule — used to build every handler function name,
+	// Request/Response type name, and OperationID for this route (e.g.
+	// "New" here means HandleNewPost/PostNewRequest/"postnew" instead of
+	// the module-derived HandlePurchasePost/etc.). Sanitized the same way
+	// as Module/Submodule. Unlike FileName, this does NOT affect where the
+	// generated code lives on disk — package, directory, and models import
+	// alias all still derive from Module/Submodule as before. This exists
+	// for adding a second, distinct route to an already-scaffolded package
+	// (see addMethodsToExistingRoute) whose Module/Submodule-derived
+	// identifiers would otherwise collide with the first route's; leave
+	// empty (the default) for the common case of one route per package.
+	IdentName string
 	// ServiceRef, when non-empty, points this route at an already-scaffolded
 	// service package instead of generating a new one — a "module[/submodule]"
 	// reference addressed the same way Module/Submodule are, e.g. "purchase"
@@ -139,6 +153,9 @@ type RouteConfig struct {
 type routeMethod struct {
 	Verb            string // "GET", "POST", ...
 	VerbTitle       string // "Get", "Post", ... — used in identifiers
+	HandlerName     string // e.g. "HandleXGet" — the bare handler function name, before any middleware.RequireAuth wrapping. Single source of truth for this identifier: templates reference it directly instead of re-deriving "Handle"+Name+VerbTitle themselves, and addMethodsToExistingRoute's collision check matches against it exactly.
+	ReqTypeName     string // e.g. "GetXRequest" — same single-source-of-truth reasoning as HandlerName, for the Request struct type
+	RespTypeName    string // e.g. "GetXResponse" — same, for the Response struct type
 	RegisterExpr    string // e.g. "HandleXGet" or "middleware.RequireAuth(HandleXGet)"
 	Protected       bool   // whether this specific method wraps itself with middleware.RequireAuth — same value RegisterExpr was built from
 	BodyDescription string // human-readable, used in model doc comments
@@ -228,6 +245,14 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		}
 	}
 
+	if cfg.IdentName != "" {
+		identName := sanitizeIdent(cfg.IdentName)
+		if identName == "" {
+			return RouteResult{}, fmt.Errorf("-name must contain at least one letter or digit")
+		}
+		name = exportedName(identName)
+	}
+
 	serviceImportPath, servicePkgName, hasServiceRef, skipService, err := resolveLayerRef(appDir, modulePath, "service", "services", cfg.ServiceRef)
 	if err != nil {
 		return RouteResult{}, err
@@ -297,6 +322,9 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		methods = append(methods, routeMethod{
 			Verb:            v,
 			VerbTitle:       vt,
+			HandlerName:     handlerName,
+			ReqTypeName:     vt + name + "Request",
+			RespTypeName:    vt + name + "Response",
 			RegisterExpr:    registerExpr,
 			Protected:       protected,
 			BodyDescription: bodyDescription(v, bodyKind),
@@ -590,6 +618,12 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 	}
 	handlerContent := strings.ReplaceAll(string(handlerRaw), "\r\n", "\n")
 
+	modelRaw, err := os.ReadFile(modelPath)
+	if err != nil {
+		return RouteResult{}, fmt.Errorf("reading %s: %w", modelPath, err)
+	}
+	modelContent := strings.ReplaceAll(string(modelRaw), "\r\n", "\n")
+
 	var newMethods []routeMethod
 	var skipped []string
 	for _, m := range data.Methods {
@@ -602,6 +636,9 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 	}
 	if len(newMethods) == 0 && !addService && !addStore {
 		return RouteResult{}, fmt.Errorf("method(s) %s already registered for this route", strings.Join(skipped, ", "))
+	}
+	if err := detectIdentifierCollisions(handlerContent, modelContent, newMethods, data.Route); err != nil {
+		return RouteResult{}, err
 	}
 	data.Methods = newMethods
 
@@ -636,11 +673,6 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 			return RouteResult{}, fmt.Errorf("writing %s: %w", handlerPath, err)
 		}
 
-		modelRaw, err := os.ReadFile(modelPath)
-		if err != nil {
-			return RouteResult{}, fmt.Errorf("reading %s: %w", modelPath, err)
-		}
-		modelContent := strings.ReplaceAll(string(modelRaw), "\r\n", "\n")
 		modelContent, err = insertFragment(modelContent, routeModelMethodsFragment, data,
 			modelMarker,
 			fmt.Sprintf("could not find the model-insertion marker in %s — it may predate this feature. Add a line `// nexler:models (do not remove this marker)` at the end of the file, or add the new structs manually.", modelPath))
@@ -680,6 +712,46 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 	}
 
 	return RouteResult{Created: false, Added: added, Skipped: skipped, LayersAdded: layersAdded, Note: note}, nil
+}
+
+// detectIdentifierCollisions checks whether any of methods' generated
+// identifiers (handler function, Request/Response types, OperationID)
+// already exist in handlerContent/modelContent — nexler builds every one of
+// these purely from -module/-submodule/-name and the HTTP verb, never from
+// the URL path (see routeMethod.HandlerName/ReqTypeName/RespTypeName/
+// OperationID, all built once in NewRoute's per-verb loop), so a second
+// `nexler create` invocation targeting a *different* route but the same
+// -module/-submodule/verb collides by construction: the per-method
+// already-registered check above only looks for this exact route's own
+// "<VERB> <route>" marker, so a different route sails past it and would
+// otherwise have its handler/type/OperationID silently appended
+// (Go-legal-but-duplicate at best, a silent /openapi.json corruption at
+// worst) right alongside the first route's. Must run before any file is
+// written — Go forbids duplicate top-level declarations, and there's no
+// clean way to "undo" a partial insertion. route is only used to phrase the
+// error; the identifiers themselves are matched via the exact literal text
+// the templates emit, so this only fires on a real collision, never a
+// same-route re-run (already filtered out by the caller before this runs).
+func detectIdentifierCollisions(handlerContent, modelContent string, methods []routeMethod, route string) error {
+	var collisions []string
+	for _, m := range methods {
+		if strings.Contains(handlerContent, "func "+m.HandlerName+"(") {
+			collisions = append(collisions, fmt.Sprintf("handler function %s", m.HandlerName))
+		}
+		if strings.Contains(modelContent, "type "+m.ReqTypeName+" struct") {
+			collisions = append(collisions, fmt.Sprintf("request type %s", m.ReqTypeName))
+		}
+		if strings.Contains(modelContent, "type "+m.RespTypeName+" struct") {
+			collisions = append(collisions, fmt.Sprintf("response type %s", m.RespTypeName))
+		}
+		if strings.Contains(handlerContent, fmt.Sprintf("OperationID: %q,", m.OperationID)) {
+			collisions = append(collisions, fmt.Sprintf("OperationID %q", m.OperationID))
+		}
+	}
+	if len(collisions) == 0 {
+		return nil
+	}
+	return fmt.Errorf("route %q would generate identifier(s) that already exist in this package for what nexler can only assume is a different route: %s — nexler derives handler/type/OperationID names purely from -module/-submodule/-name and the HTTP verb, never the URL path, so two distinct routes sharing those collide; re-run with a distinct -name to disambiguate this route's identifiers, or place it under its own -submodule", route, strings.Join(collisions, ", "))
 }
 
 // skipLayerRef reports whether ref is the "none" sentinel — resolveLayerRef's
