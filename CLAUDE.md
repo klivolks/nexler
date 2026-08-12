@@ -180,9 +180,10 @@ can't matter.
   `scaffold.NewApp` in `scaffold.go`, walking the tree with `fs.WalkDir` and rendering every
   `*.tmpl` file through `text/template`.
 - `internal/scaffold/route_templates/` (embedded as `routeTemplateFS`) — per-route stubs
-  (handler/service/store/model) plus three *fragment* templates (`handler_methods.tmpl`,
-  `register_methods.tmpl`, `model_methods.tmpl`) used to extend an existing route. Driven by
-  `scaffold.NewRoute` / `addMethodsToExistingRoute` in `route.go`.
+  (handler/service/store/model), `handler_file.tmpl` (a secondary handler file with no `Register`
+  func — see "Idempotent route wiring via marker comments" below), plus three *fragment*
+  templates (`handler_methods.tmpl`, `register_methods.tmpl`, `model_methods.tmpl`) used to
+  extend an existing route. Driven by `scaffold.NewRoute` / `addToExistingRoute` in `route.go`.
 
 Only files ending in `.tmpl` are parsed by `text/template` (see `processFile` in `scaffold.go`);
 everything else is copied through verbatim. This matters because generated Go source can contain
@@ -924,6 +925,20 @@ ALLOW" helper for the common case — kept as a distinct function from `Check` o
 so code needing more than yes/no always has direct access to the raw `Result` instead of
 being funneled through a boolean.
 
+Also generated, unconditionally like `Check`/`Allowed`: `Authorise(ctx, code) (*AuthoriseResult,
+error)`, a GET client for kpass's separate `GET {KPASS_URL}/api/v1/authorise` endpoint — resolves a
+one-time authorization `code` (issued by whatever login/auth flow the frontend used — kpass's own,
+or something else entirely) into the calling user's identity: `AuthoriseResult{UserId, UserType,
+UserName, UserRole, OrgId}`, all `string`, decoded from a flat (unwrapped) JSON body with camelCase
+keys — a deliberately different shape from `Check`'s `{status, message, access, ...}` envelope,
+since this is a distinct kpass endpoint with its own response convention. Unlike `Check`, which
+sends `KPASS_CLIENT_ID`/`KPASS_API_SECRET` as headers, `Authorise` sends `code`/`client_id`
+(`KPASS_CLIENT_ID`)/`api_secret` (`KPASS_API_SECRET`) as query params — `api_secret` only when set,
+matching the endpoint's own optional-parameter contract. Because this endpoint's response has no
+in-body error signal the way `Check`'s `Status` field does, `Authorise` explicitly checks
+`resp.StatusCode != http.StatusOK` before decoding — without it, an invalid/expired code returning
+a non-2xx status would silently decode into a zero-valued `AuthoriseResult` instead of erroring.
+
 Also generated, only when the target app has a real `-auth` mechanism: `UserIDFromRequest
 (r *http.Request) (userID string, ok bool)`, extracting the request's authenticated
 subject to pass into `Check`. Since `init kpass` runs independently of `create app`
@@ -1203,7 +1218,7 @@ layout.html`, written once by `writeSharedHTMLLayout`; `module` gives this one r
 module's own copy always wins over the shared one at request time since `resolveHTMLFile` checks
 it first. `route.go`'s `writeHTMLTemplates` writes the content file(s) into the route's own module
 folder regardless, plus whichever layout `-layout` calls for — called from both `NewRoute` and
-`addMethodsToExistingRoute`, so adding a method later (or switching `-layout` on a later `nexler
+`addToExistingRoute`, so adding a method later (or switching `-layout` on a later `nexler
 create` for the same route) never clobbers a hand-edited template, only ever adding what's
 missing. For the app's own homepage under `nexler create app -ui`, `scaffold.go`'s
 `writeAppUIHomepage` writes `home.html` into module `"home"` the same way, and always uses the
@@ -1246,27 +1261,52 @@ code without reparsing Go:
 
 - `// nexler:routes` in `routes/public/public.go` / `routes/protected/protected.go` — where new
   route imports/`Register(mux)` calls get inserted (`wireAggregator` in `route.go`).
-- `// nexler:handlers` and `// nexler:register` in each route's `handlers/.../<pkg>.go` — where
-  new per-method handler functions and `mux.HandleFunc`/`openapi.Register` calls get inserted
-  when re-running `nexler create <route>` with additional `-methods` on an already-scaffolded
-  route.
-- `// nexler:models` in each route's `models/.../<pkg>.go` — where new Request/Response struct
-  pairs get inserted for the same case.
+- `// nexler:handlers` in a route's `handlers/.../<file>.go` — where new per-method handler
+  functions get inserted when re-running `nexler create <route>` with additional `-methods` on an
+  already-scaffolded route. A package's handler code can span more than one file (see below), so
+  this marker can appear in more than one file per package.
+- `// nexler:register` in a route's `handlers/.../<file>.go` — where new `mux.HandleFunc`/
+  `openapi.Register` calls get inserted. Since Go permits only one `func Register` per package,
+  exactly one file per package ever contains this marker — that file is the package's **primary**
+  file, and every method's registration wiring lives there regardless of which file its handler
+  function itself is defined in.
+- `// nexler:models` in a route's `models/.../<file>.go` — where new Request/Response struct
+  pairs get inserted for the same case; also potentially more than one file per package.
 
-If a route's handler package already exists, `NewRoute` dispatches to
-`addMethodsToExistingRoute` instead of erroring: it adds only the newly-requested HTTP methods
-(skipping any already registered, detected by an exact `"<VERB> <route>"` string marker inside the
-handler file) and leaves `services/`/`store/` untouched, since those are generic per-route, not
-per-method. Which aggregator file a package's `Register(mux)` call lives in
-(`routes/public/public.go` vs `routes/protected/protected.go`) is decided once, at the package's
-first creation, and never changes afterward — `addMethodsToExistingRoute` skips aggregator wiring
-entirely, since the package is already imported and registered there. `-protected` on a later
-`nexler create` for an already-existing route only governs the newly-added method(s): each one
-independently wraps itself in `middleware.RequireAuth` (or not) via its own `RegisterExpr`,
-regardless of what the rest of the package's methods already do — so one package can end up with
-a mix of protected and public methods. `detectExistingProtection` no longer rejects this; it only
-powers an informational `RouteResult.Note` (printed by the CLI, not an error) when this
-invocation's `-protected` differs from the package's original aggregator classification.
+If a route's handler package already exists (a file containing `// nexler:register` is found
+under `handlers/<relDir>`), `NewRoute` dispatches to `addToExistingRoute` instead of erroring:
+it adds only the newly-requested HTTP methods (skipping any already registered, detected by an
+exact `"<VERB> <route>"` string marker inside the **primary** file specifically — checking any
+other file here would risk letting a duplicate route/verb slip past and panic `mux.HandleFunc` on
+a duplicate pattern at runtime) and leaves `services/`/`store/` untouched, since those are generic
+per-route, not per-method.
+
+**`-file` can now create a genuine second file.** `fileName` (from `-file`, defaulting to the
+package name) names the specific handler/model file this invocation targets. If
+`handlers/<relDir>/<fileName>.go` already exists (and carries `// nexler:handlers`), the new
+method(s) are appended to it, exactly as before this existed. If it doesn't exist yet,
+`addToExistingRoute` renders a brand-new handler+model file pair for just the new method(s) —
+the handler file via a dedicated `route_templates/handler_file.tmpl` (package decl + trimmed
+imports — no `middleware`/`openapi`, since those are only needed by `Register` — + the method
+bodies + a trailing `// nexler:handlers` marker, so a later invocation reusing the same `-file`
+value can extend it too) rather than `handler.go.tmpl`, since a second file must never define its
+own `Register`. Either way, the new method(s)' `mux.HandleFunc`/`openapi.Register` wiring is
+always inserted into the **primary** file via `// nexler:register`, never into a secondary file.
+`detectIdentifierCollisions` (below) and the file-pair-consistency check both run before any file
+is written, so a `-file` value that would collide with another file already in the package (same
+verb, no `-name` override) errors out instead of silently duplicating.
+
+Which aggregator file a package's `Register(mux)` call lives in (`routes/public/public.go` vs
+`routes/protected/protected.go`) is decided once, at the package's first creation, and never
+changes afterward — `addToExistingRoute` skips aggregator wiring entirely, since the package is
+already imported and registered there. `-protected` on a later `nexler create` for an
+already-existing route only governs the newly-added method(s): each one independently wraps
+itself in `middleware.RequireAuth` (or not) via its own `RegisterExpr`, regardless of what the
+rest of the package's methods already do — so one package can end up with a mix of protected and
+public methods, and of methods spread across more than one file. `detectExistingProtection` no
+longer rejects this; it only powers an informational `RouteResult.Note` (printed by the CLI, not
+an error) when this invocation's `-protected` differs from the package's original aggregator
+classification.
 
 If any marker is missing (e.g. a route scaffolded before this feature existed, or a hand-edited
 file), the corresponding insert fails with an error naming the exact marker text to add back by
@@ -1279,28 +1319,40 @@ names, and OperationID — is built purely from `-module`/`-submodule` + the HTT
 (`routeMethod.HandlerName`/`ReqTypeName`/`RespTypeName`/`OperationID`, all computed once in
 `NewRoute`'s per-verb loop and referenced directly by the `.tmpl` files as the single source of
 truth, rather than each template re-deriving `VerbTitle`+`Name` on its own). The URL route itself
-never feeds into any identifier — only into the `"<VERB> <route>"` marker `addMethodsToExistingRoute`
+never feeds into any identifier — only into the `"<VERB> <route>"` marker `addToExistingRoute`
 already uses to detect "this exact method is already registered" (see above). That means a second
 `nexler create <route>` invocation targeting a **different** route but the same
 `-module`/`-submodule`/verb as an already-scaffolded one would, without a check, sail past the
 already-registered marker (it's a different route string) and generate identifiers identical to the
-first route's — `insertFragment` would then append a second `func HandleXGet(...)`/`type
-GetXRequest struct` into the same file: Go-illegal at best (duplicate declaration), a silent
-`/openapi.json`-breaking duplicate `OperationID` at worst.
+first route's — `insertFragment` (or a brand-new secondary file) would then produce a second
+`func HandleXGet(...)`/`type GetXRequest struct` in the same package: Go-illegal at best (duplicate
+declaration), a silent `/openapi.json`-breaking duplicate `OperationID` at worst.
 
-`addMethodsToExistingRoute` guards against this with `detectIdentifierCollisions`, run against the
-already-loaded handler/model file contents *before* any insertion happens (matching the same
-"error instead of silently guessing/corrupting" precedent as the missing-marker errors above): for
-every method about to be added, it checks whether that method's `HandlerName`/`ReqTypeName`/
-`RespTypeName`/`OperationID` already appears in the file, and if so, aborts the whole call with an
-error naming every colliding identifier — no partial writes. The fix is `-name` (`RouteConfig.IdentName`),
-a new per-route flag that overrides just the identifier base (not the file/package location, which
-stays `-module`/`-submodule`-derived, same as `-file` already does for the on-disk file name) — e.g.
-adding `/purchase/new` to a package that already has `/purchase/verify` (both POST) needs
-`-name New` so the new route gets `HandleNewPost`/`PostNewRequest`/OperationID `"postNew"` instead
-of colliding with the existing `HandlePurchasePost`. Not interactively prompted (same as `-file`
-isn't proactively surfaced beyond its own optional prompt) — the collision error itself is what
-tells a developer to pass it, since the flag is only ever needed in this one situation.
+`addToExistingRoute` guards against this with `detectIdentifierCollisions`, run *before* any file
+is written or inserted into (matching the same "error instead of silently guessing/corrupting"
+precedent as the missing-marker errors above): for every method about to be added, it checks
+whether that method's `HandlerName`/`ReqTypeName`/`RespTypeName`/`OperationID` already appears
+anywhere in the package — the concatenated content of **every** `.go` file under
+`handlers/<relDir>` and `models/<relDir>` (`concatGoFiles`), not just the one file this invocation
+happens to be reading or writing, since a package can now span more than one file — and if so,
+aborts the whole call with an error naming every colliding identifier — no partial writes. The fix
+is `-name` (`RouteConfig.IdentName`), a per-route flag that overrides just the identifier base (not
+the file/package location, which stays `-module`/`-submodule`-derived, same as `-file` already
+does for the on-disk file name) — e.g. adding `/purchase/new` to a package that already has
+`/purchase/verify` (both POST) needs `-name New` so the new route gets
+`HandleNewPost`/`PostNewRequest`/OperationID `"postNew"` instead of colliding with the existing
+`HandlePurchasePost`. Not interactively prompted (same as `-file` isn't proactively surfaced
+beyond its own optional prompt) — the collision error itself is what tells a developer to pass it,
+since the flag is only ever needed in this one situation.
+
+`-name` also protects `routeMethod.HTMLContentName` (the `templates/html/<relDir>/<name>.html`
+content file a `-response html` method writes to): it's keyed off the same identifier base
+(`strings.ToLower(name)`, not `pkgName`) rather than the file name, so two routes that would
+otherwise collide on their HTML content file are exactly the two routes `-name` is already
+mandatory for — reusing that one mechanism means the content file can never silently collide in
+any case nexler currently allows to proceed. Whenever `-name` isn't used, this is byte-identical
+to the pre-existing `pkgName`-based name (`sanitizeIdent` already lowercases), so a single-route
+package's content file name is unchanged.
 
 ### Optional service/store layers (`-service`/`-store none`, and adding them later)
 
@@ -1317,7 +1369,7 @@ comments never point at a layer that doesn't exist. The CLI simplifies this to a
 before this feature. Default is `true`/"generate", so nothing changes for anyone who doesn't care.
 
 **Adding a missing layer later** to an already-existing (handler-only) route reuses
-`addMethodsToExistingRoute` — re-running `nexler create <route>` with `-service`/`-store` passed
+`addToExistingRoute` — re-running `nexler create <route>` with `-service`/`-store` passed
 explicitly (even as an empty string, meaning "generate a fresh one now") retrofits the missing
 layer(s), independently of whether any new HTTP method is also being added; its previous hard
 requirement of at least one new method is relaxed to "at least one new method *or* a layer to add".
@@ -1327,7 +1379,7 @@ invocation) rather than on the resolved string value: a blank `-service` means "
 at first creation, but a scripted `nexler create <route> -methods POST` with no `-service`/`-store`
 flags at all must never silently start generating a service/store an existing handler-only route
 never had — only an explicit flag on that specific invocation can trigger the retrofit.
-`addMethodsToExistingRoute` also re-detects `HasService`/`HasStore` from disk (`dirHasGoFile` on
+`addToExistingRoute` also re-detects `HasService`/`HasStore` from disk (`dirHasGoFile` on
 `services/store/<relDir>`, not from this invocation's flag resolution) before rendering anything,
 so a plain follow-up call's inserted methods get accurate TODO wording regardless of what
 `-service`/`-store` happened to resolve to this time — and if a retrofit *does* happen in the same

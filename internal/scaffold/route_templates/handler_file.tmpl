@@ -1,0 +1,54 @@
+package {{ .PkgName }}
+
+import (
+	"net/http"
+
+	{{ .Alias }}models "{{ .ModulePath }}/models/{{ .RelDirSlash }}"
+	"{{ .ModulePath }}/request"
+	"{{ .ModulePath }}/response"
+)
+{{ range .Methods }}
+// {{ .HandlerName }} handles {{ .Verb }} {{ $.Route }}.
+func {{ .HandlerName }}(w http.ResponseWriter, r *http.Request) {
+	var req {{ $.Alias }}models.{{ .ReqTypeName }}
+	if err := {{ .DecodeCall }}; err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+{{- if $.HasPathParams }}
+	if err := request.DecodePath(r, &req, {{ $.PathParamArgs }}); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+{{- end }}
+
+{{- if $.HasServiceRef }}
+	// TODO: call the {{ $.ServicePkgName }} service package (see
+	// {{ $.ServiceImportPath }}) with req, and build a real
+	// {{ $.Alias }}models.{{ .RespTypeName }}.
+{{- else if $.HasService }}
+	// TODO: call {{ $.PkgName }}'s service with req, and build a real
+	// {{ $.Alias }}models.{{ .RespTypeName }}.
+{{- else }}
+	// TODO: implement {{ $.PkgName }}'s request handling directly here —
+	// no service package was generated for this route (re-run
+	// `nexler create {{ $.Route }} -module ... -service <name>` to add
+	// one later, or write services/{{ $.RelDirSlash }} by hand) — and
+	// build a real {{ $.Alias }}models.{{ .RespTypeName }}.
+{{- end }}
+	resp := {{ $.Alias }}models.{{ .RespTypeName }}{}
+
+{{- if $.HTMLResponse }}
+	response.HTML(w, r, "{{ $.RelDirSlash }}", "{{ .HTMLContentName }}", "{{ $.Name }}", resp)
+{{- else if $.RawResponse }}
+	response.JSONRaw(w, http.StatusOK, resp)
+{{- else }}
+	response.JSON(w, http.StatusOK, resp)
+{{- end }}
+}
+{{ end }}
+// nexler:handlers (do not remove this marker) — `nexler create <route>`
+// adds new methods' handler functions above this line when adding to this
+// file specifically (re-run with the same -file value). This file has no
+// Register func of its own — its method(s) are wired from this package's
+// primary file's own Register, at its own // nexler:register marker.

@@ -3,18 +3,21 @@
 // response — including UserRole/UserType — so callers can write their own
 // conditions on top of it (e.g. restricting which data a given role/level
 // can fetch), not just a plain yes/no; Allowed is the separate, simple
-// helper for the common "is this a plain ALLOW" case. Fill in KPASS_URL,
-// KPASS_CLIENT_ID, and KPASS_API_SECRET in .env before use (added by
-// `nexler init kpass`).
+// helper for the common "is this a plain ALLOW" case. Authorise calls GET
+// {KPASS_URL}/api/v1/authorise to resolve a one-time login/auth code (from
+// whatever flow the frontend used) into the calling user's identity. Fill
+// in KPASS_URL, KPASS_CLIENT_ID, and KPASS_API_SECRET in .env before use
+// (added by `nexler init kpass`).
 package kpass
 
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 {{- if or .HasJWT .HasSession }}
-	"net/http"
 
 	"{{ .ModulePath }}/auth"
 {{- end }}
@@ -87,6 +90,54 @@ func Check(ctx context.Context, userID, resource string, extra map[string]any) (
 // being forced through a bool.
 func Allowed(result *Result) bool {
 	return result != nil && result.Access == AccessAllow
+}
+
+// AuthoriseResult is kpass's GET /api/v1/authorise response — the identity
+// of the user a one-time authorization code was issued for, by whatever
+// login/auth flow the frontend used (kpass's own, or something else).
+type AuthoriseResult struct {
+	UserId   string `json:"userId"`
+	UserType string `json:"userType"`
+	UserName string `json:"userName"`
+	UserRole string `json:"userRole"`
+	OrgId    string `json:"orgId"`
+}
+
+// Authorise calls kpass's GET {KPASS_URL}/api/v1/authorise to resolve code
+// (a one-time authorization code issued by whatever login/auth flow the
+// frontend used) into the calling user's identity. KPASS_CLIENT_ID is
+// always sent; KPASS_API_SECRET is sent only if set, since kpass treats it
+// as optional for this endpoint.
+func Authorise(ctx context.Context, code string) (*AuthoriseResult, error) {
+	base := os.Getenv("KPASS_URL")
+	if base == "" {
+		return nil, fmt.Errorf("kpass: KPASS_URL is not set")
+	}
+
+	q := url.Values{}
+	q.Set("code", code)
+	q.Set("client_id", os.Getenv("KPASS_CLIENT_ID"))
+	if secret := os.Getenv("KPASS_API_SECRET"); secret != "" {
+		q.Set("api_secret", secret)
+	}
+	endpoint := strings.TrimRight(base, "/") + "/api/v1/authorise?" + q.Encode()
+
+	resp, err := apiclient.Get(ctx, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("kpass: calling api/v1/authorise: %w", err)
+	}
+	// This endpoint's response has no in-body error signal (unlike Check's
+	// Status field) — an invalid/expired code must be caught via HTTP
+	// status here, or a non-2xx body would silently decode into a
+	// zero-valued AuthoriseResult instead of erroring.
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("kpass: api/v1/authorise returned %d: %s", resp.StatusCode, string(resp.Body))
+	}
+	var result AuthoriseResult
+	if err := resp.JSON(&result); err != nil {
+		return nil, fmt.Errorf("kpass: decoding response: %w", err)
+	}
+	return &result, nil
 }
 {{- if or .HasJWT .HasSession }}
 
