@@ -75,9 +75,23 @@ type RouteConfig struct {
 	// Sanitized the same way as Module/Submodule. Only affects the file
 	// name on disk — the Go package name, exported handler functions, the
 	// models import alias, and the OpenAPI operationId all keep deriving
-	// from Module/Submodule as before. Defaults to the route's own package
-	// name (the last of Module/Submodule) when empty.
+	// from Module/Submodule (or IdentName below, when set) as before.
+	// Defaults to the route's own package name (the last of
+	// Module/Submodule) when empty.
 	FileName string
+	// IdentName optionally overrides the identifier base normally derived
+	// from Module/Submodule — used to build every handler function name,
+	// Request/Response type name, and OperationID for this route (e.g.
+	// "New" here means HandleNewPost/PostNewRequest/"postnew" instead of
+	// the module-derived HandlePurchasePost/etc.). Sanitized the same way
+	// as Module/Submodule. Unlike FileName, this does NOT affect where the
+	// generated code lives on disk — package, directory, and models import
+	// alias all still derive from Module/Submodule as before. This exists
+	// for adding a second, distinct route to an already-scaffolded package
+	// (see addMethodsToExistingRoute) whose Module/Submodule-derived
+	// identifiers would otherwise collide with the first route's; leave
+	// empty (the default) for the common case of one route per package.
+	IdentName string
 	// ServiceRef, when non-empty, points this route at an already-scaffolded
 	// service package instead of generating a new one — a "module[/submodule]"
 	// reference addressed the same way Module/Submodule are, e.g. "purchase"
@@ -139,6 +153,9 @@ type RouteConfig struct {
 type routeMethod struct {
 	Verb            string // "GET", "POST", ...
 	VerbTitle       string // "Get", "Post", ... — used in identifiers
+	HandlerName     string // e.g. "HandleXGet" — the bare handler function name, before any middleware.RequireAuth wrapping. Single source of truth for this identifier: templates reference it directly instead of re-deriving "Handle"+Name+VerbTitle themselves, and addMethodsToExistingRoute's collision check matches against it exactly.
+	ReqTypeName     string // e.g. "GetXRequest" — same single-source-of-truth reasoning as HandlerName, for the Request struct type
+	RespTypeName    string // e.g. "GetXResponse" — same, for the Response struct type
 	RegisterExpr    string // e.g. "HandleXGet" or "middleware.RequireAuth(HandleXGet)"
 	Protected       bool   // whether this specific method wraps itself with middleware.RequireAuth — same value RegisterExpr was built from
 	BodyDescription string // human-readable, used in model doc comments
@@ -228,6 +245,14 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		}
 	}
 
+	if cfg.IdentName != "" {
+		identName := sanitizeIdent(cfg.IdentName)
+		if identName == "" {
+			return RouteResult{}, fmt.Errorf("-name must contain at least one letter or digit")
+		}
+		name = exportedName(identName)
+	}
+
 	serviceImportPath, servicePkgName, hasServiceRef, skipService, err := resolveLayerRef(appDir, modulePath, "service", "services", cfg.ServiceRef)
 	if err != nil {
 		return RouteResult{}, err
@@ -297,6 +322,9 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		methods = append(methods, routeMethod{
 			Verb:            v,
 			VerbTitle:       vt,
+			HandlerName:     handlerName,
+			ReqTypeName:     vt + name + "Request",
+			RespTypeName:    vt + name + "Response",
 			RegisterExpr:    registerExpr,
 			Protected:       protected,
 			BodyDescription: bodyDescription(v, bodyKind),
@@ -590,6 +618,12 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 	}
 	handlerContent := strings.ReplaceAll(string(handlerRaw), "\r\n", "\n")
 
+	modelRaw, err := os.ReadFile(modelPath)
+	if err != nil {
+		return RouteResult{}, fmt.Errorf("reading %s: %w", modelPath, err)
+	}
+	modelContent := strings.ReplaceAll(string(modelRaw), "\r\n", "\n")
+
 	var newMethods []routeMethod
 	var skipped []string
 	for _, m := range data.Methods {
@@ -602,6 +636,9 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 	}
 	if len(newMethods) == 0 && !addService && !addStore {
 		return RouteResult{}, fmt.Errorf("method(s) %s already registered for this route", strings.Join(skipped, ", "))
+	}
+	if err := detectIdentifierCollisions(handlerContent, modelContent, newMethods, data.Route); err != nil {
+		return RouteResult{}, err
 	}
 	data.Methods = newMethods
 
@@ -636,11 +673,6 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 			return RouteResult{}, fmt.Errorf("writing %s: %w", handlerPath, err)
 		}
 
-		modelRaw, err := os.ReadFile(modelPath)
-		if err != nil {
-			return RouteResult{}, fmt.Errorf("reading %s: %w", modelPath, err)
-		}
-		modelContent := strings.ReplaceAll(string(modelRaw), "\r\n", "\n")
 		modelContent, err = insertFragment(modelContent, routeModelMethodsFragment, data,
 			modelMarker,
 			fmt.Sprintf("could not find the model-insertion marker in %s — it may predate this feature. Add a line `// nexler:models (do not remove this marker)` at the end of the file, or add the new structs manually.", modelPath))
@@ -680,6 +712,46 @@ func addMethodsToExistingRoute(appDir, modulePath, relDir, fileName string, data
 	}
 
 	return RouteResult{Created: false, Added: added, Skipped: skipped, LayersAdded: layersAdded, Note: note}, nil
+}
+
+// detectIdentifierCollisions checks whether any of methods' generated
+// identifiers (handler function, Request/Response types, OperationID)
+// already exist in handlerContent/modelContent — nexler builds every one of
+// these purely from -module/-submodule/-name and the HTTP verb, never from
+// the URL path (see routeMethod.HandlerName/ReqTypeName/RespTypeName/
+// OperationID, all built once in NewRoute's per-verb loop), so a second
+// `nexler create` invocation targeting a *different* route but the same
+// -module/-submodule/verb collides by construction: the per-method
+// already-registered check above only looks for this exact route's own
+// "<VERB> <route>" marker, so a different route sails past it and would
+// otherwise have its handler/type/OperationID silently appended
+// (Go-legal-but-duplicate at best, a silent /openapi.json corruption at
+// worst) right alongside the first route's. Must run before any file is
+// written — Go forbids duplicate top-level declarations, and there's no
+// clean way to "undo" a partial insertion. route is only used to phrase the
+// error; the identifiers themselves are matched via the exact literal text
+// the templates emit, so this only fires on a real collision, never a
+// same-route re-run (already filtered out by the caller before this runs).
+func detectIdentifierCollisions(handlerContent, modelContent string, methods []routeMethod, route string) error {
+	var collisions []string
+	for _, m := range methods {
+		if strings.Contains(handlerContent, "func "+m.HandlerName+"(") {
+			collisions = append(collisions, fmt.Sprintf("handler function %s", m.HandlerName))
+		}
+		if strings.Contains(modelContent, "type "+m.ReqTypeName+" struct") {
+			collisions = append(collisions, fmt.Sprintf("request type %s", m.ReqTypeName))
+		}
+		if strings.Contains(modelContent, "type "+m.RespTypeName+" struct") {
+			collisions = append(collisions, fmt.Sprintf("response type %s", m.RespTypeName))
+		}
+		if strings.Contains(handlerContent, fmt.Sprintf("OperationID: %q,", m.OperationID)) {
+			collisions = append(collisions, fmt.Sprintf("OperationID %q", m.OperationID))
+		}
+	}
+	if len(collisions) == 0 {
+		return nil
+	}
+	return fmt.Errorf("route %q would generate identifier(s) that already exist in this package for what nexler can only assume is a different route: %s — nexler derives handler/type/OperationID names purely from -module/-submodule/-name and the HTTP verb, never the URL path, so two distinct routes sharing those collide; re-run with a distinct -name to disambiguate this route's identifiers, or place it under its own -submodule", route, strings.Join(collisions, ", "))
 }
 
 // skipLayerRef reports whether ref is the "none" sentinel — resolveLayerRef's
@@ -1178,6 +1250,173 @@ func ensureMongoDatabaseName(appDir string) (bool, error) {
 			return changed, fmt.Errorf("rendering %s: %w", tmplPath, err)
 		}
 		if err := os.WriteFile(path, rendered, 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	return changed, nil
+}
+
+// swaggerConfigFieldAnchor/swaggerConfigLoadAnchor are fixed,
+// template-variable-free substrings of every generated config/config.go —
+// identical regardless of EnvPrefix/AuthKind — that ensureSwaggerToggle
+// anchors its Config-struct-field and load()-line insertions on.
+// swaggerGetEnvOrBody is getEnvOr's complete, equally fixed body, used
+// both to detect it (so it's only ever added once) and as the insertion
+// point for getEnvBoolOr right after it.
+const (
+	swaggerConfigFieldAnchor = "\tPort string "
+	swaggerConfigLoadAnchor  = "\t\tPort: getEnvOr("
+	swaggerGetEnvOrBody      = "func getEnvOr(key, fallback string) string {\n\tif v := os.Getenv(key); v != \"\" {\n\t\treturn v\n\t}\n\treturn fallback\n}"
+	swaggerGetEnvBoolOrCode  = "\n\nfunc getEnvBoolOr(key string, fallback bool) bool {\n\tswitch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {\n\tcase \"true\", \"1\":\n\t\treturn true\n\tcase \"false\", \"0\":\n\t\treturn false\n\tdefault:\n\t\treturn fallback\n\t}\n}"
+	// swaggerHomeMuxLineOriginal/Patched: home.go's Register wires
+	// GET /swagger directly to templates.ServePage("swagger.html")
+	// originally — retrofitted to the new named HandleSwagger handler
+	// instead, which is what actually enforces the toggle (see below).
+	swaggerHomeMuxLineOriginal = `mux.HandleFunc("GET /swagger", templates.ServePage("swagger.html"))`
+	swaggerHomeMuxLinePatched  = `mux.HandleFunc("GET /swagger", HandleSwagger)`
+	// swaggerHandleOpenAPISig anchors on HandleOpenAPI's fixed function
+	// signature line (its body isn't fixed — it embeds the app's own name
+	// via openapi.Spec("<AppName>")) — the guard clause is inserted right
+	// after the opening brace, so it never needs to match the body.
+	swaggerHandleOpenAPISig  = "func HandleOpenAPI(w http.ResponseWriter, r *http.Request) {\n"
+	swaggerHandleOpenAPIGuard = "\tif !config.C.SwaggerEnabled {\n\t\thttp.NotFound(w, r)\n\t\treturn\n\t}\n"
+	// swaggerHandleSwaggerCode is the new handler ensureSwaggerToggle
+	// inserts right before HandleOpenAPI — GET /swagger's toggle check
+	// has to live in a real handler function too, not just at
+	// registration time, for the same "GET /" subtree-pattern reason
+	// documented on HandleOpenAPI's own doc comment in home.go.tmpl.
+	swaggerHandleSwaggerCode = "// HandleSwagger serves the bundled Swagger UI page, gated on\n// config.C.SwaggerEnabled the same way and for the same reason as\n// HandleOpenAPI above.\nfunc HandleSwagger(w http.ResponseWriter, r *http.Request) {\n\tif !config.C.SwaggerEnabled {\n\t\thttp.NotFound(w, r)\n\t\treturn\n\t}\n\ttemplates.ServePage(\"swagger.html\")(w, r)\n}\n\n"
+)
+
+// ensureSwaggerToggle brings an app scaffolded before Config gained
+// SwaggerEnabled up to date: adds the field + getEnvBoolOr helper +
+// load() wiring to config/config.go, wraps handlers/home/home.go's
+// /swagger and /openapi.json registrations in
+// "if config.C.SwaggerEnabled { ... }" (adding the config import if
+// missing), and appends {PREFIX}_SWAGGER_ENABLED=true to .env — but only
+// when that key isn't already present, same as ensureEnvVars: a
+// production deployment may have deliberately set it to false, and this
+// must never silently reset that back to true.
+//
+// Every anchor is a fixed, template-variable-free substring (identical
+// across every app regardless of EnvPrefix/AuthKind/-ui), so one literal
+// match works everywhere — same fail-loud-on-mismatch precedent as every
+// other ensure* retrofit: a hand-rewritten config.go/home.go errors out
+// naming the exact snippet to add by hand, instead of being silently
+// corrupted.
+func ensureSwaggerToggle(appDir string) (bool, error) {
+	changed := false
+
+	prefix, err := recoverEnvPrefix(appDir)
+	if err != nil {
+		return changed, err
+	}
+
+	configPath := filepath.Join(appDir, "config", "config.go")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", configPath, err)
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if !strings.Contains(content, "SwaggerEnabled") {
+		fieldIdx := strings.Index(content, swaggerConfigFieldAnchor)
+		loadIdx := strings.Index(content, swaggerConfigLoadAnchor)
+		if fieldIdx == -1 || loadIdx == -1 {
+			return changed, fmt.Errorf("%s doesn't look like a generated config.go (missing the expected Port field/load() lines) — has it been hand-rewritten? Add manually: a `SwaggerEnabled bool` field to Config, and `SwaggerEnabled: getEnvBoolOr(%q, true),` to load()'s returned Config literal", configPath, prefix+"_SWAGGER_ENABLED")
+		}
+
+		fieldInsertAt := fieldIdx + strings.Index(content[fieldIdx:], "\n") + 1
+		fieldLine := "\tSwaggerEnabled bool // " + prefix + "_SWAGGER_ENABLED — enables /swagger and /openapi.json; default true, set to false in production\n"
+		content = content[:fieldInsertAt] + fieldLine + content[fieldInsertAt:]
+
+		// Re-find loadIdx: the field insertion above may have shifted it.
+		loadIdx = strings.Index(content, swaggerConfigLoadAnchor)
+		loadInsertAt := loadIdx + strings.Index(content[loadIdx:], "\n") + 1
+		loadLine := "\t\tSwaggerEnabled: getEnvBoolOr(\"" + prefix + "_SWAGGER_ENABLED\", true),\n"
+		content = content[:loadInsertAt] + loadLine + content[loadInsertAt:]
+
+		if !strings.Contains(content, "func getEnvBoolOr") {
+			bodyIdx := strings.Index(content, swaggerGetEnvOrBody)
+			if bodyIdx == -1 {
+				return changed, fmt.Errorf("%s: getEnvOr doesn't match its known original body (has it been hand-rewritten?) — add getEnvBoolOr manually:%s", configPath, swaggerGetEnvBoolOrCode)
+			}
+			insertAt := bodyIdx + len(swaggerGetEnvOrBody)
+			content = content[:insertAt] + swaggerGetEnvBoolOrCode + content[insertAt:]
+		}
+
+		if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	homePath := filepath.Join(appDir, "handlers", "home", "home.go")
+	homeRaw, err := os.ReadFile(homePath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", homePath, err)
+	}
+	homeContent := strings.ReplaceAll(string(homeRaw), "\r\n", "\n")
+	if !strings.Contains(homeContent, "config.C.SwaggerEnabled") {
+		sigIdx := strings.Index(homeContent, swaggerHandleOpenAPISig)
+		if sigIdx == -1 || !strings.Contains(homeContent, swaggerHomeMuxLineOriginal) {
+			return changed, fmt.Errorf("%s doesn't look like a generated home.go (missing the expected HandleOpenAPI signature or GET /swagger registration) — has it been hand-rewritten? Add manually: a config.C.SwaggerEnabled check (http.NotFound on false) at the top of HandleOpenAPI, a new HandleSwagger handler doing the same before serving swagger.html, and wire Register's GET /swagger to HandleSwagger instead of templates.ServePage(\"swagger.html\") directly", homePath)
+		}
+
+		// Insert the guard clause right after HandleOpenAPI's opening
+		// brace — must happen before the HandleSwagger insertion below,
+		// which is anchored on this same signature line and would
+		// otherwise shift sigIdx.
+		guardAt := sigIdx + len(swaggerHandleOpenAPISig)
+		homeContent = homeContent[:guardAt] + swaggerHandleOpenAPIGuard + homeContent[guardAt:]
+
+		// Insert the new HandleSwagger function immediately before
+		// HandleOpenAPI's doc comment/signature (re-found: the guard
+		// insertion above shifted it).
+		sigIdx = strings.Index(homeContent, swaggerHandleOpenAPISig)
+		docStart := strings.LastIndex(homeContent[:sigIdx], "// HandleOpenAPI")
+		insertAt := sigIdx
+		if docStart != -1 {
+			insertAt = docStart
+		}
+		homeContent = homeContent[:insertAt] + swaggerHandleSwaggerCode + homeContent[insertAt:]
+
+		homeContent = strings.Replace(homeContent, swaggerHomeMuxLineOriginal, swaggerHomeMuxLinePatched, 1)
+
+		modulePath, err := readModulePath(appDir)
+		if err != nil {
+			return changed, err
+		}
+		configImport := modulePath + "/config"
+		if !strings.Contains(homeContent, "\""+configImport+"\"") {
+			homeContent, err = insertImport(homeContent, "", configImport)
+			if err != nil {
+				return changed, fmt.Errorf("%s: adding %q import: %w", homePath, configImport, err)
+			}
+		}
+
+		if err := os.WriteFile(homePath, []byte(homeContent), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	envPath := filepath.Join(appDir, ".env")
+	envRaw, err := os.ReadFile(envPath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", envPath, err)
+	}
+	envContent := strings.ReplaceAll(string(envRaw), "\r\n", "\n")
+	envKey := prefix + "_SWAGGER_ENABLED"
+	if !envHasKey(envContent, envKey) {
+		var b strings.Builder
+		b.WriteString(envContent)
+		if len(envContent) > 0 && !strings.HasSuffix(envContent, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(envKey + "=true\n")
+		if err := os.WriteFile(envPath, []byte(b.String()), 0o644); err != nil {
 			return changed, err
 		}
 		changed = true

@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>Nexler — CLI guide &amp; documentation</title>
+<meta name="description" content="User guide for the Nexler scaffolding CLI: installation, every command and flag, generated app architecture, and a running changelog.">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/theme.css">
+</head>
+<body>
+
+<header id="site-header">
+  <div class="container header-row">
+    <a href="#overview" class="logo">
+      <img src="assets/logo.png" alt="Klivolks" class="logo-icon">
+      KLIVOLKS<span class="trademark">&reg;</span>
+      <span class="logo-product">/ Nexler</span>
+    </a>
+    <div class="header-actions">
+      <a href="https://github.com/klivolks/nexler" target="_blank" rel="noopener" class="btn-kl btn-kl-ghost d-none d-sm-inline-flex">GitHub</a>
+      <a href="#quick-start" class="btn-kl btn-kl-primary">Quick start</a>
+      <button class="hamburger" id="toc-toggle" aria-label="Open contents" aria-expanded="false" aria-controls="docs-sidebar">
+        <span class="hamburger-bars"><span></span><span></span><span></span></span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<section class="hero" id="overview">
+  <div class="container">
+    <div class="row align-items-center g-5">
+      <div class="col-lg-6">
+        <span class="eyebrow">Developer tools · Open source</span>
+        <h1>Scaffold Go apps the Nexler way.</h1>
+        <p>Nexler is Klivolks' own scaffolding CLI for the Nexler Go web framework — think <code>django-admin startproject</code> or <code>rails new</code>. It generates the handlers/services/store/models layout every app built on Nexler follows, wires new routes into an existing app, and vendors front-end static assets from npm. It's the same tool Klivolks builds its own products with, free for any developer to use.</p>
+        <div class="hero-meta">
+          <span class="pill">Single static binary</span>
+          <span class="pill">Zero network access to scaffold</span>
+          <span class="pill">MIT licensed</span>
+          <span class="pill">Go 1.26+</span>
+        </div>
+      </div>
+
+      <div class="col-lg-6">
+        <svg class="hero-art" viewBox="0 0 480 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Illustration of a Go handler being written in a code editor, connected to the resulting app running in a browser window">
+          <!-- card 1: code editor -->
+          <path d="M40,60 L272,60 Q300,60 300,88 L300,240 L68,240 Q40,240 40,212 L40,60 Z" style="fill:var(--surface);stroke:var(--line);stroke-width:1"/>
+          <circle cx="60" cy="80" r="4" style="fill:var(--line)"/>
+          <circle cx="74" cy="80" r="4" style="fill:var(--line)"/>
+          <circle cx="88" cy="80" r="4" style="fill:var(--brand)"/>
+          <rect x="56" y="96" width="228" height="1" style="fill:var(--line)"/>
+          <rect x="76" y="108" width="1" height="118" style="fill:var(--line)"/>
+          <g style="font-family:'JetBrains Mono',monospace;font-size:11px">
+            <text x="66" y="122" style="fill:var(--muted);font-size:9px">1</text>
+            <text x="84" y="122"><tspan style="fill:var(--brand-dark)">func</tspan><tspan style="fill:var(--ink)"> Handle(w, r) {</tspan></text>
+            <text x="66" y="140" style="fill:var(--muted);font-size:9px">2</text>
+            <text x="96" y="140"><tspan style="fill:var(--ink)">req := </tspan><tspan style="fill:var(--brand-dark)">decode</tspan><tspan style="fill:var(--ink)">(r)</tspan></text>
+            <text x="66" y="158" style="fill:var(--muted);font-size:9px">3</text>
+            <text x="96" y="158"><tspan style="fill:var(--muted)">// TODO: service</tspan></text>
+            <text x="66" y="176" style="fill:var(--muted);font-size:9px">4</text>
+            <text x="96" y="176"><tspan style="fill:var(--ink)">response.</tspan><tspan style="fill:var(--brand-dark)">JSON</tspan><tspan style="fill:var(--ink)">(w, req)</tspan></text>
+            <text x="66" y="194" style="fill:var(--muted);font-size:9px">5</text>
+            <text x="84" y="194" style="fill:var(--ink)">}</text>
+          </g>
+          <rect x="84" y="204" width="72" height="8" rx="4" style="fill:var(--muted)" opacity="0.15"/>
+
+          <!-- connector -->
+          <line x1="252" y1="150" x2="252" y2="178" style="stroke:var(--brand);stroke-width:2;stroke-dasharray:3 4"/>
+          <circle cx="252" cy="150" r="5" style="fill:var(--brand)"/>
+
+          <!-- card 2: the app, running -->
+          <path d="M180,180 L378,180 Q400,180 400,202 L400,350 L202,350 Q180,350 180,328 L180,180 Z" style="fill:var(--navy)"/>
+          <circle cx="200" cy="200" r="3" style="fill:rgba(255,255,255,0.35)"/>
+          <circle cx="211" cy="200" r="3" style="fill:rgba(255,255,255,0.35)"/>
+          <circle cx="222" cy="200" r="3" style="fill:rgba(255,255,255,0.35)"/>
+          <rect x="196" y="212" width="188" height="20" rx="6" style="fill:rgba(255,255,255,0.08);stroke:rgba(255,255,255,0.15);stroke-width:1"/>
+          <text x="206" y="226" style="fill:rgba(255,255,255,0.55);font-family:'JetBrains Mono',monospace;font-size:10px">localhost:8080</text>
+          <rect x="196" y="246" width="52" height="9" rx="4" style="fill:var(--brand)"/>
+          <rect x="254" y="246" width="52" height="9" rx="4" style="fill:rgba(255,255,255,0.18)"/>
+          <rect x="312" y="246" width="52" height="9" rx="4" style="fill:rgba(255,255,255,0.18)"/>
+          <rect x="196" y="270" width="188" height="1" style="fill:rgba(255,255,255,0.15)"/>
+          <rect x="196" y="288" width="188" height="34" rx="6" style="fill:rgba(255,255,255,0.06)"/>
+          <rect x="208" y="298" width="90" height="8" rx="4" style="fill:rgba(255,255,255,0.5)"/>
+          <rect x="208" y="311" width="60" height="7" rx="3" style="fill:rgba(255,255,255,0.28)"/>
+          <rect x="196" y="326" width="84" height="18" rx="5" style="fill:var(--brand)"/>
+          <text x="212" y="339" style="fill:var(--navy);font-family:'Inter',sans-serif;font-size:10px;font-weight:600">● Running</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="container docs-shell">
+  <aside class="docs-sidebar" id="docs-sidebar">
+    <nav aria-label="Documentation contents">
+      <div class="toc-group">
+        <h5>Get started</h5>
+        <a href="#overview">Overview</a>
+        <a href="#installation">Installation</a>
+        <a href="#quick-start">Quick start</a>
+      </div>
+      <div class="toc-group">
+        <h5>Commands</h5>
+        <a href="#cmd-create-app">create app</a>
+        <a href="#cmd-create-route">create &lt;route&gt;</a>
+        <a href="#cmd-create-layer">create store / service</a>
+        <a href="#cmd-db-add">db add</a>
+        <a href="#cmd-add">add (vendor npm)</a>
+        <a href="#cmd-init-db">init db</a>
+        <a href="#cmd-init-kpass">init kpass</a>
+        <a href="#cmd-init-kgate">init kgate</a>
+        <a href="#cmd-init-docker">init docker</a>
+        <a href="#cmd-init-ci">init ci</a>
+        <a href="#cmd-init-kube">init kube</a>
+        <a href="#cmd-update">update</a>
+        <a href="#cmd-version">version / help</a>
+      </div>
+      <div class="toc-group">
+        <h5>Generated app</h5>
+        <a href="#arch-layout">App layout</a>
+        <a href="#arch-request-response">Request &amp; response</a>
+        <a href="#arch-route-wiring">Route wiring</a>
+      </div>
+      <div class="toc-group">
+        <h5>Key concepts</h5>
+        <a href="#concept-auth">Authentication</a>
+        <a href="#concept-service-auth">API-key auth</a>
+        <a href="#cmd-admin-api">Admin API</a>
+        <a href="#concept-db">Database connections</a>
+        <a href="#concept-html">HTML responses</a>
+        <a href="#concept-helpers">Query helper packages</a>
+        <a href="#concept-apiclient">apiclient</a>
+        <a href="#concept-config">Config &amp; .env</a>
+      </div>
+      <div class="toc-group">
+        <h5>Project</h5>
+        <a href="#changelog">Changelog</a>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="docs-main">
+
+    <section class="doc-section" id="installation">
+      <h2>Installation</h2>
+      <p class="lead">Nexler ships as a single, self-contained binary — every scaffolding template is embedded inside it. You don't need Go or npm installed to run <code>nexler</code> itself; you only need Go to build the apps it generates, and npm only if you use <code>nexler add</code>.</p>
+
+      <div class="doc-sub">
+        <h3>Windows / macOS installer</h3>
+        <p>The signed installers check for Go and npm and offer to install either if missing. If you install Nexler another way, that check simply doesn't happen — <code>nexler</code> keeps working regardless; you just install Go/npm yourself when a command needs them.</p>
+      </div>
+
+      <div class="doc-sub">
+        <h3>Build from source</h3>
+        <div class="code-block"><pre>git clone https://github.com/klivolks/nexler.git
+<span class="cmt"># from inside the cloned repo</span>
+go build -o nexler.exe ./cmd/nexler</pre></div>
+        <p>Place the resulting binary on your <code>PATH</code>. <code>nexler version</code> confirms it's working.</p>
+      </div>
+
+      <div class="doc-sub">
+        <h3>Verifying a release</h3>
+        <p>Every release asset is signed with <a href="https://github.com/sigstore/cosign" target="_blank" rel="noopener">cosign</a> using a key pair committed to the repo as <code>cosign.pub</code>.</p>
+        <div class="code-block"><pre>cosign verify-blob --bundle checksums.txt.bundle --key cosign.pub checksums.txt
+cosign verify-blob --bundle nexler-setup-1.2.3.exe.bundle --key cosign.pub nexler-setup-1.2.3.exe</pre></div>
+        <p>Verifying <code>checksums.txt</code> and then matching a downloaded archive's own <code>sha256sum</code> against its line in that file covers the raw binaries too, without needing a separate signature per archive.</p>
+      </div>
+    </section>
+
+    <section class="doc-section" id="quick-start">
+      <h2>Quick start</h2>
+      <p class="lead">Every flag shown below can also be left off — Nexler asks for it interactively instead, with Enter accepting the default shown. Pass every flag for scripts/CI; pass none for a guided walkthrough.</p>
+      <div class="code-block"><pre>nexler create app myapp
+cd myapp
+go build ./...
+go run main.go</pre></div>
+      <p>Add a route to an existing app:</p>
+      <div class="code-block"><pre>nexler create /purchase/verify -module purchase -submodule verify -methods GET,POST -body json</pre></div>
+      <p>Vendor a front-end package (Bootstrap, htmx, jQuery, ...) with no CDN dependency at runtime:</p>
+      <div class="code-block"><pre>nexler add bootstrap</pre></div>
+    </section>
+
+    <!-- ============================= COMMANDS ============================= -->
+
+    <section class="doc-section" id="cmd-create-app">
+      <h2>Commands</h2>
+      <p class="lead">Any flag left off a command below is asked for interactively — press Enter to accept the shown default, or pass the flag to skip the question entirely.</p>
+
+      <div class="doc-sub" id="cmd-create-app-detail">
+        <h3><code>nexler create app</code></h3>
+        <div class="cmd-line">nexler create app &lt;name&gt; [flags…]</div>
+        <p>Scaffolds a new app with the standard <code>handlers/services/store/models</code> layout. Scaffolding is always fully self-contained — no network access, no git required, every template ships embedded inside the binary. The one exception: if <code>-db</code> selects a driver, the generated app's first <code>go build</code> needs one <code>go mod tidy</code> (network access, on your machine, not Nexler's) to fetch the driver package.</p>
+
+        <div class="table-wrap">
+          <table class="flag-table">
+            <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td class="flag-name">-dir</td><td class="flag-default">"."</td><td class="flag-desc">Output directory (a subfolder named after the app is created inside it).</td></tr>
+              <tr><td class="flag-name">-module</td><td class="flag-default">app name</td><td class="flag-desc">Go module path for the generated app.</td></tr>
+              <tr><td class="flag-name">-ui</td><td class="flag-default">false</td><td class="flag-desc">Serve the homepage from editable <code>templates/html/home/{home,layout}.html</code> on disk via <code>response.HTML</code>, instead of the built-in embedded homepage.</td></tr>
+              <tr><td class="flag-name">-auth</td><td class="flag-default">none</td><td class="flag-desc">What <code>middleware.RequireAuth</code> enforces: <code>none</code> (unverified stub), <code>jwt</code> (bearer token, stdlib HMAC-SHA256), <code>session</code> (in-memory cookie store), or <code>both</code>.</td></tr>
+              <tr><td class="flag-name">-remember-me</td><td class="flag-default">false</td><td class="flag-desc">Only with <code>-auth session|both</code> — adds a <code>rememberMe</code> option to <code>auth.StartSession</code> swapping the default 24h lifetime for 30 days.</td></tr>
+              <tr><td class="flag-name">-jwt-secret</td><td class="flag-default">""</td><td class="flag-desc">Reuse an existing JWT signing secret instead of generating one — set when multiple apps must validate each other's tokens. Blank generates a fresh, unique secret.</td></tr>
+              <tr><td class="flag-name">-db</td><td class="flag-default">""</td><td class="flag-desc">Comma-separated driver support to generate in <code>db/</code>: <code>mongo</code>, <code>mysql</code>, <code>postgres</code>, <code>mssql</code> (any subset). Only opening/closing connections — no ORM, query builder, or migrations.</td></tr>
+              <tr><td class="flag-name">-core</td><td class="flag-default">auto</td><td class="flag-desc">Which <code>-db</code> type is the app's conventional default ("core") connection. Required only when <code>-db</code> selects more than one type; defaults to <code>mongo</code> if selected, else the first type listed.</td></tr>
+              <tr><td class="flag-name">-db-host</td><td class="flag-default">""</td><td class="flag-desc">Core connection host. Blank leaves <code>.env</code>'s DSN blank for you to fill in by hand; every flag below is only consulted when this is set.</td></tr>
+              <tr><td class="flag-name">-db-port</td><td class="flag-default">conventional port</td><td class="flag-desc">Defaults to 3306/5432/1433/27017 for mysql/postgres/mssql/mongo when <code>-db-host</code> is set.</td></tr>
+              <tr><td class="flag-name">-db-name</td><td class="flag-default">""</td><td class="flag-desc">Core database name.</td></tr>
+              <tr><td class="flag-name">-db-user</td><td class="flag-default">""</td><td class="flag-desc">Core database username (blank = no auth).</td></tr>
+              <tr><td class="flag-name">-db-password</td><td class="flag-default">""</td><td class="flag-desc">Core database password (blank = no auth). Passed/prompted in <strong>plain text</strong> — there's no masked-input prompt in this CLI.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">-ui, -auth, -db, and the DB-detail flags are each independent — an app can mix any combination, e.g. a session-authenticated UI app with a Postgres core connection.</div>
+
+        <div class="code-block"><pre>nexler create app test -ui
+nexler create app test -auth jwt
+nexler create app test -auth both -remember-me
+nexler create app test -db postgres,mongo -core mongo
+nexler create app test -db mongo -db-host localhost -db-name test</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-create-route">
+      <div class="doc-sub">
+        <h3><code>nexler create &lt;route&gt;</code></h3>
+        <div class="cmd-line">nexler create /some/path -module &lt;name&gt; [flags…]</div>
+        <p>Scaffolds a route inside an existing app — a leading <code>/</code> is what tells Nexler this is a route rather than a resource keyword like <code>app</code>/<code>store</code>/<code>service</code>. Generates a handler, service, store, and model file grouped under <code>module[/submodule]</code>. If the route already exists, this instead adds only the newly-requested methods (or missing layers) to it rather than erroring.</p>
+
+        <div class="table-wrap">
+          <table class="flag-table">
+            <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td class="flag-name">-module</td><td class="flag-default">required</td><td class="flag-desc">Top-level group this route belongs to, e.g. <code>purchase</code>.</td></tr>
+              <tr><td class="flag-name">-submodule</td><td class="flag-default">""</td><td class="flag-desc">Nested group, e.g. <code>verify</code>.</td></tr>
+              <tr><td class="flag-name">-file</td><td class="flag-default">package name</td><td class="flag-desc">Base file name for the generated handler/service/store/model files.</td></tr>
+              <tr><td class="flag-name">-name</td><td class="flag-default">package name</td><td class="flag-desc">Overrides the identifier base for handler function names, Request/Response types, and OperationIDs (not the file/package location, which stays <code>-module</code>/<code>-submodule</code>-derived). Needed when adding a second, distinct route to an already-scaffolded package whose identifiers would otherwise collide with the first route's.</td></tr>
+              <tr><td class="flag-name">-service</td><td class="flag-default">""</td><td class="flag-desc">Reuse an existing service package as <code>module[/submodule]</code>; <code>"none"</code> skips generating a service entirely (stop at handler + model).</td></tr>
+              <tr><td class="flag-name">-store</td><td class="flag-default">""</td><td class="flag-desc">Reuse an existing store package the same way; <code>"none"</code> skips it.</td></tr>
+              <tr><td class="flag-name">-dir</td><td class="flag-default">"."</td><td class="flag-desc">Path to the app directory (must contain <code>go.mod</code>).</td></tr>
+              <tr><td class="flag-name">-protected</td><td class="flag-default">false</td><td class="flag-desc">Require auth (wraps in <code>middleware.RequireAuth</code>, registers in <code>routes/protected</code> instead of <code>routes/public</code>). On a later invocation, applies only to the newly-added method(s).</td></tr>
+              <tr><td class="flag-name">-methods</td><td class="flag-default">GET</td><td class="flag-desc">Comma-separated HTTP methods: GET, POST, PUT, PATCH, DELETE. OPTIONS is automatic and always 200&nbsp;OK.</td></tr>
+              <tr><td class="flag-name">-body</td><td class="flag-default">json</td><td class="flag-desc">Request body shape for non-GET methods: <code>json</code>, <code>form</code>, or <code>multipart</code>.</td></tr>
+              <tr><td class="flag-name">-response</td><td class="flag-default">json</td><td class="flag-desc"><code>json</code> (<code>response.JSON</code>, <code>{"data": …}</code> envelope), <code>html</code> (<code>response.HTML</code>, renders an editable template), or <code>raw</code> (<code>response.JSONRaw</code>, no envelope).</td></tr>
+              <tr><td class="flag-name">-layout</td><td class="flag-default">shared</td><td class="flag-desc">Only for <code>-response html</code>: <code>shared</code> reuses <code>templates/html/shared/layout.html</code>; <code>module</code> gives this route its own layout copy.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>A route's URL can carry named path parameters — <code>/admin/user/{id}/profile</code>, or a trailing <code>{name...}</code> catch-all (Go 1.22+ <code>ServeMux</code> wildcards). Every generated handler decodes them via <code>request.DecodePath</code>, matched to your Request struct by the same <code>json</code> tag convention as query/body fields, and they're documented as OpenAPI path parameters automatically. A literal <code>?</code> or <code>#</code> in the route is rejected — use a path parameter instead.</p>
+
+        <p>Handler function names, Request/Response types, and OperationIDs are derived from <code>-module</code>/<code>-submodule</code> + HTTP verb, never the URL path — so adding a second, distinct route under the same <code>-module</code>/<code>-submodule</code> as an existing one (different path, overlapping verb) fails fast with an error naming the colliding identifier(s), instead of silently generating duplicate/broken code. Pass <code>-name</code> to disambiguate.</p>
+
+        <div class="code-block"><pre>nexler create /purchase/verify -module purchase -submodule verify -methods GET,POST -body json -protected
+nexler create /home -module home -response html
+nexler create /purchase/new -module purchase -submodule verify -methods POST -name New</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-create-layer">
+      <div class="doc-sub">
+        <h3><code>nexler create store</code> / <code>nexler create service</code></h3>
+        <div class="cmd-line">nexler create store|service &lt;name&gt; [flags…]</div>
+        <p>Scaffolds a plain, standalone service or store package — no handler, no model, no route, no aggregator wiring. <code>&lt;name&gt;</code> addresses the package as <code>module[/submodule]</code>, e.g. <code>purchase</code> or <code>purchase/verify</code>. Nothing imports it automatically; wire it up by hand from wherever needs it.</p>
+        <div class="table-wrap">
+          <table class="flag-table">
+            <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td class="flag-name">-file</td><td class="flag-default">&lt;pkgname&gt;store / &lt;pkgname&gt;service</td><td class="flag-desc">Base file name for the generated file.</td></tr>
+              <tr><td class="flag-name">-dir</td><td class="flag-default">"."</td><td class="flag-desc">Path to the app directory (must contain <code>go.mod</code>).</td></tr>
+              <tr><td class="flag-name">-store</td><td class="flag-default">""</td><td class="flag-desc"><em>Service only.</em> Link this service's TODO comment to an already-scaffolded store, as <code>module[/submodule]</code> — purely informational.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="code-block"><pre>nexler create service apps
+nexler create store apps</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-db-add">
+      <div class="doc-sub">
+        <h3><code>nexler db add</code></h3>
+        <div class="cmd-line">nexler db add &lt;name&gt; -type &lt;mongo|mysql|postgres|mssql&gt; [flags…]</div>
+        <p>Adds a new named database connection to an existing app's <code>.env</code> — not to be confused with <code>nexler init db</code> (which provisions the core schema on an already-declared connection; this <em>declares</em> a new connection). If <code>-type</code> isn't a driver the app was originally scaffolded with, this retrofits the missing driver support first (helper package, import wiring, and — if the dialect family is new to the app — <code>db/db.go</code>'s Connect/Close cases).</p>
+        <div class="table-wrap">
+          <table class="flag-table">
+            <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td class="flag-name">-type</td><td class="flag-default">required</td><td class="flag-desc"><code>mongo</code>, <code>mysql</code>, <code>postgres</code>, or <code>mssql</code>.</td></tr>
+              <tr><td class="flag-name">-dir</td><td class="flag-default">"."</td><td class="flag-desc">Path to the app directory.</td></tr>
+              <tr><td class="flag-name">-host</td><td class="flag-default">""</td><td class="flag-desc">Blank leaves the DSN blank for you to fill in by hand.</td></tr>
+              <tr><td class="flag-name">-port</td><td class="flag-default">conventional port</td><td class="flag-desc">Defaults to the type's conventional port when <code>-host</code> is set.</td></tr>
+              <tr><td class="flag-name">-dbname</td><td class="flag-default">""</td><td class="flag-desc">Database name.</td></tr>
+              <tr><td class="flag-name">-user</td><td class="flag-default">""</td><td class="flag-desc">Username (blank = no auth).</td></tr>
+              <tr><td class="flag-name">-password</td><td class="flag-default">""</td><td class="flag-desc">Password, plain text (blank = no auth).</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout"><code>&lt;name&gt;</code> must be a valid identifier and can't be <code>"core"</code> — that's reserved for the app's own default connection. The new connection is reachable as <code>db.SQL("&lt;name&gt;")</code>/<code>db.Mongo("&lt;name&gt;")</code>, but never promoted to core.</div>
+        <div class="code-block"><pre>nexler db add analytics -type postgres -host localhost -dbname analytics
+nexler db add reports -type mssql -dir ./myapp</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-add">
+      <div class="doc-sub">
+        <h3><code>nexler add</code> — vendor a front-end package</h3>
+        <span class="badge badge-network">needs network + npm</span>
+        <div class="cmd-line">nexler add &lt;package&gt;[@version] [flags…]</div>
+        <p>Vendors a static asset package from npm into an existing app's <code>templates/static/vendors/&lt;name&gt;/</code>, without ever giving the app itself a <code>package.json</code> or <code>node_modules</code>. Nexler shells out to <code>npm install &lt;package&gt; --prefix &lt;scratch-tmp-dir&gt; --no-save --no-audit --no-fund</code> in a throwaway temp directory, then copies the package's <code>dist/</code> contents (flattened) — or, if it has none, the whole package minus obvious junk (tests, docs, <code>.git</code>, <code>package.json</code>, README, etc.).</p>
+        <div class="table-wrap">
+          <table class="flag-table">
+            <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td class="flag-name">-dir</td><td class="flag-default">"."</td><td class="flag-desc">Path to the app directory.</td></tr>
+              <tr><td class="flag-name">-as</td><td class="flag-default">derived from package name</td><td class="flag-desc">Destination folder name under <code>vendors/</code>, e.g. <code>@popperjs/core</code> → <code>popperjs-core</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">This is one of only two Nexler operations that touch the network or shell out to another process (the other is <code>nexler init db</code>). It requires <code>npm</code> on <code>PATH</code>. Re-running for the same name always refreshes it — there's no <code>-force</code> flag. Since static assets are embedded into the app's own binary at build time, a newly vendored package isn't served until you rebuild — and Nexler never wires a <code>&lt;link&gt;</code>/<code>&lt;script&gt;</code> tag for you.</div>
+        <div class="code-block"><pre>nexler add bootstrap
+nexler add bootstrap@5.3.3 -as bootstrap
+nexler add @popperjs/core</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-init-db">
+      <div class="doc-sub">
+        <h3><code>nexler init db</code></h3>
+        <span class="badge badge-network">needs network</span>
+        <div class="cmd-line">nexler init db [-dir &lt;app-dir&gt;]</div>
+        <p>Provisions a generated app's "core" system data on its actual core database connection (read from <code>.env</code>'s <code>{APPNAME}_DB_CORE_TYPE</code>/<code>_DSN</code>): <code>core_config</code> (backing <code>GetSetting</code>/<code>SetSetting</code>), <code>core_error_log</code> (backing <code>LogError</code>, auto-called on a recovered panic or any 5xx response), <code>core_kgate_channels</code> (backing kgate's channel registry, if <code>init kgate</code> has been run), <code>core_users</code>, and <code>core_services</code> (backing API-key/service-to-service auth, if the app has <code>-auth jwt|both</code>) — each a table plus its own stored procedure for mysql/postgres/mssql, or a unique index for mongo. All five are provisioned unconditionally on every <code>-db</code> app regardless of which optional features are actually used.</p>
+        <p>This is a deliberately separate, explicit step — not run automatically by <code>create app</code> or by the app's own startup, since a physical database can be shared by several apps and production setups often run with a low-privilege DB user that can't run DDL at all. Every statement is idempotent — safe to run again, including against a database another app already provisioned. Requires <code>-db</code> to have been set at <code>create app</code> time.</p>
+        <div class="code-block"><pre>nexler init db -dir ./myapp</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-init-kpass">
+      <div class="doc-sub">
+        <h3><code>nexler init kpass</code></h3>
+        <span class="badge badge-local">local only</span>
+        <div class="cmd-line">nexler init kpass [-dir &lt;app-dir&gt;]</div>
+        <p>Adds a client for KPass (Klivolks' permission-check service) to an existing app: <code>kpass/kpass.go</code> (<code>Check</code>/<code>Allowed</code>, plus <code>UserIDFromRequest</code> when the app has <code>-auth jwt|session|both</code>) and <code>KPASS_URL</code>/<code>KPASS_CLIENT_ID</code>/<code>KPASS_API_SECRET</code> added to <code>.env</code> (blank, for you to fill in) if not already present.</p>
+        <p><code>Check(ctx, userID, resource, extra)</code> posts to <code>{KPASS_URL}/permission/check/</code> and returns KPass's full response (status, message, access, user role, user type) — kept separate from <code>Allowed</code> (a plain yes/no helper) so callers needing more, e.g. restricting data by role, call <code>Check</code> directly. Unlike <code>init db</code>, this needs no network access — pure local file scaffolding, safe to re-run.</p>
+        <div class="code-block"><pre>nexler init kpass -dir ./myapp</pre></div>
+        <p>Usage — call this from any handler you want permission-gated, typically right after (or instead of) <code>middleware.RequireAuth</code>:</p>
+        <div class="code-block"><pre>func HandleUsersCreate(w http.ResponseWriter, r *http.Request) {
+	userID, ok := kpass.UserIDFromRequest(r)  <span class="cmt">// thin wrapper over auth.Subject(r)</span>
+	if !ok {
+		response.Error(w, r, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	result, err := kpass.Check(r.Context(), userID, "myapp.users.create", nil)
+	if err != nil || !kpass.Allowed(result) {
+		response.Error(w, r, http.StatusForbidden, "not allowed")
+		return
+	}
+	<span class="cmt">// result.UserRole / result.UserType are also available for finer-grained checks</span>
+	<span class="cmt">// ... proceed with the real handler logic</span>
+}</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-init-kgate">
+      <div class="doc-sub">
+        <h3><code>nexler init kgate</code></h3>
+        <span class="badge badge-local">local only</span>
+        <div class="cmd-line">nexler init kgate [-dir &lt;app-dir&gt;]</div>
+        <p>Adds a client for KGate (Klivolks' message broker): <code>kgate/kgate.go</code> (<code>Subscribe</code>/<code>Unsubscribe</code>/<code>ResumeAll</code>/<code>Publish</code>/<code>HandleWebhook</code>/<code>Register</code>) and five blank env vars — <code>KGATE_CLIENT_ID</code>, <code>KGATE_WS_SERVER</code>, <code>KGATE_HTTP_SERVER</code>, <code>KGATE_ORIGIN</code>, <code>KGATE_WEBHOOK_SECRET</code>. Also auto-wires a <code>POST /webhooks/kgate</code> fallback route into <code>routes/public/public.go</code>.</p>
+        <p>Requires the app to already have a core database connection (<code>-db</code> at <code>create app</code> time) — channel subscriptions aren't static/env-driven: <code>Subscribe(ctx, channel)</code> records the channel and starts a background goroutine maintaining a live WebSocket connection, durable across restarts via <code>ResumeAll(ctx)</code> (add this near <code>db.Connect()</code> in your own <code>main.go</code> — not wired automatically). Every event, live or via the HMAC-verified webhook fallback, dispatches to a single generated <code>handleEvent</code> function. Needs <code>go mod tidy</code> once and <code>nexler init db</code> before subscriptions will work.</p>
+        <p><code>Register</code> also documents <code>POST /webhooks/kgate</code> in <code>/openapi.json</code>/Swagger UI (previously invisible there, unlike every route <code>nexler create &lt;route&gt;</code> generates), and subscribes to a channel literally named <code>"test"</code> alongside <code>ResumeAll</code> on startup — a built-in smoke test that the whole pipeline (core DB registry + WebSocket connectivity) works end to end. Safe to leave in (<code>Subscribe</code> is idempotent for an already-subscribed channel) or remove once you've confirmed kgate is wired correctly.</p>
+        <div class="code-block"><pre>nexler init kgate -dir ./myapp</pre></div>
+        <p>Usage — subscribe from anywhere (a handler, a startup routine, mid-workflow), publish from anywhere, and process every delivered event (live or via the webhook fallback) in one place:</p>
+        <div class="code-block"><pre><span class="cmt">// start listening for a channel, e.g. when an order is created</span>
+if err := kgate.Subscribe(ctx, "orders.created"); err != nil {
+	log.Printf("kgate: subscribing: %v", err)
+}
+
+<span class="cmt">// publish an event to that channel from anywhere else</span>
+if err := kgate.Publish(ctx, "orders.created", map[string]any{"order_id": id}); err != nil {
+	log.Printf("kgate: publishing: %v", err)
+}
+
+<span class="cmt">// kgate/kgate.go — edit handleEvent for your own processing logic</span>
+func handleEvent(ctx context.Context, channel string, payload json.RawMessage) error {
+	switch channel {
+	case "orders.created":
+		<span class="cmt">// ... handle it</span>
+	}
+	return nil
+}</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-init-docker">
+      <div class="doc-sub">
+        <h3><code>nexler init docker</code></h3>
+        <span class="badge badge-local">local only</span>
+        <div class="cmd-line">nexler init docker [-dir &lt;app-dir&gt;]</div>
+        <p>Adds a multi-stage Dockerfile (build + serve) and a <code>docker-compose.yml</code> to an existing app. The build stage's <code>golang:&lt;version&gt;-alpine</code> always matches the app's real <code>go.mod</code> "go X.Y" directive, and the exposed/mapped port matches the app's real <code>{PREFIX}_PORT</code> from <code>.env</code> (defaulting to 8080). <code>.env</code> is never baked into the image — the compose file passes it through via <code>env_file:</code> at container runtime instead. Refuses if either file already exists.</p>
+        <div class="code-block"><pre>nexler init docker -dir ./myapp</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-init-ci">
+      <div class="doc-sub">
+        <h3><code>nexler init ci</code></h3>
+        <span class="badge badge-local">local only</span>
+        <div class="cmd-line">nexler init ci [-dir &lt;app-dir&gt;] [-registry dockerhub|github]</div>
+        <p>Adds <code>.github/workflows/release.yml</code>: builds and pushes a Docker image whenever a GitHub Release is published. <code>-registry</code> picks where images go — <code>github</code> (GitHub Container Registry, authenticated automatically via <code>GITHUB_TOKEN</code>) or <code>dockerhub</code> (via <code>DOCKERHUB_USERNAME</code>/<code>DOCKERHUB_TOKEN</code> repo secrets you add yourself); prompted interactively if not passed. Doesn't require a Dockerfile to already exist — prints a reminder instead of refusing. Refuses if <code>release.yml</code> already exists.</p>
+        <div class="code-block"><pre>nexler init ci -dir ./myapp -registry github</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-init-kube">
+      <div class="doc-sub">
+        <h3><code>nexler init kube</code></h3>
+        <span class="badge badge-local">local only</span>
+        <div class="cmd-line">nexler init kube [-dir &lt;app-dir&gt;] [-registry dockerhub|github] [-image &lt;ref&gt;] [-namespace &lt;ns&gt;] [-replicas &lt;n&gt;]</div>
+        <p>Adds <code>k8s/deployment.yaml</code> to an existing app: a <code>Secret</code> (every real value from <code>.env</code>), a <code>Deployment</code> (references the Secret via <code>envFrom</code>, TCP readiness/liveness probes on the app's port, conservative default resource requests/limits), and a <code>ClusterIP</code> <code>Service</code> — three <code>---</code>-separated documents in one file. Unlike <code>init ci</code>'s workflows (which resolve an image reference at workflow-run time via GitHub's own context variables), this file is applied directly by <code>kubectl</code>, so it needs a concrete image reference baked in at scaffold time: <code>-image</code> sets it directly, or <code>-registry github</code> derives <code>ghcr.io/&lt;owner&gt;/&lt;repo&gt;:latest</code> straight from <code>go.mod</code>'s module path (erroring if it isn't <code>github.com/&lt;owner&gt;/&lt;repo&gt;</code>-shaped — nexler never shells out to git to guess an owner), or <code>-registry dockerhub</code> prompts for your Docker Hub username and derives <code>&lt;user&gt;/&lt;repo&gt;:latest</code>.</p>
+        <p><code>-namespace</code> is left out of every resource by default (kubectl's <code>-n</code>/current context decides) unless set explicitly; <code>-replicas</code> defaults to 1. <code>k8s/deployment.yaml</code> is added to <code>.gitignore</code> — unlike <code>docker-compose.yml</code> (which only references <code>.env</code> by path at container runtime), the Secret document here embeds <code>.env</code>'s actual values, since Kubernetes has no equivalent way to read a local file at deploy time. Refuses if <code>k8s/deployment.yaml</code> already exists.</p>
+        <div class="code-block"><pre>nexler init kube -dir ./myapp -registry github
+nexler init kube -dir ./myapp -image ghcr.io/me/myapp:latest -replicas 3</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-update">
+      <div class="doc-sub">
+        <h3><code>nexler update</code></h3>
+        <span class="badge badge-local">local only</span>
+        <div class="cmd-line">nexler update [-dir &lt;app-dir&gt;]</div>
+        <p>Brings an existing app's Nexler-owned files — ones you generally don't hand-edit — up to date with whatever the current <code>nexler</code> binary knows how to generate, without needing to trigger it as a side effect of <code>create &lt;route&gt;</code>. Covers things like <code>openapi/openapi.go</code> (regenerated when it predates a field Nexler now sets) and <code>response/response.go</code> (missing helpers appended, never rewritten). Never touches <code>handlers/services/store/models</code>, <code>main.go</code>, <code>.env</code>, or <code>templates/html/*</code> — anything you're expected to hand-edit stays out of scope. Prints "updated" or "already up to date" per file checked.</p>
+        <div class="code-block"><pre>nexler update -dir ./myapp</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-version">
+      <div class="doc-sub">
+        <h3><code>nexler version</code> / <code>nexler help</code></h3>
+        <div class="cmd-line">nexler version   |   nexler -v   |   nexler --version</div>
+        <p>Prints the CLI's own version — not the version of any generated app.</p>
+        <div class="cmd-line">nexler help   |   nexler -h   |   nexler --help</div>
+        <p>Prints the full command reference shown on this page, straight from the binary.</p>
+      </div>
+    </section>
+
+    <!-- ============================= ARCHITECTURE ============================= -->
+
+    <section class="doc-section" id="arch-layout">
+      <h2>Generated app architecture</h2>
+      <p class="lead">Every app produced by <code>nexler create app</code> follows a fixed, layered structure. <code>main.go</code> calls <code>routes.Register(mux)</code> once and is never edited again after the initial scaffold — new routes are added purely by running <code>nexler create &lt;route&gt;</code>, which wires itself into <code>routes/public/public.go</code> or <code>routes/protected/protected.go</code> automatically.</p>
+
+      <div class="tree"><pre style="margin:0;">handlers/    <span class="c">HTTP handlers — decode request, call service, write response</span>
+services/    <span class="c">business logic, orchestration</span>
+store/       <span class="c">persistence via the Store interface</span>
+models/      <span class="c">request/response and domain structs</span>
+middleware/  <span class="c">auth, logging, recovery, etc.</span>
+routes/      <span class="c">routes.go + public/protected aggregators</span>
+openapi/     <span class="c">in-process OpenAPI registry → /openapi.json</span>
+request/     <span class="c">decode helpers a handler calls into its Request struct</span>
+response/    <span class="c">JSON envelope helpers a handler calls to write its result</span>
+apiclient/   <span class="c">fetch/axios-style helpers for calling other HTTP APIs</span>
+config/      <span class="c">loads {APPNAME}_-prefixed env vars once, at startup</span>
+.env         <span class="c">editable starting point for the app's env vars</span>
+<span class="d">auth/</span>        <span class="c">only with -auth jwt|session|both</span>
+<span class="d">db/</span>          <span class="c">only with -db mongo|mysql|postgres|mssql</span>
+<span class="d">core/</span>        <span class="c">only when -db is set — app-wide system data</span>
+<span class="d">kpass/</span>       <span class="c">only after `nexler init kpass`</span>
+<span class="d">kgate/</span>       <span class="c">only after `nexler init kgate` (needs -db)</span></pre></div>
+    </section>
+
+    <section class="doc-section" id="arch-request-response">
+      <h2>Request decoding &amp; response envelope</h2>
+      <p class="lead">Every generated handler method decodes into its Request struct via one <code>request</code> package call, and writes its result via the <code>response</code> package — kept consistent by construction, not convention.</p>
+      <div class="grid-kl row row-cols-1 row-cols-md-2 g-0">
+        <div class="col"><div class="card-kl">
+          <span class="tag">DECODE</span><h4>request package</h4>
+          <p><code>DecodeQuery</code> for GET (always query-params-only). Otherwise whichever of <code>DecodeJSON</code>/<code>DecodeForm</code>/<code>DecodeMultipart</code> matches <code>-body</code>. A route with <code>{name}</code> path segments also gets a <code>DecodePath</code> call, matched by the same <code>json</code> tag as every other source.</p>
+        </div></div>
+        <div class="col"><div class="card-kl">
+          <span class="tag">RESPOND</span><h4>response package</h4>
+          <p><code>response.JSON(w, status, v)</code> → <code>{"data": v}</code>. <code>response.Error(w, r, status, msg)</code> → <code>{"error": msg}</code>, and on a <code>-db</code> app auto-logs every 5xx to the core database, best-effort. <code>response.JSONRaw</code> skips the envelope; <code>response.HTML</code> renders an editable template.</p>
+        </div></div>
+      </div>
+      <p>Handlers only decode-then-respond; the actual service call is left as a <code>// TODO: call &lt;pkg&gt;'s service with req</code> comment — wiring it in is a deliberate, separate step you do by hand.</p>
+    </section>
+
+    <section class="doc-section" id="arch-route-wiring">
+      <h2>Idempotent route wiring</h2>
+      <p class="lead">Generated files carry fixed marker comments that later CLI invocations anchor on to insert new code without reparsing Go — so re-running <code>nexler create &lt;route&gt;</code> against an already-scaffolded route only ever adds what's missing.</p>
+      <div class="table-wrap">
+        <table class="flag-table">
+          <thead><tr><th>Marker</th><th>Where</th><th>What gets inserted there</th></tr></thead>
+          <tbody>
+            <tr><td class="flag-name">// nexler:routes</td><td class="flag-desc">routes/public(or protected)/*.go</td><td class="flag-desc">New route imports and <code>Register(mux)</code> calls.</td></tr>
+            <tr><td class="flag-name">// nexler:handlers</td><td class="flag-desc">handlers/.../&lt;pkg&gt;.go</td><td class="flag-desc">New per-method handler functions when adding <code>-methods</code> to an existing route.</td></tr>
+            <tr><td class="flag-name">// nexler:register</td><td class="flag-desc">handlers/.../&lt;pkg&gt;.go</td><td class="flag-desc">New <code>mux.HandleFunc</code>/<code>openapi.Register</code> calls.</td></tr>
+            <tr><td class="flag-name">// nexler:models</td><td class="flag-desc">models/.../&lt;pkg&gt;.go</td><td class="flag-desc">New Request/Response struct pairs.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">If a marker is missing (e.g. a route scaffolded before this feature existed, or a hand-edited file), the insert fails with an error naming the exact marker text to add back by hand — it never silently guesses a location.</div>
+      <div class="callout warn">Adding a second, distinct route to an already-scaffolded package (same <code>-module</code>/<code>-submodule</code>, different path, overlapping verb) is checked for handler/type/OperationID collisions <em>before</em> anything is written — since identifiers are derived from <code>-module</code>/<code>-submodule</code> + verb, not the URL path, two different routes sharing those would otherwise generate duplicate/colliding code. Pass <code>-name</code> to give the new route distinct identifiers.</div>
+    </section>
+
+    <!-- ============================= KEY CONCEPTS ============================= -->
+
+    <section class="doc-section" id="concept-auth">
+      <h2>Key concepts</h2>
+
+      <div class="doc-sub">
+        <h3>Authentication (<code>-auth</code>)</h3>
+        <div class="badge-row">
+          <span class="badge badge-get">none</span>
+          <span class="badge badge-post">jwt</span>
+          <span class="badge badge-put">session</span>
+          <span class="badge badge-patch">both</span>
+        </div>
+        <p><code>middleware.RequireAuth</code> — what every <code>-protected</code> route wraps its handlers in — is generated differently per <code>-auth</code> choice. <code>jwt</code> generates <code>auth/jwt.go</code> (stdlib-only HS256, <code>IssueJWT</code>/<code>VerifyJWT</code>). <code>session</code> generates <code>auth/session.go</code> — an in-memory map behind a mutex plus an <code>HttpOnly</code>/<code>SameSite=Lax</code> cookie (<code>StartSession</code>/<code>SessionFromRequest</code>/<code>EndSession</code>); lost on restart, not shared across instances by design. <code>both</code> generates both, and <code>RequireAuth</code> tries the bearer token first, falling back to the session cookie — one protected route serves API and browser clients at once.</p>
+        <p>Whichever mechanism verifies the caller, the resulting subject (userID) is attached to the request's context via <code>auth.ContextWithSubject</code>; any protected handler reads it back with <code>auth.Subject(r) (subject string, ok bool)</code>. No <code>/login</code>/<code>/logout</code> route is ever generated — call <code>auth.IssueJWT</code>/<code>auth.StartSession</code> from your own login handler once credentials are verified.</p>
+        <p>Usage — a login handler you write yourself (scaffolded separately, e.g. <code>nexler create /login -module auth</code>), calling the generated primitives once credentials check out:</p>
+        <div class="code-block"><pre><span class="cmt">// -auth jwt or both</span>
+token, err := auth.IssueJWT(userID, name, org, userType, userRole, 24*time.Hour)
+response.JSON(w, http.StatusOK, LoginResponse{Token: token})
+
+<span class="cmt">// -auth session or both</span>
+auth.StartSession(w, userID, false)  <span class="cmt">// rememberMe if -remember-me was set</span>
+response.JSON(w, http.StatusOK, LoginResponse{})
+
+<span class="cmt">// any protected handler downstream</span>
+userID, ok := auth.Subject(r)</pre></div>
+      </div>
+
+      <div class="doc-sub" id="concept-service-auth">
+        <h3>API-key (service-to-service) auth</h3>
+        <p>Apps with <code>-auth jwt|both</code> and <code>-db</code> set also get <code>middleware.RequireServiceAuth</code> — a second, <strong>wholly separate</strong> auth wrapper for app-to-app calls, checking the <code>X-Api-Key</code> header against a new <code>core_services</code> table. It never falls back to/from <code>RequireAuth</code>: a route is either user-facing (<code>RequireAuth</code>) or service-only (<code>RequireServiceAuth</code>), so a service-only route can never accidentally accept an end-user JWT. <strong>The API key must never be embedded in any UI-facing code</strong> — treat it like a database credential.</p>
+        <p><code>core.CreateService(ctx, name)</code> generates a random key, stores only its SHA-256 hash, and returns the plaintext key exactly once — it's never retrievable again. <code>VerifyServiceKey</code>/<code>RevokeService</code>/<code>ListServices</code>/<code>GetService</code> round out the set; on success, the calling service's name is attached via a new <code>auth.ContextWithService</code>/<code>auth.Service(r)</code> pair, kept as a distinct context key from the user <code>Subject</code>. A generated Swagger-documented admin API (<a href="#cmd-admin-api"><code>/admin/services</code>/<code>/admin/users</code></a>) wraps these functions for you — see below.</p>
+        <p>Usage — a route meant to be called only by another backend service, never a browser:</p>
+        <div class="code-block"><pre>mux.HandleFunc("POST /internal/sync", middleware.RequireServiceAuth(func(w http.ResponseWriter, r *http.Request) {
+	name, _ := auth.Service(r)  <span class="cmt">// the calling service's core_services Name</span>
+	<span class="cmt">// ...</span>
+}))</pre></div>
+        <p>A companion <code>core_users</code> table (<code>core.GetUser</code>/<code>CreateUser</code>/<code>SetUserStatus</code>/<code>ListUsers</code>) is a minimal local record, <strong>not</strong> a profile store: <code>UserId</code> is the same value as the JWT <code>sub</code> claim, plus <code>Username</code>/<code>UserRole</code>/<code>UserType</code> and a <code>Status</code> kill-switch. Real profile data (name, email, etc.) stays wherever it already lives.</p>
+      </div>
+
+      <div class="doc-sub" id="cmd-admin-api">
+        <h3>Admin API: <code>/admin/users</code> &amp; <code>/admin/services</code></h3>
+        <p>Every <code>-auth jwt|both</code> + <code>-db</code> app also gets a Swagger-documented admin API wrapping the <code>core</code> functions above — hand-authored, not routed through <code>nexler create &lt;route&gt;</code>'s generic machinery, since these are infrastructure endpoints with real field definitions from day one. Wired into <code>routes/protected/protected.go</code> automatically, same as <code>kgate</code>'s webhook route.</p>
+        <table class="flag-table">
+          <thead><tr><th>Method &amp; path</th><th>Calls</th></tr></thead>
+          <tbody>
+            <tr><td class="flag-name">GET /admin/users</td><td class="flag-desc"><code>core.ListUsers</code> — no pagination</td></tr>
+            <tr><td class="flag-name">POST /admin/users</td><td class="flag-desc"><code>core.CreateUser</code> — create/upsert</td></tr>
+            <tr><td class="flag-name">GET /admin/users/{id}</td><td class="flag-desc"><code>core.GetUser</code></td></tr>
+            <tr><td class="flag-name">PATCH /admin/users/{id}/status</td><td class="flag-desc"><code>core.SetUserStatus</code></td></tr>
+            <tr><td class="flag-name">GET /admin/services</td><td class="flag-desc"><code>core.ListServices</code> — metadata only, never keys</td></tr>
+            <tr><td class="flag-name">POST /admin/services</td><td class="flag-desc"><code>core.CreateService</code> — key in the response exactly once</td></tr>
+            <tr><td class="flag-name">GET /admin/services/{name}</td><td class="flag-desc"><code>core.GetService</code> — metadata only</td></tr>
+            <tr><td class="flag-name">POST /admin/services/{name}/revoke</td><td class="flag-desc"><code>core.RevokeService</code></td></tr>
+          </tbody>
+        </table>
+        <div class="callout warn">Every route wraps only in <code>middleware.RequireAuth</code> — that confirms the caller is <em>authenticated</em>, not that they're <em>allowed</em> to manage other users/services. Add your own authorization check (e.g. <code>kpass.Check</code>, once <code>nexler init kpass</code> has been run) before relying on this in production — deliberately left as a TODO in the generated code rather than assumed by nexler.</div>
+        <div class="code-block"><pre>curl -X POST /admin/services -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"billing-svc"}'
+<span class="cmt">// {"name":"billing-svc","key":"a1b2c3..."}  -- key shown exactly once</span></pre></div>
+      </div>
+
+      <div class="doc-sub" id="concept-db">
+        <h3>Database connections (<code>-db</code>) &amp; the "core" connection</h3>
+        <p><code>-db</code> is deliberately scoped to connection lifecycle only — opening at startup, closing at shutdown. No query builder, ORM, or migrations. <strong>Which drivers are compiled in</strong> is a scaffold-time decision (<code>-db</code>'s value); <strong>which named connections exist and where they point</strong> is pure <code>.env</code>/runtime config — <code>{APPNAME}_DB_CONNECTIONS</code> lists comma-separated connection names, each with its own <code>_TYPE</code>/<code>_DSN</code>. Adding or removing a connection later is just an <code>.env</code> edit, never a re-scaffold — use <code>nexler db add</code> for that.</p>
+        <p>Every <code>-db</code>-enabled app gets one connection pre-populated under the conventional name <code>"core"</code>. <code>db.Connect()</code> (called from <code>main()</code> at startup) opens every declared connection up front, failing fast if one can't be reached; <code>db.Close()</code> is wired into a graceful shutdown on SIGINT/SIGTERM.</p>
+      </div>
+
+      <div class="doc-sub" id="concept-html">
+        <h3>HTML responses (<code>-response html</code>)</h3>
+        <p>A route scaffolded with <code>-response html</code> gets <code>response.HTML(w, r, module, name, title, data)</code> instead of <code>response.JSON</code>. Unlike everything else in the framework, this reads its content file and <code>layout.html</code> straight off disk on every request — not from the embedded binary — so you can edit the page without rebuilding. Content is rendered first (auto-escaped via <code>html/template</code>), then embedded as <code>{{.Content}}</code> inside the layout.</p>
+      </div>
+
+      <div class="doc-sub" id="concept-helpers">
+        <h3>Query helper packages: <code>mongo</code> / <code>mysql</code> / <code>postgres</code> / <code>mssql</code></h3>
+        <p>Generated whenever the matching <code>-db</code> type is selected — simplified, struct-based CRUD helpers on top of the raw driver, so <code>store/</code> code isn't hand-rolling query strings for common cases.</p>
+        <div class="code-block"><pre>t := mysql.Conn("core").Table("users")
+users, err := mysql.Get[User](ctx, t, User{Active: true})
+one, err  := mysql.GetOne[User](ctx, t, User{ID: id})
+err = mysql.Insert(ctx, t, User{ID: id, Name: "x"})
+err = mysql.Update(ctx, t, User{ID: id}, User{Name: "y"})  <span class="cmt">// filter, then patch</span>
+err = mysql.Delete(ctx, t, User{ID: id})
+rows, err := mysql.Query[Report](ctx, mysql.Conn("core"), "select * from tbl_y")</pre></div>
+        <p>Field matching uses a struct's non-zero fields (AND'd together; a slice ORs each element), mapped via the <code>db</code> tag (or <code>bson</code> for Mongo). <code>Insert</code> writes every field, zeros included; <code>Update</code> patches only non-zero fields — worth remembering, since the two are intentionally asymmetric. <code>Query</code>/<code>Call</code> (or <code>Aggregate</code> for Mongo) are the raw escape hatches for anything the struct-filter model can't express.</p>
+      </div>
+
+      <div class="doc-sub" id="concept-apiclient">
+        <h3>apiclient — calling other HTTP APIs</h3>
+        <p>Always generated (pure stdlib, no dependency). Fetch/axios-style helpers for the <em>outbound</em> direction — calling other services, as opposed to <code>request</code>/<code>response</code> which handle this app's own inbound traffic.</p>
+        <div class="code-block"><pre>resp, err := apiclient.Get(ctx, url, headers)
+resp, err  = apiclient.Post(ctx, url, headers, body)
+var out MyType
+err = resp.JSON(&amp;out)</pre></div>
+        <p>Every call is synchronous — the body is fully drained and the connection released back to the pool before the call returns, so you always get a plain <code>*Response{StatusCode, Header, Body}</code>, never a raw <code>*http.Response</code> you could forget to close.</p>
+      </div>
+
+      <div class="doc-sub" id="concept-config">
+        <h3>Runtime configuration — <code>config</code> &amp; <code>.env</code></h3>
+        <p><code>config.C</code> is ready before <code>main()</code> runs, reading env vars namespaced per app as <code>{APPNAME}_HOST</code>/<code>{APPNAME}_PORT</code>/<code>{APPNAME}_SWAGGER_ENABLED</code> (default <code>true</code>). <code>.env</code>, scaffolded at the app root, is read by a hand-rolled parser — no third-party dependency, consistent with the generated <code>go.mod</code> having none. A key already present in the real environment always wins over <code>.env</code> — it's a committed-or-not local default, never an override mechanism.</p>
+        <p><code>{APPNAME}_SWAGGER_ENABLED</code> gates <code>GET /swagger</code> and <code>GET /openapi.json</code> — set it to <code>false</code> in production to 404 both. The check happens inside each handler, not by leaving the routes unregistered: Go's <code>net/http.ServeMux</code> treats <code>GET /</code> (every app's homepage route) as a subtree pattern that would otherwise silently catch an unregistered <code>/swagger</code>/<code>/openapi.json</code> and serve the homepage instead of a 404. Every other route is unaffected.</p>
+      </div>
+    </section>
+
+    <!-- ============================= CHANGELOG ============================= -->
+
+    <section class="doc-section" id="changelog">
+      <h2>Changelog</h2>
+      <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
+
+      <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4>Admin API for users/services; hidden Swagger button when off; usage examples added</h4>
+          <p>New Swagger-documented admin API (<code>GET/POST /admin/users</code>, <code>GET/PATCH /admin/users/{id}</code>, <code>GET/POST /admin/services</code>, <code>GET /admin/services/{name}</code>, <code>POST /admin/services/{name}/revoke</code>) for every <code>-auth jwt|both</code> + <code>-db</code> app, wrapping <code>core.ListUsers</code>/<code>ListServices</code>/<code>GetService</code> (new) alongside the existing <code>core</code> functions — authentication only (<code>middleware.RequireAuth</code>), authorization deliberately left as a TODO for <code>kpass</code>. The homepage's "View API Docs" button now hides itself client-side when <code>SWAGGER_ENABLED=false</code>. This page also gained real Go usage examples (not just CLI commands) for kpass, kgate, JWT/session auth, and service auth.</p>
+          <div class="change-tags"><span class="change-tag">admin-api</span><span class="change-tag">docs</span><span class="change-tag">ui</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4>API-key (service-to-service) auth; <code>core_users</code>/<code>core_services</code></h4>
+          <p>Apps with <code>-auth jwt|both</code> and <code>-db</code> set now get <code>middleware.RequireServiceAuth</code>, a second auth mechanism (checking <code>X-Api-Key</code> against a new <code>core_services</code> table) wholly independent of <code>RequireAuth</code>, for app-to-app calls. <code>core.CreateService</code> issues a key once, storing only its hash. A companion <code>core_users</code> table (<code>UserId</code> matching the JWT <code>sub</code> claim, plus <code>Username</code>/<code>UserRole</code>/<code>UserType</code>/<code>Status</code>) is a minimal local record, not a profile store. Both tables are provisioned by <code>nexler init db</code>; existing apps pick up the Go code via <code>nexler update</code>.</p>
+          <div class="change-tags"><span class="change-tag">auth</span><span class="change-tag">core</span><span class="change-tag">security</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4>Swagger on/off switch; kgate webhook OpenAPI docs + test subscribe</h4>
+          <p>New <code>{APPNAME}_SWAGGER_ENABLED</code> setting (default <code>true</code>) gates <code>/swagger</code> and <code>/openapi.json</code>, for disabling both in production. <code>nexler init kgate</code>'s <code>Register</code> now documents <code>POST /webhooks/kgate</code> in <code>/openapi.json</code>/Swagger UI (previously the one generated route invisible there) and subscribes to a <code>"test"</code> channel on startup as a built-in connectivity smoke test. Existing apps pick up both via <code>nexler update</code>.</p>
+          <div class="change-tags"><span class="change-tag">kgate</span><span class="change-tag">openapi</span><span class="change-tag">config</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4><code>nexler init kube</code></h4>
+          <p>New command: adds <code>k8s/deployment.yaml</code> (Secret + Deployment + Service) to an existing app, completing the container pipeline started by <code>init docker</code>/<code>init ci</code>. <code>-registry github</code> derives the image reference from <code>go.mod</code>'s module path; <code>-registry dockerhub</code> prompts for a Docker Hub username; <code>-image</code> overrides either. The generated file is gitignored, since its Secret document embeds real values from <code>.env</code>.</p>
+          <div class="change-tags"><span class="change-tag">kube</span><span class="change-tag">deploy</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4><code>-name</code> flag; cross-invocation identifier collision fix</h4>
+          <p>Fixed a scaffolding bug where re-running <code>nexler create &lt;route&gt;</code> to add a second, distinct route under an already-scaffolded package's <code>-module</code>/<code>-submodule</code> could silently generate the same handler function, Request/Response types, and OperationID as an existing route (identifiers were derived purely from <code>-module</code>/<code>-submodule</code> + verb, never the URL path). This now fails fast with an error naming every colliding identifier, before anything is written. New <code>-name</code> flag on <code>nexler create &lt;route&gt;</code> disambiguates identifiers for this case without changing where the route's files live.</p>
+          <div class="change-tags"><span class="change-tag">create-route</span><span class="change-tag">fix</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4>Docs site published</h4>
+          <p>Added this guide (<code>docs/</code>) as the first end-user-facing documentation for Nexler, styled to match klivolks.com. Verified every command/flag against <code>cmd/nexler/*.go</code> directly rather than relying on <code>CLAUDE.md</code>'s summary, which was found to omit <code>init docker</code>, <code>init ci</code>, and <code>update</code> from its compact usage block.</p>
+          <div class="change-tags"><span class="change-tag">docs</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4>KGate worker module; core DB init fix</h4>
+          <p>Fixed a core database initialization issue and continued building out the KGate worker module.</p>
+          <div class="change-tags"><span class="change-tag">kgate</span><span class="change-tag">fix</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-11</div>
+          <h4>JWT bug fix</h4>
+          <p>Corrected an issue in the generated JWT auth flow.</p>
+          <div class="change-tags"><span class="change-tag">auth</span><span class="change-tag">fix</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-11</div>
+          <h4><code>create</code> route enhancements; service/store independence</h4>
+          <p>New features for <code>nexler create &lt;route&gt;</code>, service/store layers made independently reusable, and <code>auth.Subject</code> added to serve the current authenticated user ID to any protected handler.</p>
+          <div class="change-tags"><span class="change-tag">create-route</span><span class="change-tag">auth</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-11</div>
+          <h4><code>-file</code>, OpenAPI tags, <code>-response raw</code>, <code>-jwt-secret</code>, <code>init docker</code>/<code>init ci</code>, <code>update</code></h4>
+          <p>Additive, backward-compatible release: new <code>-file</code> flag, OpenAPI operation tags and client-ID auth support, <code>response.JSONRaw</code> (<code>-response raw</code>), the <code>-jwt-secret</code> reuse flag, the <code>nexler init docker</code>/<code>nexler init ci</code> commands, and <code>nexler update</code> for retrofitting existing apps.</p>
+          <div class="change-tags"><span class="change-tag">cli</span><span class="change-tag">openapi</span><span class="change-tag">docker</span></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <div class="container">
+    <div class="row g-4 mb-5">
+      <div class="col-12 col-lg-5 footer-brand">
+        <a href="#overview" class="logo text-white" style="font-size:20px;">
+          <img src="assets/logo.png" alt="Klivolks" class="logo-icon">KLIVOLKS<span class="trademark text-white">&reg;</span>
+        </a>
+        <p>Nexler is the open-source scaffolding CLI Klivolks builds its own products with, free for any developer to use.</p>
+      </div>
+      <div class="col-6 col-lg-3 footer-col">
+        <h4>Nexler</h4>
+        <a href="#quick-start">Quick start</a>
+        <a href="#cmd-create-app">Commands</a>
+        <a href="#changelog">Changelog</a>
+      </div>
+      <div class="col-6 col-lg-4 footer-col">
+        <h4>Project</h4>
+        <a href="https://github.com/klivolks/nexler" target="_blank" rel="noopener">GitHub repository</a>
+        <a href="https://klivolks.github.io/nexler/" target="_blank" rel="noopener">Releases</a>
+      </div>
+    </div>
+    <div class="footer-bottom d-flex flex-wrap justify-content-between align-items-center gap-3 pt-4">
+      <span>&copy; Klivolks Private Limited. All rights reserved.</span>
+      <span>MIT licensed</span>
+    </div>
+  </div>
+</footer>
+
+<script src="js/site.js"></script>
+</body>
+</html>

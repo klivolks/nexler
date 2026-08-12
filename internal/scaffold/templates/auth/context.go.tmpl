@@ -29,3 +29,30 @@ func Subject(r *http.Request) (subject string, ok bool) {
 	subject, ok = r.Context().Value(subjectKey).(string)
 	return subject, ok
 }
+{{- if and .HasCoreDB (or (eq .AuthKind "jwt") (eq .AuthKind "both")) }}
+
+// serviceKeyType is deliberately a distinct type from subjectKeyType —
+// a service-authenticated request (middleware.RequireServiceAuth) and a
+// user-authenticated one (middleware.RequireAuth) must never be
+// confusable with each other at the type level.
+type serviceKeyType struct{}
+
+var serviceKey = serviceKeyType{}
+
+// ContextWithService returns a copy of ctx carrying name as the calling
+// service's identity (its core_services Name). Called by
+// middleware.RequireServiceAuth once a request's X-Api-Key passes
+// core.VerifyServiceKey — application code normally reads it back via
+// Service instead of calling this directly.
+func ContextWithService(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, serviceKey, name)
+}
+
+// Service returns r's calling service's name, as attached by
+// middleware.RequireServiceAuth. ok is false for a request that never
+// passed through RequireServiceAuth.
+func Service(r *http.Request) (name string, ok bool) {
+	name, ok = r.Context().Value(serviceKey).(string)
+	return name, ok
+}
+{{- end }}

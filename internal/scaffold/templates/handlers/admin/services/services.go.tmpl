@@ -1,0 +1,238 @@
+// Package services is nexler's own generated admin API for
+// core_services — list/create/get/revoke, each documented via the
+// openapi package so /openapi.json picks them up automatically.
+// Hand-authored (not routed through the generic nexler create <route>
+// machinery, unlike a business route): these are infrastructure
+// endpoints with real, from-day-one field definitions, so — like
+// handlers/home/home.go — this is one self-contained file rather than
+// the usual handlers/services/store/models four-layer split.
+//
+// Every handler below wraps only in middleware.RequireAuth — that
+// confirms the caller is *authenticated*, not that they're *authorized*
+// to create or revoke service accounts, which is a meaningfully
+// higher-privilege action than most routes. Add your own authorization
+// check (e.g. kpass.Check(ctx, callerID, "admin.services.write", nil),
+// once you've run `nexler init kpass`) before relying on this in
+// production. Deliberately left as a TODO rather than hardcoded:
+// permission enforcement is expected to be layered on separately, per
+// app, not assumed by nexler.
+package services
+
+import (
+	"net/http"
+	"time"
+
+	"{{ .ModulePath }}/core"
+	"{{ .ModulePath }}/middleware"
+	"{{ .ModulePath }}/openapi"
+	"{{ .ModulePath }}/request"
+	"{{ .ModulePath }}/response"
+)
+
+// ServiceSummary is one core_services record's metadata — the API key's
+// hash is never included, and the plaintext key is never stored at all
+// (see core.CreateService). This is what every handler below returns
+// except HandleServicesPost, which additionally returns the plaintext
+// key exactly once, on creation.
+type ServiceSummary struct {
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func toServiceSummary(s core.Service) ServiceSummary {
+	return ServiceSummary{Name: s.Name, Status: s.Status, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+}
+
+// GetServicesRequest is the (empty — query-parameters-only) request for
+// GET /admin/services.
+type GetServicesRequest struct{}
+
+// GetServicesResponse is the response payload for GET /admin/services.
+type GetServicesResponse struct {
+	Services []ServiceSummary `json:"services"`
+}
+
+// HandleServicesGet handles GET /admin/services — lists every
+// core_services record's metadata (never a key or its hash). No
+// pagination this release.
+func HandleServicesGet(w http.ResponseWriter, r *http.Request) {
+	var req GetServicesRequest
+	if err := request.DecodeQuery(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	svcs, err := core.ListServices(r.Context())
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]ServiceSummary, len(svcs))
+	for i, s := range svcs {
+		out[i] = toServiceSummary(s)
+	}
+	response.JSON(w, http.StatusOK, GetServicesResponse{Services: out})
+}
+
+// PostServicesRequest is the JSON body for POST /admin/services.
+type PostServicesRequest struct {
+	Name string `json:"name"`
+}
+
+// PostServicesResponse is the response payload for POST /admin/services
+// — Key is the plaintext API key, returned exactly once. It is never
+// stored, never retrievable again after this response, and must never be
+// exposed to a UI/browser client — treat it the same as a database
+// credential; store it securely (e.g. a secrets manager) the moment you
+// receive it.
+type PostServicesResponse struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+// HandleServicesPost handles POST /admin/services — creates a new
+// service account and returns its API key exactly once. Fails if Name
+// already exists (core_services' primary key).
+func HandleServicesPost(w http.ResponseWriter, r *http.Request) {
+	var req PostServicesRequest
+	if err := request.DecodeJSON(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	key, err := core.CreateService(r.Context(), req.Name)
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.JSON(w, http.StatusOK, PostServicesResponse{Name: req.Name, Key: key})
+}
+
+// GetServiceRequest is the (path-parameter-only) request for GET
+// /admin/services/{name}.
+type GetServiceRequest struct {
+	Name string `json:"name"`
+}
+
+// GetServiceResponse is the response payload for GET
+// /admin/services/{name}.
+type GetServiceResponse struct {
+	Service ServiceSummary `json:"service"`
+}
+
+// HandleServiceGet handles GET /admin/services/{name}.
+func HandleServiceGet(w http.ResponseWriter, r *http.Request) {
+	var req GetServiceRequest
+	if err := request.DecodeQuery(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := request.DecodePath(r, &req, "name"); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	s, ok, err := core.GetService(r.Context(), req.Name)
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		response.Error(w, r, http.StatusNotFound, "service not found")
+		return
+	}
+	response.JSON(w, http.StatusOK, GetServiceResponse{Service: toServiceSummary(s)})
+}
+
+// RevokeServiceRequest is the (path-parameter-only) request for POST
+// /admin/services/{name}/revoke.
+type RevokeServiceRequest struct {
+	Name string `json:"name"`
+}
+
+// RevokeServiceResponse is the response payload for POST
+// /admin/services/{name}/revoke.
+type RevokeServiceResponse struct {
+	Service ServiceSummary `json:"service"`
+}
+
+// HandleServiceRevokePost handles POST /admin/services/{name}/revoke —
+// see core.RevokeService: the service's existing key stops working
+// immediately, but isn't deleted, so its history/metadata stays queryable.
+func HandleServiceRevokePost(w http.ResponseWriter, r *http.Request) {
+	var req RevokeServiceRequest
+	if err := request.DecodeQuery(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := request.DecodePath(r, &req, "name"); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := core.RevokeService(r.Context(), req.Name); err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s, _, err := core.GetService(r.Context(), req.Name)
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.JSON(w, http.StatusOK, RevokeServiceResponse{Service: toServiceSummary(s)})
+}
+
+// Register wires this package's admin service-management routes onto
+// mux — see the package doc comment re: RequireAuth only confirming
+// authentication, not authorization — and documents them with the
+// openapi package so /openapi.json picks them up automatically. Called
+// from routes/protected/protected.go (wired automatically by nexler
+// create app, when -auth is jwt|both and -db is set).
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /admin/services", middleware.RequireAuth(HandleServicesGet))
+	openapi.Register(openapi.Operation{
+		Method:      "GET",
+		Path:        "/admin/services",
+		OperationID: "listServices",
+		Summary:     "List all core_services records (metadata only, never keys)",
+		Protected:   true,
+		Tags:        []string{"admin-services"},
+		ReqType:     GetServicesRequest{},
+		RespType:    GetServicesResponse{},
+	})
+
+	mux.HandleFunc("POST /admin/services", middleware.RequireAuth(HandleServicesPost))
+	openapi.Register(openapi.Operation{
+		Method:         "POST",
+		Path:           "/admin/services",
+		OperationID:    "createService",
+		Summary:        "Create a service account — returns its API key exactly once",
+		Protected:      true,
+		Tags:           []string{"admin-services"},
+		ReqType:        PostServicesRequest{},
+		ReqContentType: "application/json",
+		RespType:       PostServicesResponse{},
+	})
+
+	mux.HandleFunc("GET /admin/services/{name}", middleware.RequireAuth(HandleServiceGet))
+	openapi.Register(openapi.Operation{
+		Method:      "GET",
+		Path:        "/admin/services/{name}",
+		OperationID: "getService",
+		Summary:     "Get one service's metadata by name",
+		Protected:   true,
+		Tags:        []string{"admin-services"},
+		ReqType:     GetServiceRequest{},
+		RespType:    GetServiceResponse{},
+	})
+
+	mux.HandleFunc("POST /admin/services/{name}/revoke", middleware.RequireAuth(HandleServiceRevokePost))
+	openapi.Register(openapi.Operation{
+		Method:      "POST",
+		Path:        "/admin/services/{name}/revoke",
+		OperationID: "revokeService",
+		Summary:     "Revoke a service's API key",
+		Protected:   true,
+		Tags:        []string{"admin-services"},
+		ReqType:     RevokeServiceRequest{},
+		RespType:    RevokeServiceResponse{},
+	})
+}

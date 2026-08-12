@@ -96,13 +96,7 @@ func NewDocker(cfg DockerConfig) error {
 		return err
 	}
 	port := readEnvPort(appDir)
-	service := ""
-	if abs, err := filepath.Abs(appDir); err == nil {
-		service = sanitizeIdent(filepath.Base(abs))
-	}
-	if service == "" {
-		service = "app"
-	}
+	service := appServiceName(appDir)
 
 	dockerfile := strings.NewReplacer("{{GOVERSION}}", goVersion, "{{PORT}}", port).Replace(dockerfileTemplate)
 	compose := strings.NewReplacer("{{SERVICE}}", service, "{{PORT}}", port).Replace(composeTemplate)
@@ -164,6 +158,23 @@ func readEnvPort(appDir string) string {
 		return value
 	}
 	return "8080"
+}
+
+// appServiceName derives a short, sanitized name for appDir — used as the
+// docker-compose service name, and (by kube.go) as the Docker Hub image
+// name and the Deployment/Service/Secret names and pod-selector label.
+// Falls back to "app" if appDir's basename sanitizes to nothing (e.g. an
+// app directory named only with punctuation) or filepath.Abs fails.
+func appServiceName(appDir string) string {
+	abs, err := filepath.Abs(appDir)
+	if err != nil {
+		return "app"
+	}
+	name := sanitizeIdent(filepath.Base(abs))
+	if name == "" {
+		return "app"
+	}
+	return name
 }
 
 // ensureGitignoreLine appends line to appDir/.gitignore (creating the file

@@ -1,6 +1,7 @@
 # {{ .AppName }} runtime configuration — see config/config.go.
 {{ .EnvPrefix }}_HOST=
 {{ .EnvPrefix }}_PORT=8080
+{{ .EnvPrefix }}_SWAGGER_ENABLED=true
 {{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
 {{ .EnvPrefix }}_JWT_SECRET={{ .JWTSecret }}
 {{- end }}

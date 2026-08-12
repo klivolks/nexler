@@ -114,6 +114,91 @@ const kgateRegisterPatched = `func Register(mux *http.ServeMux) {
 	}()
 }`
 
+// kgateRegisterPatchedV2 is what ensureKgateOpenAPIAndTestSubscribe
+// replaces kgateRegisterPatched with — same as the current
+// kgate.go.tmpl. Adds the openapi.Register call documenting POST
+// /webhooks/kgate (previously invisible in /openapi.json/Swagger UI,
+// unlike every route `nexler create <route>` generates) and a startup
+// Subscribe(ctx, "test") alongside ResumeAll — a built-in smoke test that
+// the whole pipeline (core DB registry + WebSocket connectivity) works
+// end to end on a fresh app.
+const kgateRegisterPatchedV2 = `func Register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /webhooks/kgate", HandleWebhook)
+	// Protected is left false (the default): this route authenticates via
+	// the HMAC X-Signature check in HandleWebhook above, not
+	// middleware.RequireAuth, so Protected: true here would be misleading.
+	openapi.Register(openapi.Operation{
+		Method:         "POST",
+		Path:           "/webhooks/kgate",
+		OperationID:    "kgateWebhook",
+		Summary:        "POST /webhooks/kgate",
+		Tags:           []string{"kgate"},
+		ReqType:        webhookEvent{},
+		ReqContentType: "application/json",
+	})
+	go func() {
+		if err := ResumeAll(context.Background()); err != nil {
+			log.Printf("kgate: resuming channels: %v", err)
+		}
+		// Subscribes to a channel named "test" as a built-in smoke test —
+		// verifies the whole pipeline (core DB registry + WebSocket
+		// connectivity) works end to end on a fresh app. Subscribe is
+		// idempotent for an already-subscribed channel, so this is safe to
+		// leave in; remove it once you've confirmed kgate is wired
+		// correctly, or if a permanent "test" channel isn't wanted.
+		if err := Subscribe(context.Background(), "test"); err != nil {
+			log.Printf("kgate: subscribing to test channel: %v", err)
+		}
+	}()
+}`
+
+// ensureKgateOpenAPIAndTestSubscribe brings an app scaffolded before
+// Register documented its webhook route with openapi.Register and
+// startup-subscribed to a "test" channel up to date. Anchors on
+// kgateRegisterPatched (the body ensureKgateResumeAll's own patch
+// produces) rather than kgateRegisterOriginal — this must run after
+// ensureKgateResumeAll in updateChecks so that anchor is guaranteed to
+// already be in place by the time this one runs. A missing kgate/kgate.go
+// is a silent no-op, same precedent as ensureKgateResumeAll. Same
+// "sanity-check the anchor, error out instead of guessing" precedent too:
+// a hand-rewritten Register fails loud, naming the exact snippet to add
+// by hand, rather than being silently overwritten.
+func ensureKgateOpenAPIAndTestSubscribe(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "kgate", "kgate.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if strings.Contains(content, `Subscribe(context.Background(), "test")`) {
+		return false, nil
+	}
+	if !strings.Contains(content, kgateRegisterPatched) {
+		return false, fmt.Errorf("%s: Register doesn't match the known original (has it been hand-rewritten?) — add the following manually:\n%s", path, kgateRegisterPatchedV2)
+	}
+	content = strings.Replace(content, kgateRegisterPatched, kgateRegisterPatchedV2, 1)
+
+	modulePath, err := readModulePath(appDir)
+	if err != nil {
+		return false, err
+	}
+	openapiImport := modulePath + "/openapi"
+	if !strings.Contains(content, `"`+openapiImport+`"`) {
+		content, err = insertImport(content, "", openapiImport)
+		if err != nil {
+			return false, fmt.Errorf("%s: adding %q import: %w", path, openapiImport, err)
+		}
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ensureKgateResumeAll brings an app scaffolded before Register started
 // auto-resuming recorded channels up to date. A missing kgate/kgate.go
 // (the app never ran `init kgate`) is a silent no-op, same precedent as

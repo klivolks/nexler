@@ -23,6 +23,7 @@ var C = load()
 type Config struct {
 	Host string // {{ .EnvPrefix }}_HOST — interface to listen on; empty means all interfaces
 	Port string // {{ .EnvPrefix }}_PORT — defaults to "8080"
+	SwaggerEnabled bool // {{ .EnvPrefix }}_SWAGGER_ENABLED — enables /swagger and /openapi.json; default true, set to false in production
 {{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
 	JWTSecret string // {{ .EnvPrefix }}_JWT_SECRET — signs/verifies issued JWTs (see auth/jwt.go)
 {{- end }}
@@ -38,6 +39,7 @@ func load() Config {
 	return Config{
 		Host: os.Getenv("{{ .EnvPrefix }}_HOST"),
 		Port: getEnvOr("{{ .EnvPrefix }}_PORT", "8080"),
+		SwaggerEnabled: getEnvBoolOr("{{ .EnvPrefix }}_SWAGGER_ENABLED", true),
 {{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
 		JWTSecret: os.Getenv("{{ .EnvPrefix }}_JWT_SECRET"),
 {{- end }}
@@ -49,6 +51,17 @@ func getEnvOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvBoolOr(key string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	default:
+		return fallback
+	}
 }
 
 // loadDotEnv reads simple KEY=VALUE lines from path into the process

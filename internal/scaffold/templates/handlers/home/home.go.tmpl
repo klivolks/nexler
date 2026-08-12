@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"{{ .ModulePath }}/config"
 	"{{ .ModulePath }}/openapi"
 {{- if .UI }}
 	"{{ .ModulePath }}/response"
@@ -13,10 +14,31 @@ import (
 
 // HandleOpenAPI builds and serves the OpenAPI spec fresh on every
 // request, from whatever routes have registered themselves with the
-// openapi package — see {{ .ModulePath }}/openapi.
+// openapi package — see {{ .ModulePath }}/openapi. Checks
+// config.C.SwaggerEnabled itself (rather than only being conditionally
+// registered in Register below) because "GET /" is a subtree pattern in
+// Go's net/http.ServeMux — it matches any path with no more specific
+// registration, so simply not registering "GET /openapi.json" would make
+// it silently fall through to the homepage handler (a 200 with the wrong
+// body) instead of 404ing.
 func HandleOpenAPI(w http.ResponseWriter, r *http.Request) {
+	if !config.C.SwaggerEnabled {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(openapi.Spec("{{ .AppName }}"))
+}
+
+// HandleSwagger serves the bundled Swagger UI page, gated on
+// config.C.SwaggerEnabled the same way and for the same reason as
+// HandleOpenAPI above.
+func HandleSwagger(w http.ResponseWriter, r *http.Request) {
+	if !config.C.SwaggerEnabled {
+		http.NotFound(w, r)
+		return
+	}
+	templates.ServePage("swagger.html")(w, r)
 }
 
 // Register wires the built-in homepage, static assets, and docs routes
@@ -31,6 +53,6 @@ func Register(mux *http.ServeMux) {
 {{- else }}
 	mux.HandleFunc("GET /", templates.ServePage("home.html"))
 {{- end }}
-	mux.HandleFunc("GET /swagger", templates.ServePage("swagger.html"))
+	mux.HandleFunc("GET /swagger", HandleSwagger)
 	mux.HandleFunc("GET /openapi.json", HandleOpenAPI)
 }
