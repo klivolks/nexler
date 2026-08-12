@@ -41,7 +41,7 @@ import (
 // runInit dispatches `nexler init ...`.
 func runInit(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "nexler: usage: nexler init db [-dir <app-dir>]\n              nexler init kpass [-dir <app-dir>]\n              nexler init kgate [-dir <app-dir>]\n              nexler init docker [-dir <app-dir>]\n              nexler init ci [-dir <app-dir>] [-registry dockerhub|github]")
+		fmt.Fprintln(os.Stderr, "nexler: usage: nexler init db [-dir <app-dir>]\n              nexler init kpass [-dir <app-dir>]\n              nexler init kgate [-dir <app-dir>]\n              nexler init docker [-dir <app-dir>]\n              nexler init ci [-dir <app-dir>] [-registry dockerhub|github]\n              nexler init kube [-dir <app-dir>] [-registry dockerhub|github] [-image <ref>] [-namespace <ns>] [-replicas <n>]")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -55,8 +55,10 @@ func runInit(args []string) {
 		runInitDocker(args[1:])
 	case "ci":
 		runInitCI(args[1:])
+	case "kube":
+		runInitKube(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "nexler: unknown resource %q for init\n\nsupported: db, kpass, kgate, docker, ci\n", args[0])
+		fmt.Fprintf(os.Stderr, "nexler: unknown resource %q for init\n\nsupported: db, kpass, kgate, docker, ci, kube\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -88,7 +90,7 @@ func runInitDB(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Provisioned core data schema (core_config, core_error_log, core_kgate_channels) on the core database.")
+	fmt.Println("Provisioned core data schema (core_config, core_error_log, core_kgate_channels, core_users, core_services) on the core database.")
 }
 
 // readCoreConnection reads appDir's .env for its core connection's
@@ -152,6 +154,8 @@ func provisionSQL(ctx context.Context, dbType, dsn string) error {
 
 	stmts := append(configStatements(dbType), errorLogStatements(dbType)...)
 	stmts = append(stmts, kgateChannelStatements(dbType)...)
+	stmts = append(stmts, usersStatements(dbType)...)
+	stmts = append(stmts, servicesStatements(dbType)...)
 	for _, stmt := range stmts {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("running provisioning statement: %w\n%s", err, stmt)
@@ -339,6 +343,165 @@ func kgateChannelStatements(dbType string) []string {
 	}
 }
 
+// usersStatements returns core_users' provisioning statements for dbType —
+// a table plus core_user_upsert/core_user_set_status stored procedures.
+// user_id is the same value as auth.Subject(r) / the JWT "sub" claim
+// (see auth/context.go.tmpl's ContextWithService/Service doc comments and
+// core/users.go.tmpl's package doc comment) — this table is a minimal
+// local record (username/role/type/status), never a profile store; real
+// user info lives wherever it already does, kpass-backed or not.
+func usersStatements(dbType string) []string {
+	switch dbType {
+	case "mysql":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS core_users (" +
+				"user_id VARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"username VARCHAR(255) NOT NULL, " +
+				"user_role VARCHAR(255) NOT NULL DEFAULT '', " +
+				"user_type VARCHAR(255) NOT NULL DEFAULT '', " +
+				"status VARCHAR(32) NOT NULL DEFAULT 'active', " +
+				"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+				"updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
+			"DROP PROCEDURE IF EXISTS core_user_upsert",
+			"CREATE PROCEDURE core_user_upsert(IN p_user_id VARCHAR(255), IN p_username VARCHAR(255), IN p_user_role VARCHAR(255), IN p_user_type VARCHAR(255)) " +
+				"BEGIN " +
+				"INSERT INTO core_users (user_id, username, user_role, user_type, created_at, updated_at) " +
+				"VALUES (p_user_id, p_username, p_user_role, p_user_type, NOW(), NOW()) " +
+				"ON DUPLICATE KEY UPDATE username = p_username, user_role = p_user_role, user_type = p_user_type, updated_at = NOW(); " +
+				"END",
+			"DROP PROCEDURE IF EXISTS core_user_set_status",
+			"CREATE PROCEDURE core_user_set_status(IN p_user_id VARCHAR(255), IN p_status VARCHAR(32)) " +
+				"BEGIN " +
+				"UPDATE core_users SET status = p_status, updated_at = NOW() WHERE user_id = p_user_id; " +
+				"END",
+		}
+	case "postgres":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS core_users (" +
+				"user_id TEXT PRIMARY KEY, " +
+				"username TEXT NOT NULL, " +
+				"user_role TEXT NOT NULL DEFAULT '', " +
+				"user_type TEXT NOT NULL DEFAULT '', " +
+				"status TEXT NOT NULL DEFAULT 'active', " +
+				"created_at TIMESTAMPTZ NOT NULL DEFAULT now(), " +
+				"updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+			"CREATE OR REPLACE PROCEDURE core_user_upsert(p_user_id TEXT, p_username TEXT, p_user_role TEXT, p_user_type TEXT) " +
+				"LANGUAGE plpgsql AS $$ " +
+				"BEGIN " +
+				"INSERT INTO core_users (user_id, username, user_role, user_type, created_at, updated_at) " +
+				"VALUES (p_user_id, p_username, p_user_role, p_user_type, now(), now()) " +
+				"ON CONFLICT (user_id) DO UPDATE SET username = p_username, user_role = p_user_role, user_type = p_user_type, updated_at = now(); " +
+				"END; $$",
+			"CREATE OR REPLACE PROCEDURE core_user_set_status(p_user_id TEXT, p_status TEXT) " +
+				"LANGUAGE plpgsql AS $$ " +
+				"BEGIN " +
+				"UPDATE core_users SET status = p_status, updated_at = now() WHERE user_id = p_user_id; " +
+				"END; $$",
+		}
+	case "mssql":
+		return []string{
+			"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'core_users') " +
+				"CREATE TABLE core_users (" +
+				"[user_id] NVARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"username NVARCHAR(255) NOT NULL, " +
+				"user_role NVARCHAR(255) NOT NULL DEFAULT '', " +
+				"user_type NVARCHAR(255) NOT NULL DEFAULT '', " +
+				"status NVARCHAR(32) NOT NULL DEFAULT 'active', " +
+				"created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(), " +
+				"updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME())",
+			"CREATE OR ALTER PROCEDURE core_user_upsert " +
+				"@p_user_id NVARCHAR(255), @p_username NVARCHAR(255), @p_user_role NVARCHAR(255), @p_user_type NVARCHAR(255) AS " +
+				"BEGIN " +
+				"MERGE core_users AS target " +
+				"USING (SELECT @p_user_id AS user_id) AS src " +
+				"ON target.[user_id] = src.[user_id] " +
+				"WHEN MATCHED THEN UPDATE SET username = @p_username, user_role = @p_user_role, user_type = @p_user_type, updated_at = SYSUTCDATETIME() " +
+				"WHEN NOT MATCHED THEN INSERT ([user_id], username, user_role, user_type, created_at, updated_at) " +
+				"VALUES (@p_user_id, @p_username, @p_user_role, @p_user_type, SYSUTCDATETIME(), SYSUTCDATETIME()); " +
+				"END",
+			"CREATE OR ALTER PROCEDURE core_user_set_status " +
+				"@p_user_id NVARCHAR(255), @p_status NVARCHAR(32) AS " +
+				"BEGIN " +
+				"UPDATE core_users SET status = @p_status, updated_at = SYSUTCDATETIME() WHERE [user_id] = @p_user_id; " +
+				"END",
+		}
+	default:
+		return nil
+	}
+}
+
+// servicesStatements returns core_services' provisioning statements for
+// dbType — a table plus core_service_create/core_service_set_status
+// stored procedures. key_hash (not the plaintext key, which is never
+// stored — see core.CreateService) is UNIQUE inline in the CREATE TABLE
+// itself, rather than a separate CREATE UNIQUE INDEX statement, since
+// CREATE INDEX ... IF NOT EXISTS isn't portable across all three SQL
+// dialects the way CREATE TABLE IF NOT EXISTS is.
+func servicesStatements(dbType string) []string {
+	switch dbType {
+	case "mysql":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS core_services (" +
+				"name VARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"key_hash CHAR(64) NOT NULL UNIQUE, " +
+				"status VARCHAR(32) NOT NULL DEFAULT 'active', " +
+				"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+				"updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
+			"DROP PROCEDURE IF EXISTS core_service_create",
+			"CREATE PROCEDURE core_service_create(IN p_name VARCHAR(255), IN p_key_hash CHAR(64)) " +
+				"BEGIN " +
+				"INSERT INTO core_services (name, key_hash, created_at, updated_at) VALUES (p_name, p_key_hash, NOW(), NOW()); " +
+				"END",
+			"DROP PROCEDURE IF EXISTS core_service_set_status",
+			"CREATE PROCEDURE core_service_set_status(IN p_name VARCHAR(255), IN p_status VARCHAR(32)) " +
+				"BEGIN " +
+				"UPDATE core_services SET status = p_status, updated_at = NOW() WHERE name = p_name; " +
+				"END",
+		}
+	case "postgres":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS core_services (" +
+				"name TEXT PRIMARY KEY, " +
+				"key_hash CHAR(64) NOT NULL UNIQUE, " +
+				"status TEXT NOT NULL DEFAULT 'active', " +
+				"created_at TIMESTAMPTZ NOT NULL DEFAULT now(), " +
+				"updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+			"CREATE OR REPLACE PROCEDURE core_service_create(p_name TEXT, p_key_hash CHAR(64)) " +
+				"LANGUAGE plpgsql AS $$ " +
+				"BEGIN " +
+				"INSERT INTO core_services (name, key_hash, created_at, updated_at) VALUES (p_name, p_key_hash, now(), now()); " +
+				"END; $$",
+			"CREATE OR REPLACE PROCEDURE core_service_set_status(p_name TEXT, p_status TEXT) " +
+				"LANGUAGE plpgsql AS $$ " +
+				"BEGIN " +
+				"UPDATE core_services SET status = p_status, updated_at = now() WHERE name = p_name; " +
+				"END; $$",
+		}
+	case "mssql":
+		return []string{
+			"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'core_services') " +
+				"CREATE TABLE core_services (" +
+				"[name] NVARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"key_hash CHAR(64) NOT NULL UNIQUE, " +
+				"status NVARCHAR(32) NOT NULL DEFAULT 'active', " +
+				"created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(), " +
+				"updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME())",
+			"CREATE OR ALTER PROCEDURE core_service_create " +
+				"@p_name NVARCHAR(255), @p_key_hash CHAR(64) AS " +
+				"BEGIN " +
+				"INSERT INTO core_services ([name], key_hash, created_at, updated_at) VALUES (@p_name, @p_key_hash, SYSUTCDATETIME(), SYSUTCDATETIME()); " +
+				"END",
+			"CREATE OR ALTER PROCEDURE core_service_set_status " +
+				"@p_name NVARCHAR(255), @p_status NVARCHAR(32) AS " +
+				"BEGIN " +
+				"UPDATE core_services SET status = @p_status, updated_at = SYSUTCDATETIME() WHERE [name] = @p_name; " +
+				"END",
+		}
+	default:
+		return nil
+	}
+}
+
 func provisionMongo(ctx context.Context, uri string) error {
 	dbName, err := mongoDatabaseName(uri)
 	if err != nil {
@@ -379,8 +542,37 @@ func provisionMongo(ctx context.Context, uri string) error {
 	// this same field, so re-subscribing to an already-recorded channel
 	// stays a no-op rather than creating a duplicate row.
 	kgateChannelColl := client.Database(dbName).Collection("core_kgate_channels")
-	_, err = kgateChannelColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if _, err := kgateChannelColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "channel", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		return err
+	}
+
+	// Unique on user_id — the same value as auth.Subject(r) / the JWT
+	// "sub" claim (see core/users.go.tmpl) — core.CreateUser upserts on
+	// this field.
+	usersColl := client.Database(dbName).Collection("core_users")
+	if _, err := usersColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "user_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		return err
+	}
+
+	// Two unique indexes: name (a service's stable, human-assigned
+	// identifier) and key_hash (what VerifyServiceKey looks up by on
+	// every service-authenticated request) — never the plaintext key
+	// itself, which core.CreateService never stores.
+	servicesColl := client.Database(dbName).Collection("core_services")
+	if _, err := servicesColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "name", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		return err
+	}
+	_, err = servicesColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "key_hash", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 	return err

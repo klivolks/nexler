@@ -598,7 +598,18 @@ Usage:
       StartSession that swaps its default 24h session lifetime for 30
       days. Sessions are in-memory only — lost on restart, not shared
       across instances; swap the store before scaling beyond one
-      instance in production.
+      instance in production. When -auth is jwt or both AND -db is also
+      set, the app additionally gets middleware.RequireServiceAuth — a
+      second, wholly separate auth mechanism (checking an X-Api-Key
+      header against a new core_services table) for app-to-app calls,
+      independent of RequireAuth so a service-only route can never
+      accidentally accept an end-user JWT. That X-Api-Key must never be
+      embedded in any UI-facing code. core.CreateService/VerifyServiceKey/
+      RevokeService (core/services.go) manage it; a companion core_users
+      table (core/users.go) is a minimal local record keyed by the same
+      UserId as the JWT's "sub" claim (Username/UserRole/UserType/Status
+      only — not a profile store). Both tables are provisioned by
+      "nexler init db", not here.
 
       -db (default none) picks which database driver(s) get generated
       support in db/ — any comma-separated subset of mongo, mysql,
@@ -723,11 +734,15 @@ Usage:
       database (see {APPNAME}_DB_CORE_TYPE/_DSN in its .env): core_config
       (backing GetSetting/SetSetting), core_error_log (backing LogError,
       auto-called by middleware.Recover on a panic and by response.Error
-      on a 5xx), and core_kgate_channels (backing kgate's
+      on a 5xx), core_kgate_channels (backing kgate's
       Subscribe/Unsubscribe/ResumeAll channel registry, if "nexler init
-      kgate" has been run — see below) — each a table plus its own insert/
+      kgate" has been run — see below), core_users, and core_services
+      (backing API-key/service-to-service auth, if the app has -auth
+      jwt|both — see -auth above) — each a table plus its own insert/
       upsert stored procedure, for mysql/postgres/mssql, or a unique
-      index, for mongo. This is a separate, explicit step
+      index, for mongo. All five are provisioned unconditionally,
+      regardless of which optional features the app actually uses. This
+      is a separate, explicit step
       — not run automatically by "nexler create app" or by the generated
       app's own startup — since a physical database can be shared by
       several scaffolded apps (provisioning it from every one of them on
@@ -822,6 +837,31 @@ Usage:
       "nexler init docker" afterward. Refuses if release.yml already exists.
 
       Example: nexler init ci -dir ./myapp -registry github
+
+  nexler init kube [-dir <app-dir>] [-registry dockerhub|github] [-image <ref>] [-namespace <ns>] [-replicas <n>]
+      Adds k8s/deployment.yaml: a Secret (every real value from .env),
+      a Deployment (references the Secret via envFrom, TCP readiness/
+      liveness probes on the app's port, conservative default
+      resources.requests/limits), and a ClusterIP Service, as three
+      "---"-separated documents in one file. -image sets the image:
+      reference directly; otherwise -registry picks how it's derived —
+      "github" reads ghcr.io/<owner>/<repo>:latest straight from go.mod's
+      module path (erroring if that path isn't github.com/<owner>/<repo>
+      shaped — nexler never shells out to git to guess an owner),
+      "dockerhub" prompts for your Docker Hub username and derives
+      <user>/<repo>:latest — prompted interactively (both -registry
+      itself, and the username for dockerhub) if -image/-registry weren't
+      passed. -namespace is omitted from every resource by default (so
+      kubectl's -n flag / current context decides) unless set explicitly.
+      -replicas defaults to 1. k8s/deployment.yaml is added to .gitignore
+      (created if the app doesn't have one yet) — unlike docker-compose.yml
+      (which only references .env by path at container runtime), the
+      Secret document here embeds .env's actual values, since Kubernetes
+      has no equivalent way to read a local file at deploy time. Refuses
+      if k8s/deployment.yaml already exists.
+
+      Example: nexler init kube -dir ./myapp -registry github
+      Example: nexler init kube -dir ./myapp -image ghcr.io/me/myapp:latest -replicas 3
 
   nexler add <package>[@version] [-dir <app-dir>] [-as <name>]
       Vendors a static asset package from npm into an existing app, without ever giving the

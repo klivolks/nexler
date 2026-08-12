@@ -1,0 +1,211 @@
+package core
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+{{- if eq .CoreDBAccessor "Mongo" }}
+	"{{ .ModulePath }}/db"
+	"{{ .ModulePath }}/mongo"
+{{- else }}
+	"{{ .ModulePath }}/{{ .CoreDB }}"
+{{- end }}
+)
+
+// User is a core_users record — a minimal local mapping, not a profile
+// store. UserId is the same value as auth.Subject(r) / the JWT "sub"
+// claim (see middleware.RequireAuth and auth/context.go). Real user info
+// (name, email, etc. beyond Username/UserRole/UserType) lives wherever it
+// already does — another app or table, kpass-backed or not — never here.
+type User struct {
+	UserId    string
+	Username  string
+	UserRole  string
+	UserType  string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+{{- if eq .CoreDBAccessor "Mongo" }}
+
+type userDoc struct {
+	UserId    string    `bson:"user_id"`
+	Username  string    `bson:"username"`
+	UserRole  string    `bson:"user_role"`
+	UserType  string    `bson:"user_type"`
+	Status    string    `bson:"status"`
+	CreatedAt time.Time `bson:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at"`
+}
+
+func (d userDoc) toUser() User {
+	return User{UserId: d.UserId, Username: d.Username, UserRole: d.UserRole, UserType: d.UserType, Status: d.Status, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
+}
+
+func userCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("core_users"), true
+}
+
+// GetUser returns userID's core_users record, and whether it exists.
+func GetUser(ctx context.Context, userID string) (User, bool, error) {
+	coll, ok := userCollection()
+	if !ok {
+		return User{}, false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc, err := mongo.GetOne[userDoc](ctx, coll, userDoc{UserId: userID})
+	if err != nil {
+		return User{}, false, nil
+	}
+	return doc.toUser(), true, nil
+}
+
+// ListUsers returns every core_users record. No pagination — fine for a
+// first release; add a limit/cursor here if the table grows large enough
+// to matter.
+func ListUsers(ctx context.Context) ([]User, error) {
+	coll, ok := userCollection()
+	if !ok {
+		return nil, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	docs, err := mongo.Get[userDoc](ctx, coll, userDoc{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]User, len(docs))
+	for i, d := range docs {
+		out[i] = d.toUser()
+	}
+	return out, nil
+}
+
+// CreateUser upserts a core_users record — call this from your own
+// registration/login flow once a user's identity is known (e.g. right
+// after issuing their first JWT); not auto-wired into
+// middleware.RequireAuth. Preserves the existing CreatedAt on an update —
+// only Username/UserRole/UserType/UpdatedAt change.
+func CreateUser(ctx context.Context, u User) error {
+	coll, ok := userCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	status := u.Status
+	if status == "" {
+		status = "active"
+	}
+	now := time.Now().UTC()
+	createdAt := now
+	if existing, err := mongo.GetOne[userDoc](ctx, coll, userDoc{UserId: u.UserId}); err == nil {
+		createdAt = existing.CreatedAt
+	}
+	return mongo.Set(ctx, coll, userDoc{UserId: u.UserId}, userDoc{
+		UserId: u.UserId, Username: u.Username, UserRole: u.UserRole, UserType: u.UserType,
+		Status: status, CreatedAt: createdAt, UpdatedAt: now,
+	})
+}
+
+// SetUserStatus updates userID's Status (e.g. "active"/"disabled"). A
+// disabled user's existing, unexpired JWT is still cryptographically
+// valid — enforcing Status is a deliberate, separate check your own
+// middleware/handlers must call; it isn't automatic.
+func SetUserStatus(ctx context.Context, userID, status string) error {
+	coll, ok := userCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc, err := mongo.GetOne[userDoc](ctx, coll, userDoc{UserId: userID})
+	if err != nil {
+		return fmt.Errorf("core: user %q not found", userID)
+	}
+	doc.Status = status
+	doc.UpdatedAt = time.Now().UTC()
+	return mongo.Set(ctx, coll, userDoc{UserId: userID}, doc)
+}
+{{- else }}
+
+type userRow struct {
+	UserId    string    `db:"user_id"`
+	Username  string    `db:"username"`
+	UserRole  string    `db:"user_role"`
+	UserType  string    `db:"user_type"`
+	Status    string    `db:"status"`
+	CreatedAt time.Time `db:"created_at"`
+	UpdatedAt time.Time `db:"updated_at"`
+}
+
+// GetUser returns userID's core_users record, and whether it exists. A
+// plain parameterized SELECT — no stored procedure needed for a
+// single-table read (same reasoning GetSetting already uses).
+func GetUser(ctx context.Context, userID string) (User, bool, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return User{}, false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	rows, err := {{ .CoreDB }}.Query[userRow](ctx, conn, {{ printf "%q" .CoreUserGetQuery }}, userID)
+	if err != nil {
+		return User{}, false, err
+	}
+	if len(rows) == 0 {
+		return User{}, false, nil
+	}
+	r := rows[0]
+	return User{UserId: r.UserId, Username: r.Username, UserRole: r.UserRole, UserType: r.UserType, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, true, nil
+}
+
+// ListUsers returns every core_users record. No pagination — fine for a
+// first release; add a limit/cursor here if the table grows large enough
+// to matter. No dialect-specific text needed — a plain, unfiltered
+// SELECT reads identically across mysql/postgres/mssql.
+func ListUsers(ctx context.Context) ([]User, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return nil, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	rows, err := {{ .CoreDB }}.Query[userRow](ctx, conn, "SELECT user_id, username, user_role, user_type, status, created_at, updated_at FROM core_users")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]User, len(rows))
+	for i, r := range rows {
+		out[i] = User{UserId: r.UserId, Username: r.Username, UserRole: r.UserRole, UserType: r.UserType, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	}
+	return out, nil
+}
+
+// CreateUser upserts a core_users record, via the core_user_upsert stored
+// procedure (see `nexler init db`) — call this from your own
+// registration/login flow once a user's identity is known; not
+// auto-wired into middleware.RequireAuth. The procedure never touches
+// created_at on an update — only username/user_role/user_type/updated_at.
+func CreateUser(ctx context.Context, u User) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_user_upsert", u.UserId, u.Username, u.UserRole, u.UserType)
+	return err
+}
+
+// SetUserStatus updates userID's Status (e.g. "active"/"disabled"), via
+// the core_user_set_status stored procedure. A disabled user's existing,
+// unexpired JWT is still cryptographically valid — enforcing Status is a
+// deliberate, separate check your own middleware/handlers must call; it
+// isn't automatic.
+func SetUserStatus(ctx context.Context, userID, status string) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_user_set_status", userID, status)
+	return err
+}
+{{- end }}

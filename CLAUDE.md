@@ -300,14 +300,17 @@ so an explicit header always wins over the inferred one.
 
 `main.go` gets its listen address from `config.C.Addr()` instead of a hardcoded
 `const addr`. `config.C` (`config/config.go`, package-level `var C = load()`, so it's
-ready before `main()` runs with no explicit call needed) currently holds just `Host`/`Port`,
-read from two env vars namespaced per-app as `{APPNAME}_HOST`/`{APPNAME}_PORT` (e.g. `-module
-my-app` → `MY_APP_HOST`/`MY_APP_PORT`) — the prefix is computed once, at scaffold time, by
+ready before `main()` runs with no explicit call needed) currently holds `Host`/`Port`
+(read from two env vars namespaced per-app as `{APPNAME}_HOST`/`{APPNAME}_PORT`, e.g. `-module
+my-app` → `MY_APP_HOST`/`MY_APP_PORT` — the prefix is computed once, at scaffold time, by
 `envPrefix` in `scaffold.go` (uppercases letters, keeps digits, replaces everything else with
-`_`) and baked into `config.go.tmpl`/`dotenv.tmpl` as `{{ .EnvPrefix }}`. This is meant to grow:
-the package doc comment on `config.go.tmpl` says more settings (flags, etc.) land here later as
-`Config` gains fields — don't reach for a different mechanism for the next env-driven setting,
-extend `Config`/`load()` instead.
+`_`) and baked into `config.go.tmpl`/`dotenv.tmpl` as `{{ .EnvPrefix }}`) plus `SwaggerEnabled`
+(see below). This is meant to grow: the package doc comment on `config.go.tmpl` says more
+settings (flags, etc.) land here later as `Config` gains fields — don't reach for a different
+mechanism for the next env-driven setting, extend `Config`/`load()` instead. `getEnvOr`
+(strings) and `getEnvBoolOr` (`"true"/"1"` → true, `"false"/"0"` → false, anything else/empty →
+the fallback) are the two parsing helpers `load()` uses; a future non-string/non-bool setting
+gets its own `getEnv<Type>Or` alongside them, same pattern.
 
 `.env` (scaffolded at the app root, `{APPNAME}_HOST=` / `{APPNAME}_PORT=8080` — empty `HOST`
 means "all interfaces", preserving the old hardcoded `:8080` default) is read by `config.go`'s
@@ -315,6 +318,37 @@ hand-rolled `loadDotEnv` (`bufio.Scanner` over `KEY=VALUE` lines — no third-pa
 consistent with the generated `go.mod` having none). A key already present in the real
 environment is never overwritten by `.env` — real env vars always win, so `.env` is just a
 committed-or-not local default, not an override mechanism.
+
+**`{APPNAME}_SWAGGER_ENABLED`** (`Config.SwaggerEnabled`, default `true`, pre-populated in
+`.env`) gates `GET /swagger` (the bundled Swagger UI, `templates/swagger.html`) and
+`GET /openapi.json` (`HandleOpenAPI`, which reflects `openapi.Spec()` fresh on every request) —
+set to `false` in production to 404 both. Both routes are still *registered* unconditionally in
+`handlers/home/home.go`'s `Register`; the toggle is checked **inside each handler**
+(`HandleOpenAPI`, and a new `HandleSwagger` wrapping `templates.ServePage("swagger.html")`),
+writing `http.NotFound` when disabled — deliberately not "just don't register them," because
+`GET /` (the homepage route, registered by every app regardless of `-ui`) is a *subtree* pattern
+in Go's enhanced `net/http.ServeMux`: it matches any path with no more specific registration, so
+an unregistered `/swagger`/`/openapi.json` wouldn't 404 at all, it would silently fall through to
+the homepage handler (a `200` with the wrong body) — confirmed by hitting a real disabled-Swagger
+app before landing on the handler-level-guard design. Every other route's own registration is
+untouched either way. The non-`-ui` static homepage (`templates/html/home.html`, served
+verbatim via `templates.ServePage` — not re-rendered per request, so it can't check
+`config.C.SwaggerEnabled` server-side the way a Go template could) hides its "View API
+Docs" button client-side instead: a small inline `<script>` `fetch("/openapi.json")`s on
+page load and sets the button's `display: none` on a non-OK response or a network error
+— no external JS dependency, consistent with this template tree's "no CDN" precedent.
+This is a change to the static HTML content itself, not to `home.go.tmpl`'s Go logic, so
+it's **not** part of `ensureSwaggerToggle`'s retrofit below — `templates/html/home.html`
+is a hand-editable content file once scaffolded (same "written once, not lazily
+recreated" precedent as every other homepage/`-response html` content file), so an
+already-scaffolded app's copy is left untouched by `nexler update`; only a freshly
+scaffolded app gets the script. An app scaffolded before this setting existed picks it
+up via `nexler update`
+(`ensureSwaggerToggle` in `route.go`, registered in `update.go`'s `updateChecks`) — patches
+`config.go`/`home.go` via the same fixed-literal-anchor technique `ensureKgateResumeAll` already
+established (see "`nexler init kgate`" below), and appends `{PREFIX}_SWAGGER_ENABLED=true` to
+`.env` **only if that key is missing** — never overwriting an already-present value, since a
+production deployment may have deliberately set it to `false`.
 
 ### Authentication (`-auth none|jwt|session|both`, `-remember-me`)
 
@@ -392,6 +426,111 @@ primitives + `RequireAuth`; you call `auth.IssueJWT`/`auth.StartSession` from yo
 login handler (scaffolded separately via `nexler create /login -module ...`) once
 credentials are verified — matching every other generated handler's `// TODO: call
 <pkg>'s service` style, rather than generating a business-flavored route.
+
+### API-key (service-to-service) auth (`middleware.RequireServiceAuth`)
+
+Apps with `-auth jwt|both` and `-db` set also get a second, wholly separate auth
+mechanism for app-to-app calls: `middleware.RequireServiceAuth` (`middleware/
+service_auth.go.tmpl`), checking the `X-Api-Key` header — nexler's existing convention
+for this concept (the `-auth none` stub in `middleware/auth.go.tmpl` already checks for
+this same header's presence, unverified) — against a new `core_services` table, backed
+by `core/services.go.tmpl`'s `CreateService`/`VerifyServiceKey`/`RevokeService`.
+Deliberately **independent** of `RequireAuth`, not a third fallback alongside JWT/session
+the way `-auth both` already tries JWT then session on the same route: a service-only
+route must never be able to accept an end-user JWT just because it happens to share
+middleware with a user-facing one. A route is either user-facing (`-protected`,
+`RequireAuth`) or service-only (`RequireServiceAuth`) — never both via one combined
+check. **The `X-Api-Key` it validates must never be embedded in any UI-facing code**
+(browser JS, a mobile app binary) — treat it the same as a database credential; nexler
+has no way to enforce this at the framework level, so it's a documented discipline, not
+a runtime check.
+
+`core.CreateService(ctx, name) (key string, err error)` generates a random 32-byte key
+(`crypto/rand`, hex-encoded), stores only its SHA-256 hash in `core_services`, and
+returns the plaintext key **exactly once** — it is never stored or retrievable again.
+`VerifyServiceKey(ctx, key) (name string, ok bool, err error)` hashes an incoming key and
+looks it up by that hash (never the plaintext); `RequireServiceAuth` calls this and, on
+success, attaches the calling service's `Name` to the request context via a **new**
+`auth.ContextWithService`/`auth.Service(r)` pair — a distinct context key from
+`ContextWithSubject`/`Subject`, so a service-authenticated request and a
+user-authenticated one can never be confused at the type level. `RevokeService(ctx,
+name)` sets `Status` to `"revoked"`; `VerifyServiceKey` rejects a revoked service's key
+from that point on. Same "primitives only" precedent as `-auth`'s missing `/login`
+route: nexler generates no CRUD routes for creating/listing/revoking services — call
+these functions from your own code (an internal admin handler, a one-off script, etc.).
+
+`core/users.go.tmpl` (`core.GetUser`/`CreateUser`/`SetUserStatus`, `core_users` table)
+is a **minimal local record**, explicitly *not* a profile store: `UserId` is the same
+value as `auth.Subject(r)` / the JWT `sub` claim (documented in the generated code, not
+just implied), plus `Username`/`UserRole`/`UserType` (for future org-wide/subsection-
+scoped data access) and `Status` (a local active/disabled kill-switch — a disabled
+user's existing, unexpired JWT is still cryptographically valid, so enforcing `Status`
+is a deliberate, separate check your own middleware/handlers must call; it is not
+automatic). Real user profile data (name, email, etc.) stays wherever it already lives —
+another app or table, whether or not that app uses kpass (see "`nexler init kpass`"
+below — kpass itself is confirmed to be a pure permission-check service with no user
+profile store of its own). `CreateUser` is **not** auto-called from `RequireAuth` on
+every JWT verification (that would add a DB write/read to every authenticated request)
+— call it from your own registration/login flow once a user's identity is known.
+
+Both tables' schema is provisioned by `nexler init db` (see below) **unconditionally**
+for every `-db` app, regardless of `-auth` choice — same "zero-cost-when-unused"
+precedent `core_kgate_channels` already established. Only the *Go code* using them
+(`core/users.go`, `core/services.go`, `middleware/service_auth.go`, plus
+`ContextWithService`/`Service` in `auth/context.go`) is gated on `-auth jwt|both` — a
+new per-file skip in `scaffold.go`'s `NewApp`, alongside the existing whole-`core/`-
+directory `HasCoreDB` gate. An app scaffolded before this existed picks it up via
+`nexler update` (`ensureServiceAuth` in `internal/scaffold/serviceauth.go`) — writes
+the three new files if missing (full-file render, same "pure generated infra" reasoning
+as `ensureAuthSubjectContext`) and append-only-adds `ContextWithService`/`Service` to
+`auth/context.go` if missing; a silent no-op for an app without both a core DB
+connection and a JWT-capable `-auth` choice, same precedent as every other retrofit
+skipping a feature the app was never eligible for. Never re-runs `nexler init db` itself
+— table provisioning stays a separate, explicit, manual step.
+
+#### Admin API for `core_users`/`core_services`
+
+Same eligibility gate as above (`-auth jwt|both` + `-db`): every such app also gets a
+Swagger-documented admin API, hand-authored (not routed through `route.go`'s `NewRoute`
+machinery, unlike a `nexler create <route>` output — these are infrastructure endpoints
+with real, from-day-one field definitions, not generic `-methods` TODO stubs, so — like
+`handlers/home/home.go.tmpl` — each is one self-contained file rather than the usual
+handlers/services/store/models four-layer split):
+
+- `handlers/admin/users/users.go.tmpl`: `GET /admin/users` (list, `core.ListUsers` — no
+  pagination this release), `POST /admin/users` (create/upsert, `core.CreateUser`),
+  `GET /admin/users/{id}` (`core.GetUser`), `PATCH /admin/users/{id}/status`
+  (`core.SetUserStatus`).
+- `handlers/admin/services/services.go.tmpl`: `GET /admin/services` (list, `core.
+  ListServices` — metadata only, `Service` has no key field at all so a key can never
+  leak through this endpoint by construction), `POST /admin/services` (`core.
+  CreateService` — the plaintext key is in the JSON response body exactly once, same
+  "never retrievable again" contract as `core.CreateService` itself), `GET /admin/
+  services/{name}` (`core.GetService` — new, metadata-only, added alongside `ListUsers`/
+  `ListServices` specifically to support these endpoints), `POST /admin/services/{name}/
+  revoke` (`core.RevokeService`).
+
+Every handler wraps only in `middleware.RequireAuth` — **no role/authorization check**.
+This is deliberate, not an oversight: `RequireAuth` confirms the caller is
+*authenticated*, not that they're *allowed* to manage other users/services. Both
+generated files' package doc comments say so explicitly and point at `kpass.Check` (once
+`nexler init kpass` has been run) as the expected way to add that check per-app —
+permission enforcement is intentionally left out of nexler's own generated code, same
+"primitives only" precedent as everywhere else, rather than nexler guessing at an
+authorization scheme every app would actually want.
+
+Wired into `routes/protected/protected.go` at `NewApp` time via `route.go`'s
+`wireAggregator` — the exact same post-hoc-wiring mechanism `kgate`/`kpass` already use,
+called right after `NewApp`'s main `fs.WalkDir` pass (same point `cfg.UI`'s
+`writeAppUIHomepage` call already runs), since `wireAggregator` needs the aggregator file
+to already exist on disk. Retrofits via `ensureAdminRoutes` (`serviceauth.go`, alongside
+`ensureServiceAuth`) — same eligibility gate, writes either handler file if missing, and
+wires each into `protected.go` **only if not already imported**: `wireAggregator` itself
+*errors* (not a silent no-op) on an already-present import, since for its usual caller
+(a fresh `nexler create <route>`) that's a real programmer-error signal — a retrofit
+re-run is exactly the case where "already wired" is the expected, common outcome, so
+`ensureAdminRoutes` pre-checks with the same substring test `wireAggregator` uses
+internally and skips the call rather than treating it as a failure.
 
 ### Database connections (`-db mongo,mysql,postgres,mssql`)
 
@@ -709,14 +848,18 @@ Independent of whatever business data an app's own `store/` packages manage, eve
 gated on `hasDB` the same way `db/` is) — a stable, engine-independent function API
 (`core.GetSetting(ctx, key)` / `core.SetSetting(ctx, key, value)`), the first of several
 planned "core data" types (this was deliberately phased: Config first proves the whole
-pattern, the rest are mechanical repetition of it). Two more are built the same way:
+pattern, the rest are mechanical repetition of it). More are built the same way:
 `core/errorlog.go.tmpl` (`core.LogError` — see "Request decoding and response envelope"
-and `middleware.Recover` above) and `core/kgate_channels.go.tmpl` (`core.AddKgateChannel`/
+and `middleware.Recover` above), `core/kgate_channels.go.tmpl` (`core.AddKgateChannel`/
 `RemoveKgateChannel`/`ListKgateChannels` — see "`nexler init kgate`" below; unlike Config/
 ErrorLog this one is generated for every `-db` app regardless of whether `nexler init
 kgate` is ever run, same zero-cost-when-unused precedent as ErrorLog always being
-provisioned regardless of whether a panic is ever caught). Session log and API keys
-remain planned, not yet built. "Engine-independent function API" deliberately means a
+provisioned regardless of whether a panic is ever caught), and `core/users.go.tmpl`/
+`services.go.tmpl` (`core.GetUser`/`CreateUser`/`SetUserStatus`,
+`core.CreateService`/`VerifyServiceKey`/`RevokeService` — see "API-key (service-to-service)
+auth" above; unlike Config/ErrorLog/kgate-channels, these two are gated on `-auth`
+too, not just `-db` — see that section for the full picture). Session log remains
+planned, not yet built. "Engine-independent function API" deliberately means a
 stable Go function signature, **not** a literal Go `interface` type — the core DB engine
 is already fixed per-app at `-core <type>` scaffold time, so there's only ever one
 concrete implementation compiled in; runtime polymorphism would buy nothing.
@@ -733,9 +876,11 @@ schema, so a real dialect-native upsert (`ON DUPLICATE KEY UPDATE` / `ON CONFLIC
 UPDATE` / `MERGE`) is safe to hand-write.
 
 Provisioning (`CREATE TABLE IF NOT EXISTS core_config` + the `core_config_upsert`
-procedure, or a unique Mongo index) is **not** done by `create app` or by the generated
-app's own startup — it's a separate, explicit `nexler init db [-dir <app-dir>]` command
-(`cmd/nexler/initdb.go`), reading the target app's `.env` for `{PREFIX}_DB_CORE_TYPE`/`_DSN`
+procedure, or a unique Mongo index — and the same shape for `core_error_log`,
+`core_kgate_channels`, `core_users`, and `core_services`) is **not** done by `create app`
+or by the generated app's own startup — it's a separate, explicit `nexler init db [-dir
+<app-dir>]` command (`cmd/nexler/initdb.go`), reading the target app's `.env` for
+`{PREFIX}_DB_CORE_TYPE`/`_DSN`
 the same way `route.go`'s `readCoreDBType` does. Deliberate: a physical database can be
 shared by several scaffolded apps (auto-provisioning on every app's every boot would be
 redundant), and a common production setup runs the app itself with a low-privilege DB
@@ -848,6 +993,25 @@ hand-rewritten?" guard as `ensureResponseJSONRaw`/`ensureJWTClaims` if `Register
 match the known original — errors out naming the file and the exact snippet to add by hand,
 rather than silently overwriting a customized `Register`.
 
+`Register` also documents `POST /webhooks/kgate` with `openapi.Register` (right after the
+`mux.HandleFunc` call, `ReqType: webhookEvent{}` — the file's own already-exported-field struct,
+reused as-is rather than adding a new type — `ReqContentType: "application/json"`, no `RespType`
+since the handler writes no JSON body on success, `Protected: false` since this route
+authenticates via the HMAC `X-Signature` check inside `HandleWebhook`, not
+`middleware.RequireAuth`, so `Protected: true` would be misleading) — previously the one
+generated route invisible in `/openapi.json`/Swagger UI, unlike every route `nexler create
+<route>` generates, which always pairs its `mux.HandleFunc` with `openapi.Register`. `Register`
+also `Subscribe`s to a channel literally named `"test"` alongside `ResumeAll` (a sibling
+statement, not nested in `ResumeAll`'s own error branch — a `ResumeAll` failure shouldn't skip
+attempting this) — a built-in smoke test that the whole pipeline (core DB registry + WebSocket
+connectivity) actually works end to end on a fresh app; the generated comment says it's safe to
+leave in (`Subscribe` is idempotent for an already-subscribed channel) or remove once kgate's
+wiring is confirmed. Both retrofit via `ensureKgateOpenAPIAndTestSubscribe` (`kgate.go`,
+registered in `update.go`'s `updateChecks` *after* `ensureKgateResumeAll` — its anchor is
+`kgateRegisterPatched`, the body `ensureKgateResumeAll`'s own patch produces, so it depends on
+that one having already run), same anchor-based-patch-plus-import-insertion shape as
+`ensureKgateResumeAll` itself.
+
 Because a restart's `ResumeAll` can only recover channel *names* from the database, not
 arbitrary handler closures, every channel — whether from a live subscription or the
 webhook fallback below — is dispatched to a **single** generated `handleEvent(ctx,
@@ -894,6 +1058,60 @@ convention as `KPASS_*` — shared vendor credentials, not per-app.
 per-dialect style — `core_kgate_channel_add`/`_remove` stored procedures for SQL backends,
 a unique index on `channel` for Mongo) — needed before `Subscribe`/`Unsubscribe`/
 `ResumeAll` will actually work against a real database.
+
+#### `nexler init kube`: Kubernetes manifest
+
+`nexler init kube [-dir <app-dir>] [-registry dockerhub|github] [-image <ref>] [-namespace
+<ns>] [-replicas <n>]` (`cmd/nexler/initkube.go` → `scaffold.NewKube` in
+`internal/scaffold/kube.go`) adds `k8s/deployment.yaml` to an *existing* generated app —
+the same "pure local file scaffolding, no live network connection" shape as `nexler init
+docker`, and the counterpart that actually runs what `init docker`/`init ci` build and
+publish. One file, three `---`-separated YAML documents: a `Secret` (`<app>-env`,
+`stringData` populated from every real `KEY=VALUE` line in `.env`, via a new
+`readEnvVars` — `readEnvPort`'s parsing generalized from "just the `_PORT=` line" to
+"every line, in file order"), a `Deployment` (`envFrom: - secretRef` referencing that
+Secret, `tcpSocket` readiness/liveness probes on the app's `.env` port — TCP rather than
+HTTP because no generated app exposes a health-check route today — and conservative
+default `resources.requests`/`limits` as a starting point to tune), and a `ClusterIP`
+`Service` on the same port. Refuses if the file already exists, same precedent as
+`NewDocker`/`NewCI`.
+
+Unlike `init ci`'s GitHub Actions workflows — which are fully static, resolving
+`ghcr.io/<owner>/<repo>` or `<dockerhub-user>/<repo>` at *workflow run time* via GitHub's
+own context variables (`${{ github.repository_owner }}`, `${{ secrets.DOCKERHUB_USERNAME
+}}`), so nexler itself never computes an image string for them — `k8s/deployment.yaml` is
+applied directly by `kubectl`, so it needs a concrete, static `image:` value baked in at
+scaffold time. That resolution is split into an exported `scaffold.ResolveKubeImage(appDir,
+image, registry, dockerHubUser)`, kept deliberately non-interactive (this repo's prompting
+always lives in `cmd/nexler`, never `internal/scaffold`) so `internal/scaffold`'s
+"pure, embed-only, no network/git access" claim (see "What this is" above) stays true here
+too: `-image`, when set, always wins outright; `-registry github` derives
+`ghcr.io/<owner>/<repo>:latest` purely by parsing `go.mod`'s own module path (the existing
+`readModulePath`) — erroring, rather than guessing, if that path isn't
+`github.com/<owner>/<repo>`-shaped (deliberately *not* shelling out to `git remote` to
+discover this, preserving the "scaffolding never touches git" rule); `-registry dockerhub`
+derives `<user>/<repo>:latest`, where `<user>` has no local source of truth at all (unlike a
+GitHub owner, a Docker Hub username isn't recoverable from any file already on disk) — so
+`cmd/nexler/initkube.go` prompts for it directly (`promptRequired`, same pattern
+`initci.go` already established for `-registry` itself) and passes it through.
+`appServiceName(appDir)` (factored out of `docker.go`, where it used to be inlined as
+`NewDocker`'s own `service` variable — now shared, since `kube.go` needs the identical
+value for the Docker Hub image name, every resource's name, and the pod-selector label) is
+the same `sanitizeIdent(filepath.Base(appDir))` derivation `docker-compose.yml`'s service
+name already used.
+
+`-namespace` is omitted from every resource's `metadata` entirely when left blank (the
+default) — `kubectl apply -n <ns>` or the current context decides, rather than a namespace
+being silently hardcoded into a file that might get applied against any cluster/namespace.
+`-replicas` defaults to `1`.
+
+`k8s/deployment.yaml` is added to `.gitignore` (created if the app doesn't have one yet,
+same `ensureGitignoreLine` helper `init docker` already uses for `docker-compose.yml`) —
+a stronger case than `docker-compose.yml` ever was: `docker-compose.yml` only *references*
+`.env` via `env_file:` at container-runtime, never containing a secret value itself, but
+Kubernetes has no equivalent "read a local `.env` file at deploy time" mechanism — the only
+way to get an app's real env vars into the cluster at all is to bake them into the Secret
+document above, so this file is genuinely secret-bearing and must never be committed.
 
 ### `nexler add`: vendoring static assets from npm
 

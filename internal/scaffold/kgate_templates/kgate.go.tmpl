@@ -48,6 +48,7 @@ import (
 
 	"{{ .ModulePath }}/apiclient"
 	"{{ .ModulePath }}/core"
+	"{{ .ModulePath }}/openapi"
 
 	"github.com/gorilla/websocket"
 )
@@ -292,9 +293,30 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 // or fail app startup.
 func Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /webhooks/kgate", HandleWebhook)
+	// Protected is left false (the default): this route authenticates via
+	// the HMAC X-Signature check in HandleWebhook above, not
+	// middleware.RequireAuth, so Protected: true here would be misleading.
+	openapi.Register(openapi.Operation{
+		Method:         "POST",
+		Path:           "/webhooks/kgate",
+		OperationID:    "kgateWebhook",
+		Summary:        "POST /webhooks/kgate",
+		Tags:           []string{"kgate"},
+		ReqType:        webhookEvent{},
+		ReqContentType: "application/json",
+	})
 	go func() {
 		if err := ResumeAll(context.Background()); err != nil {
 			log.Printf("kgate: resuming channels: %v", err)
+		}
+		// Subscribes to a channel named "test" as a built-in smoke test —
+		// verifies the whole pipeline (core DB registry + WebSocket
+		// connectivity) works end to end on a fresh app. Subscribe is
+		// idempotent for an already-subscribed channel, so this is safe to
+		// leave in; remove it once you've confirmed kgate is wired
+		// correctly, or if a permanent "test" channel isn't wanted.
+		if err := Subscribe(context.Background(), "test"); err != nil {
+			log.Printf("kgate: subscribing to test channel: %v", err)
 		}
 	}()
 }

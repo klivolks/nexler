@@ -115,6 +115,7 @@
         <a href="#cmd-init-kgate">init kgate</a>
         <a href="#cmd-init-docker">init docker</a>
         <a href="#cmd-init-ci">init ci</a>
+        <a href="#cmd-init-kube">init kube</a>
         <a href="#cmd-update">update</a>
         <a href="#cmd-version">version / help</a>
       </div>
@@ -127,6 +128,8 @@
       <div class="toc-group">
         <h5>Key concepts</h5>
         <a href="#concept-auth">Authentication</a>
+        <a href="#concept-service-auth">API-key auth</a>
+        <a href="#cmd-admin-api">Admin API</a>
         <a href="#concept-db">Database connections</a>
         <a href="#concept-html">HTML responses</a>
         <a href="#concept-helpers">Query helper packages</a>
@@ -331,7 +334,7 @@ nexler add @popperjs/core</pre></div>
         <h3><code>nexler init db</code></h3>
         <span class="badge badge-network">needs network</span>
         <div class="cmd-line">nexler init db [-dir &lt;app-dir&gt;]</div>
-        <p>Provisions a generated app's "core" system data on its actual core database connection (read from <code>.env</code>'s <code>{APPNAME}_DB_CORE_TYPE</code>/<code>_DSN</code>): <code>core_config</code> (backing <code>GetSetting</code>/<code>SetSetting</code>), <code>core_error_log</code> (backing <code>LogError</code>, auto-called on a recovered panic or any 5xx response), and <code>core_kgate_channels</code> (backing kgate's channel registry, if <code>init kgate</code> has been run) — each a table plus its own stored procedure for mysql/postgres/mssql, or a unique index for mongo.</p>
+        <p>Provisions a generated app's "core" system data on its actual core database connection (read from <code>.env</code>'s <code>{APPNAME}_DB_CORE_TYPE</code>/<code>_DSN</code>): <code>core_config</code> (backing <code>GetSetting</code>/<code>SetSetting</code>), <code>core_error_log</code> (backing <code>LogError</code>, auto-called on a recovered panic or any 5xx response), <code>core_kgate_channels</code> (backing kgate's channel registry, if <code>init kgate</code> has been run), <code>core_users</code>, and <code>core_services</code> (backing API-key/service-to-service auth, if the app has <code>-auth jwt|both</code>) — each a table plus its own stored procedure for mysql/postgres/mssql, or a unique index for mongo. All five are provisioned unconditionally on every <code>-db</code> app regardless of which optional features are actually used.</p>
         <p>This is a deliberately separate, explicit step — not run automatically by <code>create app</code> or by the app's own startup, since a physical database can be shared by several apps and production setups often run with a low-privilege DB user that can't run DDL at all. Every statement is idempotent — safe to run again, including against a database another app already provisioned. Requires <code>-db</code> to have been set at <code>create app</code> time.</p>
         <div class="code-block"><pre>nexler init db -dir ./myapp</pre></div>
       </div>
@@ -345,6 +348,21 @@ nexler add @popperjs/core</pre></div>
         <p>Adds a client for KPass (Klivolks' permission-check service) to an existing app: <code>kpass/kpass.go</code> (<code>Check</code>/<code>Allowed</code>, plus <code>UserIDFromRequest</code> when the app has <code>-auth jwt|session|both</code>) and <code>KPASS_URL</code>/<code>KPASS_CLIENT_ID</code>/<code>KPASS_API_SECRET</code> added to <code>.env</code> (blank, for you to fill in) if not already present.</p>
         <p><code>Check(ctx, userID, resource, extra)</code> posts to <code>{KPASS_URL}/permission/check/</code> and returns KPass's full response (status, message, access, user role, user type) — kept separate from <code>Allowed</code> (a plain yes/no helper) so callers needing more, e.g. restricting data by role, call <code>Check</code> directly. Unlike <code>init db</code>, this needs no network access — pure local file scaffolding, safe to re-run.</p>
         <div class="code-block"><pre>nexler init kpass -dir ./myapp</pre></div>
+        <p>Usage — call this from any handler you want permission-gated, typically right after (or instead of) <code>middleware.RequireAuth</code>:</p>
+        <div class="code-block"><pre>func HandleUsersCreate(w http.ResponseWriter, r *http.Request) {
+	userID, ok := kpass.UserIDFromRequest(r)  <span class="cmt">// thin wrapper over auth.Subject(r)</span>
+	if !ok {
+		response.Error(w, r, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	result, err := kpass.Check(r.Context(), userID, "myapp.users.create", nil)
+	if err != nil || !kpass.Allowed(result) {
+		response.Error(w, r, http.StatusForbidden, "not allowed")
+		return
+	}
+	<span class="cmt">// result.UserRole / result.UserType are also available for finer-grained checks</span>
+	<span class="cmt">// ... proceed with the real handler logic</span>
+}</pre></div>
       </div>
     </section>
 
@@ -355,7 +373,27 @@ nexler add @popperjs/core</pre></div>
         <div class="cmd-line">nexler init kgate [-dir &lt;app-dir&gt;]</div>
         <p>Adds a client for KGate (Klivolks' message broker): <code>kgate/kgate.go</code> (<code>Subscribe</code>/<code>Unsubscribe</code>/<code>ResumeAll</code>/<code>Publish</code>/<code>HandleWebhook</code>/<code>Register</code>) and five blank env vars — <code>KGATE_CLIENT_ID</code>, <code>KGATE_WS_SERVER</code>, <code>KGATE_HTTP_SERVER</code>, <code>KGATE_ORIGIN</code>, <code>KGATE_WEBHOOK_SECRET</code>. Also auto-wires a <code>POST /webhooks/kgate</code> fallback route into <code>routes/public/public.go</code>.</p>
         <p>Requires the app to already have a core database connection (<code>-db</code> at <code>create app</code> time) — channel subscriptions aren't static/env-driven: <code>Subscribe(ctx, channel)</code> records the channel and starts a background goroutine maintaining a live WebSocket connection, durable across restarts via <code>ResumeAll(ctx)</code> (add this near <code>db.Connect()</code> in your own <code>main.go</code> — not wired automatically). Every event, live or via the HMAC-verified webhook fallback, dispatches to a single generated <code>handleEvent</code> function. Needs <code>go mod tidy</code> once and <code>nexler init db</code> before subscriptions will work.</p>
+        <p><code>Register</code> also documents <code>POST /webhooks/kgate</code> in <code>/openapi.json</code>/Swagger UI (previously invisible there, unlike every route <code>nexler create &lt;route&gt;</code> generates), and subscribes to a channel literally named <code>"test"</code> alongside <code>ResumeAll</code> on startup — a built-in smoke test that the whole pipeline (core DB registry + WebSocket connectivity) works end to end. Safe to leave in (<code>Subscribe</code> is idempotent for an already-subscribed channel) or remove once you've confirmed kgate is wired correctly.</p>
         <div class="code-block"><pre>nexler init kgate -dir ./myapp</pre></div>
+        <p>Usage — subscribe from anywhere (a handler, a startup routine, mid-workflow), publish from anywhere, and process every delivered event (live or via the webhook fallback) in one place:</p>
+        <div class="code-block"><pre><span class="cmt">// start listening for a channel, e.g. when an order is created</span>
+if err := kgate.Subscribe(ctx, "orders.created"); err != nil {
+	log.Printf("kgate: subscribing: %v", err)
+}
+
+<span class="cmt">// publish an event to that channel from anywhere else</span>
+if err := kgate.Publish(ctx, "orders.created", map[string]any{"order_id": id}); err != nil {
+	log.Printf("kgate: publishing: %v", err)
+}
+
+<span class="cmt">// kgate/kgate.go — edit handleEvent for your own processing logic</span>
+func handleEvent(ctx context.Context, channel string, payload json.RawMessage) error {
+	switch channel {
+	case "orders.created":
+		<span class="cmt">// ... handle it</span>
+	}
+	return nil
+}</pre></div>
       </div>
     </section>
 
@@ -376,6 +414,18 @@ nexler add @popperjs/core</pre></div>
         <div class="cmd-line">nexler init ci [-dir &lt;app-dir&gt;] [-registry dockerhub|github]</div>
         <p>Adds <code>.github/workflows/release.yml</code>: builds and pushes a Docker image whenever a GitHub Release is published. <code>-registry</code> picks where images go — <code>github</code> (GitHub Container Registry, authenticated automatically via <code>GITHUB_TOKEN</code>) or <code>dockerhub</code> (via <code>DOCKERHUB_USERNAME</code>/<code>DOCKERHUB_TOKEN</code> repo secrets you add yourself); prompted interactively if not passed. Doesn't require a Dockerfile to already exist — prints a reminder instead of refusing. Refuses if <code>release.yml</code> already exists.</p>
         <div class="code-block"><pre>nexler init ci -dir ./myapp -registry github</pre></div>
+      </div>
+    </section>
+
+    <section class="doc-section" id="cmd-init-kube">
+      <div class="doc-sub">
+        <h3><code>nexler init kube</code></h3>
+        <span class="badge badge-local">local only</span>
+        <div class="cmd-line">nexler init kube [-dir &lt;app-dir&gt;] [-registry dockerhub|github] [-image &lt;ref&gt;] [-namespace &lt;ns&gt;] [-replicas &lt;n&gt;]</div>
+        <p>Adds <code>k8s/deployment.yaml</code> to an existing app: a <code>Secret</code> (every real value from <code>.env</code>), a <code>Deployment</code> (references the Secret via <code>envFrom</code>, TCP readiness/liveness probes on the app's port, conservative default resource requests/limits), and a <code>ClusterIP</code> <code>Service</code> — three <code>---</code>-separated documents in one file. Unlike <code>init ci</code>'s workflows (which resolve an image reference at workflow-run time via GitHub's own context variables), this file is applied directly by <code>kubectl</code>, so it needs a concrete image reference baked in at scaffold time: <code>-image</code> sets it directly, or <code>-registry github</code> derives <code>ghcr.io/&lt;owner&gt;/&lt;repo&gt;:latest</code> straight from <code>go.mod</code>'s module path (erroring if it isn't <code>github.com/&lt;owner&gt;/&lt;repo&gt;</code>-shaped — nexler never shells out to git to guess an owner), or <code>-registry dockerhub</code> prompts for your Docker Hub username and derives <code>&lt;user&gt;/&lt;repo&gt;:latest</code>.</p>
+        <p><code>-namespace</code> is left out of every resource by default (kubectl's <code>-n</code>/current context decides) unless set explicitly; <code>-replicas</code> defaults to 1. <code>k8s/deployment.yaml</code> is added to <code>.gitignore</code> — unlike <code>docker-compose.yml</code> (which only references <code>.env</code> by path at container runtime), the Secret document here embeds <code>.env</code>'s actual values, since Kubernetes has no equivalent way to read a local file at deploy time. Refuses if <code>k8s/deployment.yaml</code> already exists.</p>
+        <div class="code-block"><pre>nexler init kube -dir ./myapp -registry github
+nexler init kube -dir ./myapp -image ghcr.io/me/myapp:latest -replicas 3</pre></div>
       </div>
     </section>
 
@@ -473,6 +523,51 @@ config/      <span class="c">loads {APPNAME}_-prefixed env vars once, at startup
         </div>
         <p><code>middleware.RequireAuth</code> — what every <code>-protected</code> route wraps its handlers in — is generated differently per <code>-auth</code> choice. <code>jwt</code> generates <code>auth/jwt.go</code> (stdlib-only HS256, <code>IssueJWT</code>/<code>VerifyJWT</code>). <code>session</code> generates <code>auth/session.go</code> — an in-memory map behind a mutex plus an <code>HttpOnly</code>/<code>SameSite=Lax</code> cookie (<code>StartSession</code>/<code>SessionFromRequest</code>/<code>EndSession</code>); lost on restart, not shared across instances by design. <code>both</code> generates both, and <code>RequireAuth</code> tries the bearer token first, falling back to the session cookie — one protected route serves API and browser clients at once.</p>
         <p>Whichever mechanism verifies the caller, the resulting subject (userID) is attached to the request's context via <code>auth.ContextWithSubject</code>; any protected handler reads it back with <code>auth.Subject(r) (subject string, ok bool)</code>. No <code>/login</code>/<code>/logout</code> route is ever generated — call <code>auth.IssueJWT</code>/<code>auth.StartSession</code> from your own login handler once credentials are verified.</p>
+        <p>Usage — a login handler you write yourself (scaffolded separately, e.g. <code>nexler create /login -module auth</code>), calling the generated primitives once credentials check out:</p>
+        <div class="code-block"><pre><span class="cmt">// -auth jwt or both</span>
+token, err := auth.IssueJWT(userID, name, org, userType, userRole, 24*time.Hour)
+response.JSON(w, http.StatusOK, LoginResponse{Token: token})
+
+<span class="cmt">// -auth session or both</span>
+auth.StartSession(w, userID, false)  <span class="cmt">// rememberMe if -remember-me was set</span>
+response.JSON(w, http.StatusOK, LoginResponse{})
+
+<span class="cmt">// any protected handler downstream</span>
+userID, ok := auth.Subject(r)</pre></div>
+      </div>
+
+      <div class="doc-sub" id="concept-service-auth">
+        <h3>API-key (service-to-service) auth</h3>
+        <p>Apps with <code>-auth jwt|both</code> and <code>-db</code> set also get <code>middleware.RequireServiceAuth</code> — a second, <strong>wholly separate</strong> auth wrapper for app-to-app calls, checking the <code>X-Api-Key</code> header against a new <code>core_services</code> table. It never falls back to/from <code>RequireAuth</code>: a route is either user-facing (<code>RequireAuth</code>) or service-only (<code>RequireServiceAuth</code>), so a service-only route can never accidentally accept an end-user JWT. <strong>The API key must never be embedded in any UI-facing code</strong> — treat it like a database credential.</p>
+        <p><code>core.CreateService(ctx, name)</code> generates a random key, stores only its SHA-256 hash, and returns the plaintext key exactly once — it's never retrievable again. <code>VerifyServiceKey</code>/<code>RevokeService</code>/<code>ListServices</code>/<code>GetService</code> round out the set; on success, the calling service's name is attached via a new <code>auth.ContextWithService</code>/<code>auth.Service(r)</code> pair, kept as a distinct context key from the user <code>Subject</code>. A generated Swagger-documented admin API (<a href="#cmd-admin-api"><code>/admin/services</code>/<code>/admin/users</code></a>) wraps these functions for you — see below.</p>
+        <p>Usage — a route meant to be called only by another backend service, never a browser:</p>
+        <div class="code-block"><pre>mux.HandleFunc("POST /internal/sync", middleware.RequireServiceAuth(func(w http.ResponseWriter, r *http.Request) {
+	name, _ := auth.Service(r)  <span class="cmt">// the calling service's core_services Name</span>
+	<span class="cmt">// ...</span>
+}))</pre></div>
+        <p>A companion <code>core_users</code> table (<code>core.GetUser</code>/<code>CreateUser</code>/<code>SetUserStatus</code>/<code>ListUsers</code>) is a minimal local record, <strong>not</strong> a profile store: <code>UserId</code> is the same value as the JWT <code>sub</code> claim, plus <code>Username</code>/<code>UserRole</code>/<code>UserType</code> and a <code>Status</code> kill-switch. Real profile data (name, email, etc.) stays wherever it already lives.</p>
+      </div>
+
+      <div class="doc-sub" id="cmd-admin-api">
+        <h3>Admin API: <code>/admin/users</code> &amp; <code>/admin/services</code></h3>
+        <p>Every <code>-auth jwt|both</code> + <code>-db</code> app also gets a Swagger-documented admin API wrapping the <code>core</code> functions above — hand-authored, not routed through <code>nexler create &lt;route&gt;</code>'s generic machinery, since these are infrastructure endpoints with real field definitions from day one. Wired into <code>routes/protected/protected.go</code> automatically, same as <code>kgate</code>'s webhook route.</p>
+        <table class="flag-table">
+          <thead><tr><th>Method &amp; path</th><th>Calls</th></tr></thead>
+          <tbody>
+            <tr><td class="flag-name">GET /admin/users</td><td class="flag-desc"><code>core.ListUsers</code> — no pagination</td></tr>
+            <tr><td class="flag-name">POST /admin/users</td><td class="flag-desc"><code>core.CreateUser</code> — create/upsert</td></tr>
+            <tr><td class="flag-name">GET /admin/users/{id}</td><td class="flag-desc"><code>core.GetUser</code></td></tr>
+            <tr><td class="flag-name">PATCH /admin/users/{id}/status</td><td class="flag-desc"><code>core.SetUserStatus</code></td></tr>
+            <tr><td class="flag-name">GET /admin/services</td><td class="flag-desc"><code>core.ListServices</code> — metadata only, never keys</td></tr>
+            <tr><td class="flag-name">POST /admin/services</td><td class="flag-desc"><code>core.CreateService</code> — key in the response exactly once</td></tr>
+            <tr><td class="flag-name">GET /admin/services/{name}</td><td class="flag-desc"><code>core.GetService</code> — metadata only</td></tr>
+            <tr><td class="flag-name">POST /admin/services/{name}/revoke</td><td class="flag-desc"><code>core.RevokeService</code></td></tr>
+          </tbody>
+        </table>
+        <div class="callout warn">Every route wraps only in <code>middleware.RequireAuth</code> — that confirms the caller is <em>authenticated</em>, not that they're <em>allowed</em> to manage other users/services. Add your own authorization check (e.g. <code>kpass.Check</code>, once <code>nexler init kpass</code> has been run) before relying on this in production — deliberately left as a TODO in the generated code rather than assumed by nexler.</div>
+        <div class="code-block"><pre>curl -X POST /admin/services -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"billing-svc"}'
+<span class="cmt">// {"name":"billing-svc","key":"a1b2c3..."}  -- key shown exactly once</span></pre></div>
       </div>
 
       <div class="doc-sub" id="concept-db">
@@ -511,7 +606,8 @@ err = resp.JSON(&amp;out)</pre></div>
 
       <div class="doc-sub" id="concept-config">
         <h3>Runtime configuration — <code>config</code> &amp; <code>.env</code></h3>
-        <p><code>config.C</code> is ready before <code>main()</code> runs, reading two env vars namespaced per app as <code>{APPNAME}_HOST</code>/<code>{APPNAME}_PORT</code>. <code>.env</code>, scaffolded at the app root, is read by a hand-rolled parser — no third-party dependency, consistent with the generated <code>go.mod</code> having none. A key already present in the real environment always wins over <code>.env</code> — it's a committed-or-not local default, never an override mechanism.</p>
+        <p><code>config.C</code> is ready before <code>main()</code> runs, reading env vars namespaced per app as <code>{APPNAME}_HOST</code>/<code>{APPNAME}_PORT</code>/<code>{APPNAME}_SWAGGER_ENABLED</code> (default <code>true</code>). <code>.env</code>, scaffolded at the app root, is read by a hand-rolled parser — no third-party dependency, consistent with the generated <code>go.mod</code> having none. A key already present in the real environment always wins over <code>.env</code> — it's a committed-or-not local default, never an override mechanism.</p>
+        <p><code>{APPNAME}_SWAGGER_ENABLED</code> gates <code>GET /swagger</code> and <code>GET /openapi.json</code> — set it to <code>false</code> in production to 404 both. The check happens inside each handler, not by leaving the routes unregistered: Go's <code>net/http.ServeMux</code> treats <code>GET /</code> (every app's homepage route) as a subtree pattern that would otherwise silently catch an unregistered <code>/swagger</code>/<code>/openapi.json</code> and serve the homepage instead of a 404. Every other route is unaffected.</p>
       </div>
     </section>
 
@@ -522,6 +618,30 @@ err = resp.JSON(&amp;out)</pre></div>
       <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
 
       <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4>Admin API for users/services; hidden Swagger button when off; usage examples added</h4>
+          <p>New Swagger-documented admin API (<code>GET/POST /admin/users</code>, <code>GET/PATCH /admin/users/{id}</code>, <code>GET/POST /admin/services</code>, <code>GET /admin/services/{name}</code>, <code>POST /admin/services/{name}/revoke</code>) for every <code>-auth jwt|both</code> + <code>-db</code> app, wrapping <code>core.ListUsers</code>/<code>ListServices</code>/<code>GetService</code> (new) alongside the existing <code>core</code> functions — authentication only (<code>middleware.RequireAuth</code>), authorization deliberately left as a TODO for <code>kpass</code>. The homepage's "View API Docs" button now hides itself client-side when <code>SWAGGER_ENABLED=false</code>. This page also gained real Go usage examples (not just CLI commands) for kpass, kgate, JWT/session auth, and service auth.</p>
+          <div class="change-tags"><span class="change-tag">admin-api</span><span class="change-tag">docs</span><span class="change-tag">ui</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4>API-key (service-to-service) auth; <code>core_users</code>/<code>core_services</code></h4>
+          <p>Apps with <code>-auth jwt|both</code> and <code>-db</code> set now get <code>middleware.RequireServiceAuth</code>, a second auth mechanism (checking <code>X-Api-Key</code> against a new <code>core_services</code> table) wholly independent of <code>RequireAuth</code>, for app-to-app calls. <code>core.CreateService</code> issues a key once, storing only its hash. A companion <code>core_users</code> table (<code>UserId</code> matching the JWT <code>sub</code> claim, plus <code>Username</code>/<code>UserRole</code>/<code>UserType</code>/<code>Status</code>) is a minimal local record, not a profile store. Both tables are provisioned by <code>nexler init db</code>; existing apps pick up the Go code via <code>nexler update</code>.</p>
+          <div class="change-tags"><span class="change-tag">auth</span><span class="change-tag">core</span><span class="change-tag">security</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4>Swagger on/off switch; kgate webhook OpenAPI docs + test subscribe</h4>
+          <p>New <code>{APPNAME}_SWAGGER_ENABLED</code> setting (default <code>true</code>) gates <code>/swagger</code> and <code>/openapi.json</code>, for disabling both in production. <code>nexler init kgate</code>'s <code>Register</code> now documents <code>POST /webhooks/kgate</code> in <code>/openapi.json</code>/Swagger UI (previously the one generated route invisible there) and subscribes to a <code>"test"</code> channel on startup as a built-in connectivity smoke test. Existing apps pick up both via <code>nexler update</code>.</p>
+          <div class="change-tags"><span class="change-tag">kgate</span><span class="change-tag">openapi</span><span class="change-tag">config</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-08-12</div>
+          <h4><code>nexler init kube</code></h4>
+          <p>New command: adds <code>k8s/deployment.yaml</code> (Secret + Deployment + Service) to an existing app, completing the container pipeline started by <code>init docker</code>/<code>init ci</code>. <code>-registry github</code> derives the image reference from <code>go.mod</code>'s module path; <code>-registry dockerhub</code> prompts for a Docker Hub username; <code>-image</code> overrides either. The generated file is gitignored, since its Secret document embeds real values from <code>.env</code>.</p>
+          <div class="change-tags"><span class="change-tag">kube</span><span class="change-tag">deploy</span></div>
+        </div>
         <div class="change-entry">
           <div class="change-date">2026-08-12</div>
           <h4><code>-name</code> flag; cross-invocation identifier collision fix</h4>

@@ -1,0 +1,255 @@
+package core
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+{{- if eq .CoreDBAccessor "Mongo" }}
+	"{{ .ModulePath }}/db"
+	"{{ .ModulePath }}/mongo"
+{{- else }}
+	"{{ .ModulePath }}/{{ .CoreDB }}"
+{{- end }}
+)
+
+// Service is a core_services record — a service account for
+// app-to-app/service-to-service calls (see middleware.RequireServiceAuth).
+// Its API key is generated once by CreateService and never stored or
+// returned in plaintext again — the X-Api-Key it grants access under must
+// never be embedded in any UI-facing client.
+type Service struct {
+	Name      string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func hashServiceKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+// generateServiceKey returns a new random 32-byte key, hex-encoded.
+func generateServiceKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+{{- if eq .CoreDBAccessor "Mongo" }}
+
+type serviceDoc struct {
+	Name      string    `bson:"name"`
+	KeyHash   string    `bson:"key_hash"`
+	Status    string    `bson:"status"`
+	CreatedAt time.Time `bson:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at"`
+}
+
+func serviceCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("core_services"), true
+}
+
+// CreateService generates a new random API key for a service account
+// named name, stores only its SHA-256 hash, and returns the plaintext key
+// exactly once — it is never retrievable again. Store it securely (e.g. a
+// secrets manager) the moment you receive it. Fails if name already
+// exists (the unique index on name).
+func CreateService(ctx context.Context, name string) (string, error) {
+	coll, ok := serviceCollection()
+	if !ok {
+		return "", fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	key, err := generateServiceKey()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC()
+	if err := mongo.Insert(ctx, coll, serviceDoc{Name: name, KeyHash: hashServiceKey(key), Status: "active", CreatedAt: now, UpdatedAt: now}); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+// VerifyServiceKey hashes key and looks it up against core_services,
+// returning the matching service's Name and whether it's active. Used by
+// middleware.RequireServiceAuth.
+func VerifyServiceKey(ctx context.Context, key string) (string, bool, error) {
+	coll, ok := serviceCollection()
+	if !ok {
+		return "", false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc, err := mongo.GetOne[serviceDoc](ctx, coll, serviceDoc{KeyHash: hashServiceKey(key)})
+	if err != nil {
+		return "", false, nil
+	}
+	return doc.Name, doc.Status == "active", nil
+}
+
+// ListServices returns every core_services record's metadata — never
+// KeyHash, and Service itself has no field for it at all, so a plaintext
+// or hashed key can never leak through this function by construction. No
+// pagination — fine for a first release.
+func ListServices(ctx context.Context) ([]Service, error) {
+	coll, ok := serviceCollection()
+	if !ok {
+		return nil, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	docs, err := mongo.Get[serviceDoc](ctx, coll, serviceDoc{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Service, len(docs))
+	for i, d := range docs {
+		out[i] = Service{Name: d.Name, Status: d.Status, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
+	}
+	return out, nil
+}
+
+// GetService returns name's core_services metadata (never KeyHash), and
+// whether it exists.
+func GetService(ctx context.Context, name string) (Service, bool, error) {
+	coll, ok := serviceCollection()
+	if !ok {
+		return Service{}, false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc, err := mongo.GetOne[serviceDoc](ctx, coll, serviceDoc{Name: name})
+	if err != nil {
+		return Service{}, false, nil
+	}
+	return Service{Name: doc.Name, Status: doc.Status, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt}, true, nil
+}
+
+// RevokeService sets a service's Status to "revoked" — VerifyServiceKey
+// rejects its key from that point on.
+func RevokeService(ctx context.Context, name string) error {
+	coll, ok := serviceCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc, err := mongo.GetOne[serviceDoc](ctx, coll, serviceDoc{Name: name})
+	if err != nil {
+		return fmt.Errorf("core: service %q not found", name)
+	}
+	doc.Status = "revoked"
+	doc.UpdatedAt = time.Now().UTC()
+	return mongo.Set(ctx, coll, serviceDoc{Name: name}, doc)
+}
+{{- else }}
+
+type serviceRow struct {
+	Name      string    `db:"name"`
+	Status    string    `db:"status"`
+	CreatedAt time.Time `db:"created_at"`
+	UpdatedAt time.Time `db:"updated_at"`
+}
+
+// CreateService generates a new random API key for a service account
+// named name, stores only its SHA-256 hash via the core_service_create
+// stored procedure (see `nexler init db`), and returns the plaintext key
+// exactly once — it is never retrievable again. Store it securely (e.g. a
+// secrets manager) the moment you receive it. Fails if name already
+// exists (name is core_services' primary key).
+func CreateService(ctx context.Context, name string) (string, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return "", fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	key, err := generateServiceKey()
+	if err != nil {
+		return "", err
+	}
+	if _, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_service_create", name, hashServiceKey(key)); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+// VerifyServiceKey hashes key and looks it up against core_services,
+// returning the matching service's Name and whether it's active. Used by
+// middleware.RequireServiceAuth. A plain parameterized SELECT — no stored
+// procedure needed for a single-table read (same reasoning GetSetting
+// already uses).
+func VerifyServiceKey(ctx context.Context, key string) (string, bool, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return "", false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	rows, err := {{ .CoreDB }}.Query[serviceRow](ctx, conn, {{ printf "%q" .CoreServiceVerifyQuery }}, hashServiceKey(key))
+	if err != nil {
+		return "", false, err
+	}
+	if len(rows) == 0 {
+		return "", false, nil
+	}
+	return rows[0].Name, rows[0].Status == "active", nil
+}
+
+// ListServices returns every core_services record's metadata — never
+// key_hash, and Service itself has no field for it at all, so a hashed
+// (let alone plaintext) key can never leak through this function by
+// construction. No pagination — fine for a first release. No
+// dialect-specific text needed — a plain, unfiltered SELECT reads
+// identically across mysql/postgres/mssql.
+func ListServices(ctx context.Context) ([]Service, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return nil, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	rows, err := {{ .CoreDB }}.Query[serviceRow](ctx, conn, "SELECT name, status, created_at, updated_at FROM core_services")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Service, len(rows))
+	for i, r := range rows {
+		out[i] = Service{Name: r.Name, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	}
+	return out, nil
+}
+
+// GetService returns name's core_services metadata (never key_hash), and
+// whether it exists. A plain parameterized SELECT — no stored procedure
+// needed for a single-table read (same reasoning GetSetting already
+// uses).
+func GetService(ctx context.Context, name string) (Service, bool, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return Service{}, false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	rows, err := {{ .CoreDB }}.Query[serviceRow](ctx, conn, {{ printf "%q" .CoreServiceGetQuery }}, name)
+	if err != nil {
+		return Service{}, false, err
+	}
+	if len(rows) == 0 {
+		return Service{}, false, nil
+	}
+	r := rows[0]
+	return Service{Name: r.Name, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, true, nil
+}
+
+// RevokeService sets a service's Status to "revoked", via the
+// core_service_set_status stored procedure — VerifyServiceKey rejects its
+// key from that point on.
+func RevokeService(ctx context.Context, name string) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_service_set_status", name, "revoked")
+	return err
+}
+{{- end }}

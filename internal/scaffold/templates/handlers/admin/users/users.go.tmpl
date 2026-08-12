@@ -1,0 +1,239 @@
+// Package users is nexler's own generated admin API for core_users —
+// list/create/get/set-status, each documented via the openapi package so
+// /openapi.json picks them up automatically. Hand-authored (not routed
+// through the generic nexler create <route> machinery, unlike a business
+// route): these are infrastructure endpoints with real, from-day-one
+// field definitions, so — like handlers/home/home.go — this is one
+// self-contained file rather than the usual handlers/services/store/
+// models four-layer split.
+//
+// Every handler below wraps only in middleware.RequireAuth — that
+// confirms the caller is *authenticated*, not that they're *authorized*
+// to manage other users. Add your own authorization check (e.g.
+// kpass.Check(ctx, callerID, "admin.users.write", nil), once you've run
+// `nexler init kpass`) before relying on this in production. Deliberately
+// left as a TODO rather than hardcoded: permission enforcement is
+// expected to be layered on separately, per app, not assumed by nexler.
+package users
+
+import (
+	"net/http"
+	"time"
+
+	"{{ .ModulePath }}/core"
+	"{{ .ModulePath }}/middleware"
+	"{{ .ModulePath }}/openapi"
+	"{{ .ModulePath }}/request"
+	"{{ .ModulePath }}/response"
+)
+
+// UserSummary is one core_users record, as returned by every handler
+// below.
+type UserSummary struct {
+	UserId    string    `json:"user_id"`
+	Username  string    `json:"username"`
+	UserRole  string    `json:"user_role"`
+	UserType  string    `json:"user_type"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func toUserSummary(u core.User) UserSummary {
+	return UserSummary{UserId: u.UserId, Username: u.Username, UserRole: u.UserRole, UserType: u.UserType, Status: u.Status, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}
+}
+
+// GetUsersRequest is the (empty — query-parameters-only) request for GET
+// /admin/users.
+type GetUsersRequest struct{}
+
+// GetUsersResponse is the response payload for GET /admin/users.
+type GetUsersResponse struct {
+	Users []UserSummary `json:"users"`
+}
+
+// HandleUsersGet handles GET /admin/users — lists every core_users
+// record. No pagination this release.
+func HandleUsersGet(w http.ResponseWriter, r *http.Request) {
+	var req GetUsersRequest
+	if err := request.DecodeQuery(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	users, err := core.ListUsers(r.Context())
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]UserSummary, len(users))
+	for i, u := range users {
+		out[i] = toUserSummary(u)
+	}
+	response.JSON(w, http.StatusOK, GetUsersResponse{Users: out})
+}
+
+// PostUsersRequest is the JSON body for POST /admin/users — creates or
+// upserts a user. UserId should be the same value as the JWT "sub" claim
+// this user authenticates with (see auth/context.go's Subject).
+type PostUsersRequest struct {
+	UserId   string `json:"user_id"`
+	Username string `json:"username"`
+	UserRole string `json:"user_role"`
+	UserType string `json:"user_type"`
+}
+
+// PostUsersResponse is the response payload for POST /admin/users.
+type PostUsersResponse struct {
+	User UserSummary `json:"user"`
+}
+
+// HandleUsersPost handles POST /admin/users.
+func HandleUsersPost(w http.ResponseWriter, r *http.Request) {
+	var req PostUsersRequest
+	if err := request.DecodeJSON(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	u := core.User{UserId: req.UserId, Username: req.Username, UserRole: req.UserRole, UserType: req.UserType}
+	if err := core.CreateUser(r.Context(), u); err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	saved, _, err := core.GetUser(r.Context(), req.UserId)
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.JSON(w, http.StatusOK, PostUsersResponse{User: toUserSummary(saved)})
+}
+
+// GetUserRequest is the (path-parameter-only) request for GET
+// /admin/users/{id}.
+type GetUserRequest struct {
+	Id string `json:"id"`
+}
+
+// GetUserResponse is the response payload for GET /admin/users/{id}.
+type GetUserResponse struct {
+	User UserSummary `json:"user"`
+}
+
+// HandleUserGet handles GET /admin/users/{id}.
+func HandleUserGet(w http.ResponseWriter, r *http.Request) {
+	var req GetUserRequest
+	if err := request.DecodeQuery(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := request.DecodePath(r, &req, "id"); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	u, ok, err := core.GetUser(r.Context(), req.Id)
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		response.Error(w, r, http.StatusNotFound, "user not found")
+		return
+	}
+	response.JSON(w, http.StatusOK, GetUserResponse{User: toUserSummary(u)})
+}
+
+// PatchUserStatusRequest is the JSON body for PATCH
+// /admin/users/{id}/status.
+type PatchUserStatusRequest struct {
+	Id     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// PatchUserStatusResponse is the response payload for PATCH
+// /admin/users/{id}/status.
+type PatchUserStatusResponse struct {
+	User UserSummary `json:"user"`
+}
+
+// HandleUserStatusPatch handles PATCH /admin/users/{id}/status — see
+// core.SetUserStatus: a disabled user's existing, unexpired JWT is still
+// cryptographically valid, so anything relying on Status must check it
+// explicitly (this endpoint just sets the field).
+func HandleUserStatusPatch(w http.ResponseWriter, r *http.Request) {
+	var req PatchUserStatusRequest
+	if err := request.DecodeJSON(r, &req); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := request.DecodePath(r, &req, "id"); err != nil {
+		response.Error(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := core.SetUserStatus(r.Context(), req.Id, req.Status); err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	u, _, err := core.GetUser(r.Context(), req.Id)
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.JSON(w, http.StatusOK, PatchUserStatusResponse{User: toUserSummary(u)})
+}
+
+// Register wires this package's admin user-management routes onto mux —
+// see the package doc comment re: RequireAuth only confirming
+// authentication, not authorization — and documents them with the
+// openapi package so /openapi.json picks them up automatically. Called
+// from routes/protected/protected.go (wired automatically by nexler
+// create app, when -auth is jwt|both and -db is set).
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /admin/users", middleware.RequireAuth(HandleUsersGet))
+	openapi.Register(openapi.Operation{
+		Method:      "GET",
+		Path:        "/admin/users",
+		OperationID: "listUsers",
+		Summary:     "List all core_users records",
+		Protected:   true,
+		Tags:        []string{"admin-users"},
+		ReqType:     GetUsersRequest{},
+		RespType:    GetUsersResponse{},
+	})
+
+	mux.HandleFunc("POST /admin/users", middleware.RequireAuth(HandleUsersPost))
+	openapi.Register(openapi.Operation{
+		Method:         "POST",
+		Path:           "/admin/users",
+		OperationID:    "createUser",
+		Summary:        "Create or upsert a user",
+		Protected:      true,
+		Tags:           []string{"admin-users"},
+		ReqType:        PostUsersRequest{},
+		ReqContentType: "application/json",
+		RespType:       PostUsersResponse{},
+	})
+
+	mux.HandleFunc("GET /admin/users/{id}", middleware.RequireAuth(HandleUserGet))
+	openapi.Register(openapi.Operation{
+		Method:      "GET",
+		Path:        "/admin/users/{id}",
+		OperationID: "getUser",
+		Summary:     "Get one user by ID",
+		Protected:   true,
+		Tags:        []string{"admin-users"},
+		ReqType:     GetUserRequest{},
+		RespType:    GetUserResponse{},
+	})
+
+	mux.HandleFunc("PATCH /admin/users/{id}/status", middleware.RequireAuth(HandleUserStatusPatch))
+	openapi.Register(openapi.Operation{
+		Method:         "PATCH",
+		Path:           "/admin/users/{id}/status",
+		OperationID:    "setUserStatus",
+		Summary:        "Set a user's status (e.g. active/disabled)",
+		Protected:      true,
+		Tags:           []string{"admin-users"},
+		ReqType:        PatchUserStatusRequest{},
+		ReqContentType: "application/json",
+		RespType:       PatchUserStatusResponse{},
+	})
+}

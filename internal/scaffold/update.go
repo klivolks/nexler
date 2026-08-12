@@ -47,7 +47,11 @@ var updateChecks = []updateCheck{
 	{"auth: RFC 7519 JWT claims (sub/exp/iat)", ensureJWTClaims},
 	{"db: InsertID helpers", ensureInsertIDHelpers},
 	{"db: mongo database name from DSN", ensureMongoDatabaseName},
+	{"config: SwaggerEnabled toggle", ensureSwaggerToggle},
 	{"kgate: resume subscriptions on startup (Register)", ensureKgateResumeAll},
+	{"kgate: webhook OpenAPI docs + startup test subscribe", ensureKgateOpenAPIAndTestSubscribe},
+	{"auth: API-key (service-to-service) auth", ensureServiceAuth},
+	{"auth: admin API for core_users/core_services", ensureAdminRoutes},
 }
 
 // Update runs every registered check against appDir in order, stopping at

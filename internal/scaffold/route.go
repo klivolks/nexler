@@ -1258,6 +1258,173 @@ func ensureMongoDatabaseName(appDir string) (bool, error) {
 	return changed, nil
 }
 
+// swaggerConfigFieldAnchor/swaggerConfigLoadAnchor are fixed,
+// template-variable-free substrings of every generated config/config.go —
+// identical regardless of EnvPrefix/AuthKind — that ensureSwaggerToggle
+// anchors its Config-struct-field and load()-line insertions on.
+// swaggerGetEnvOrBody is getEnvOr's complete, equally fixed body, used
+// both to detect it (so it's only ever added once) and as the insertion
+// point for getEnvBoolOr right after it.
+const (
+	swaggerConfigFieldAnchor = "\tPort string "
+	swaggerConfigLoadAnchor  = "\t\tPort: getEnvOr("
+	swaggerGetEnvOrBody      = "func getEnvOr(key, fallback string) string {\n\tif v := os.Getenv(key); v != \"\" {\n\t\treturn v\n\t}\n\treturn fallback\n}"
+	swaggerGetEnvBoolOrCode  = "\n\nfunc getEnvBoolOr(key string, fallback bool) bool {\n\tswitch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {\n\tcase \"true\", \"1\":\n\t\treturn true\n\tcase \"false\", \"0\":\n\t\treturn false\n\tdefault:\n\t\treturn fallback\n\t}\n}"
+	// swaggerHomeMuxLineOriginal/Patched: home.go's Register wires
+	// GET /swagger directly to templates.ServePage("swagger.html")
+	// originally — retrofitted to the new named HandleSwagger handler
+	// instead, which is what actually enforces the toggle (see below).
+	swaggerHomeMuxLineOriginal = `mux.HandleFunc("GET /swagger", templates.ServePage("swagger.html"))`
+	swaggerHomeMuxLinePatched  = `mux.HandleFunc("GET /swagger", HandleSwagger)`
+	// swaggerHandleOpenAPISig anchors on HandleOpenAPI's fixed function
+	// signature line (its body isn't fixed — it embeds the app's own name
+	// via openapi.Spec("<AppName>")) — the guard clause is inserted right
+	// after the opening brace, so it never needs to match the body.
+	swaggerHandleOpenAPISig  = "func HandleOpenAPI(w http.ResponseWriter, r *http.Request) {\n"
+	swaggerHandleOpenAPIGuard = "\tif !config.C.SwaggerEnabled {\n\t\thttp.NotFound(w, r)\n\t\treturn\n\t}\n"
+	// swaggerHandleSwaggerCode is the new handler ensureSwaggerToggle
+	// inserts right before HandleOpenAPI — GET /swagger's toggle check
+	// has to live in a real handler function too, not just at
+	// registration time, for the same "GET /" subtree-pattern reason
+	// documented on HandleOpenAPI's own doc comment in home.go.tmpl.
+	swaggerHandleSwaggerCode = "// HandleSwagger serves the bundled Swagger UI page, gated on\n// config.C.SwaggerEnabled the same way and for the same reason as\n// HandleOpenAPI above.\nfunc HandleSwagger(w http.ResponseWriter, r *http.Request) {\n\tif !config.C.SwaggerEnabled {\n\t\thttp.NotFound(w, r)\n\t\treturn\n\t}\n\ttemplates.ServePage(\"swagger.html\")(w, r)\n}\n\n"
+)
+
+// ensureSwaggerToggle brings an app scaffolded before Config gained
+// SwaggerEnabled up to date: adds the field + getEnvBoolOr helper +
+// load() wiring to config/config.go, wraps handlers/home/home.go's
+// /swagger and /openapi.json registrations in
+// "if config.C.SwaggerEnabled { ... }" (adding the config import if
+// missing), and appends {PREFIX}_SWAGGER_ENABLED=true to .env — but only
+// when that key isn't already present, same as ensureEnvVars: a
+// production deployment may have deliberately set it to false, and this
+// must never silently reset that back to true.
+//
+// Every anchor is a fixed, template-variable-free substring (identical
+// across every app regardless of EnvPrefix/AuthKind/-ui), so one literal
+// match works everywhere — same fail-loud-on-mismatch precedent as every
+// other ensure* retrofit: a hand-rewritten config.go/home.go errors out
+// naming the exact snippet to add by hand, instead of being silently
+// corrupted.
+func ensureSwaggerToggle(appDir string) (bool, error) {
+	changed := false
+
+	prefix, err := recoverEnvPrefix(appDir)
+	if err != nil {
+		return changed, err
+	}
+
+	configPath := filepath.Join(appDir, "config", "config.go")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", configPath, err)
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if !strings.Contains(content, "SwaggerEnabled") {
+		fieldIdx := strings.Index(content, swaggerConfigFieldAnchor)
+		loadIdx := strings.Index(content, swaggerConfigLoadAnchor)
+		if fieldIdx == -1 || loadIdx == -1 {
+			return changed, fmt.Errorf("%s doesn't look like a generated config.go (missing the expected Port field/load() lines) — has it been hand-rewritten? Add manually: a `SwaggerEnabled bool` field to Config, and `SwaggerEnabled: getEnvBoolOr(%q, true),` to load()'s returned Config literal", configPath, prefix+"_SWAGGER_ENABLED")
+		}
+
+		fieldInsertAt := fieldIdx + strings.Index(content[fieldIdx:], "\n") + 1
+		fieldLine := "\tSwaggerEnabled bool // " + prefix + "_SWAGGER_ENABLED — enables /swagger and /openapi.json; default true, set to false in production\n"
+		content = content[:fieldInsertAt] + fieldLine + content[fieldInsertAt:]
+
+		// Re-find loadIdx: the field insertion above may have shifted it.
+		loadIdx = strings.Index(content, swaggerConfigLoadAnchor)
+		loadInsertAt := loadIdx + strings.Index(content[loadIdx:], "\n") + 1
+		loadLine := "\t\tSwaggerEnabled: getEnvBoolOr(\"" + prefix + "_SWAGGER_ENABLED\", true),\n"
+		content = content[:loadInsertAt] + loadLine + content[loadInsertAt:]
+
+		if !strings.Contains(content, "func getEnvBoolOr") {
+			bodyIdx := strings.Index(content, swaggerGetEnvOrBody)
+			if bodyIdx == -1 {
+				return changed, fmt.Errorf("%s: getEnvOr doesn't match its known original body (has it been hand-rewritten?) — add getEnvBoolOr manually:%s", configPath, swaggerGetEnvBoolOrCode)
+			}
+			insertAt := bodyIdx + len(swaggerGetEnvOrBody)
+			content = content[:insertAt] + swaggerGetEnvBoolOrCode + content[insertAt:]
+		}
+
+		if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	homePath := filepath.Join(appDir, "handlers", "home", "home.go")
+	homeRaw, err := os.ReadFile(homePath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", homePath, err)
+	}
+	homeContent := strings.ReplaceAll(string(homeRaw), "\r\n", "\n")
+	if !strings.Contains(homeContent, "config.C.SwaggerEnabled") {
+		sigIdx := strings.Index(homeContent, swaggerHandleOpenAPISig)
+		if sigIdx == -1 || !strings.Contains(homeContent, swaggerHomeMuxLineOriginal) {
+			return changed, fmt.Errorf("%s doesn't look like a generated home.go (missing the expected HandleOpenAPI signature or GET /swagger registration) — has it been hand-rewritten? Add manually: a config.C.SwaggerEnabled check (http.NotFound on false) at the top of HandleOpenAPI, a new HandleSwagger handler doing the same before serving swagger.html, and wire Register's GET /swagger to HandleSwagger instead of templates.ServePage(\"swagger.html\") directly", homePath)
+		}
+
+		// Insert the guard clause right after HandleOpenAPI's opening
+		// brace — must happen before the HandleSwagger insertion below,
+		// which is anchored on this same signature line and would
+		// otherwise shift sigIdx.
+		guardAt := sigIdx + len(swaggerHandleOpenAPISig)
+		homeContent = homeContent[:guardAt] + swaggerHandleOpenAPIGuard + homeContent[guardAt:]
+
+		// Insert the new HandleSwagger function immediately before
+		// HandleOpenAPI's doc comment/signature (re-found: the guard
+		// insertion above shifted it).
+		sigIdx = strings.Index(homeContent, swaggerHandleOpenAPISig)
+		docStart := strings.LastIndex(homeContent[:sigIdx], "// HandleOpenAPI")
+		insertAt := sigIdx
+		if docStart != -1 {
+			insertAt = docStart
+		}
+		homeContent = homeContent[:insertAt] + swaggerHandleSwaggerCode + homeContent[insertAt:]
+
+		homeContent = strings.Replace(homeContent, swaggerHomeMuxLineOriginal, swaggerHomeMuxLinePatched, 1)
+
+		modulePath, err := readModulePath(appDir)
+		if err != nil {
+			return changed, err
+		}
+		configImport := modulePath + "/config"
+		if !strings.Contains(homeContent, "\""+configImport+"\"") {
+			homeContent, err = insertImport(homeContent, "", configImport)
+			if err != nil {
+				return changed, fmt.Errorf("%s: adding %q import: %w", homePath, configImport, err)
+			}
+		}
+
+		if err := os.WriteFile(homePath, []byte(homeContent), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	envPath := filepath.Join(appDir, ".env")
+	envRaw, err := os.ReadFile(envPath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", envPath, err)
+	}
+	envContent := strings.ReplaceAll(string(envRaw), "\r\n", "\n")
+	envKey := prefix + "_SWAGGER_ENABLED"
+	if !envHasKey(envContent, envKey) {
+		var b strings.Builder
+		b.WriteString(envContent)
+		if len(envContent) > 0 && !strings.HasSuffix(envContent, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(envKey + "=true\n")
+		if err := os.WriteFile(envPath, []byte(b.String()), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	return changed, nil
+}
+
 // insertIDRetrofit describes one InsertID retrofit target: the
 // dialect's directory/file name (mongo/mongo.go, mysql/mysql.go, ...)
 // and the exact source to append when the file exists but doesn't yet

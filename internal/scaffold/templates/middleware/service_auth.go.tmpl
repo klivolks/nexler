@@ -1,0 +1,38 @@
+package middleware
+
+import (
+	"net/http"
+
+	"{{ .ModulePath }}/auth"
+	"{{ .ModulePath }}/core"
+)
+
+// RequireServiceAuth wraps a handler meant to be called only by other
+// backend services — never a browser/UI client. The X-Api-Key it checks
+// must never be embedded in any UI-facing code (JS bundles, mobile app
+// binaries, etc.) — treat it the same as a database credential.
+//
+// Deliberately independent of RequireAuth (JWT/session): a route is
+// either user-facing (-protected, RequireAuth) or service-only
+// (RequireServiceAuth), never a fallback between the two — so a
+// service-only route can never accidentally accept an end-user JWT just
+// because it happens to share middleware with a user-facing route.
+//
+// Verifies X-Api-Key against core_services (core.VerifyServiceKey) and
+// attaches the calling service's name to the request context via
+// auth.ContextWithService — read it back with auth.Service(r).
+func RequireServiceAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("X-Api-Key")
+		if key == "" {
+			http.Error(w, "missing X-Api-Key", http.StatusUnauthorized)
+			return
+		}
+		name, ok, err := core.VerifyServiceKey(r.Context(), key)
+		if err != nil || !ok {
+			http.Error(w, "invalid API key", http.StatusUnauthorized)
+			return
+		}
+		next(w, r.WithContext(auth.ContextWithService(r.Context(), name)))
+	}
+}

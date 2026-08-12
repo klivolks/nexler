@@ -122,6 +122,15 @@ type templateData struct {
 	// core/config.go.tmpl's GetSetting uses — empty when CoreDBAccessor is
 	// "Mongo" (unused there). See configGetQuerySQL.
 	CoreConfigGetQuery string
+	// CoreUserGetQuery is the same idea as CoreConfigGetQuery, for
+	// core/users.go.tmpl's GetUser. See userGetQuerySQL.
+	CoreUserGetQuery string
+	// CoreServiceVerifyQuery is the same idea, for core/services.go.tmpl's
+	// VerifyServiceKey. See serviceVerifyQuerySQL.
+	CoreServiceVerifyQuery string
+	// CoreServiceGetQuery is the same idea, for core/services.go.tmpl's
+	// GetService. See serviceGetQuerySQL.
+	CoreServiceGetQuery string
 	// CoreDBDSN is the real connection string dotenv.tmpl writes to
 	// {{.EnvPrefix}}_DB_CORE_DSN — empty (the default) writes a blank
 	// value, same as before this field existed. See NewAppConfig.CoreDBHost.
@@ -186,8 +195,14 @@ func NewApp(cfg NewAppConfig) error {
 		coreDBAccessor = "Mongo"
 	}
 	coreConfigGetQuery := ""
+	coreUserGetQuery := ""
+	coreServiceVerifyQuery := ""
+	coreServiceGetQuery := ""
 	if hasDB && coreDB != "" && coreDB != "mongo" {
 		coreConfigGetQuery = configGetQuerySQL(coreDB)
+		coreUserGetQuery = userGetQuerySQL(coreDB)
+		coreServiceVerifyQuery = serviceVerifyQuerySQL(coreDB)
+		coreServiceGetQuery = serviceGetQuerySQL(coreDB)
 	}
 	coreDBDSN := ""
 	if hasDB && coreDB != "" && cfg.CoreDBHost != "" {
@@ -195,24 +210,27 @@ func NewApp(cfg NewAppConfig) error {
 	}
 
 	data := templateData{
-		AppName:            cfg.AppName,
-		ModulePath:         cfg.ModulePath,
-		UI:                 cfg.UI,
-		EnvPrefix:          envPrefix(cfg.AppName),
-		AuthKind:           authKind,
-		RememberMe:         cfg.RememberMe && needsSession,
-		JWTSecret:          jwtSecret,
-		HasDB:              hasDB,
-		HasMongo:           hasMongo,
-		HasMySQL:           hasMySQL,
-		HasPostgres:        hasPostgres,
-		HasMSSQL:           hasMSSQL,
-		DBTypesCSV:         dbTypesCSV(dbTypes),
-		CoreDB:             coreDB,
-		HasCoreDB:          hasDB,
-		CoreDBAccessor:     coreDBAccessor,
-		CoreConfigGetQuery: coreConfigGetQuery,
-		CoreDBDSN:          coreDBDSN,
+		AppName:                cfg.AppName,
+		ModulePath:             cfg.ModulePath,
+		UI:                     cfg.UI,
+		EnvPrefix:              envPrefix(cfg.AppName),
+		AuthKind:               authKind,
+		RememberMe:             cfg.RememberMe && needsSession,
+		JWTSecret:              jwtSecret,
+		HasDB:                  hasDB,
+		HasMongo:               hasMongo,
+		HasMySQL:               hasMySQL,
+		HasPostgres:            hasPostgres,
+		HasMSSQL:               hasMSSQL,
+		DBTypesCSV:             dbTypesCSV(dbTypes),
+		CoreDB:                 coreDB,
+		HasCoreDB:              hasDB,
+		CoreDBAccessor:         coreDBAccessor,
+		CoreConfigGetQuery:     coreConfigGetQuery,
+		CoreUserGetQuery:       coreUserGetQuery,
+		CoreServiceVerifyQuery: coreServiceVerifyQuery,
+		CoreServiceGetQuery:    coreServiceGetQuery,
+		CoreDBDSN:              coreDBDSN,
 	}
 
 	err = fs.WalkDir(templateFS, templatesRoot, func(path string, d fs.DirEntry, err error) error {
@@ -302,6 +320,34 @@ func NewApp(cfg NewAppConfig) error {
 			}
 		}
 
+		// core/users.go.tmpl, core/services.go.tmpl, and
+		// middleware/service_auth.go.tmpl (API-key/service-to-service auth
+		// — see core/services.go.tmpl's own doc comment) only exist when
+		// there's both a core database connection AND a JWT-capable
+		// -auth choice: API-key auth is documented as JWT's
+		// service-to-service companion, and core_users' UserId is
+		// explicitly the same value as the JWT "sub" claim, so neither
+		// makes sense for -auth none|session alone.
+		switch relSlash {
+		case "core/users.go.tmpl", "core/services.go.tmpl", "middleware/service_auth.go.tmpl":
+			if !hasDB || !needsJWT {
+				return nil
+			}
+		}
+
+		// handlers/admin/{users,services} — nexler's own generated admin
+		// API for core_users/core_services (see handlers/admin/users/
+		// users.go.tmpl's package doc comment) — same eligibility as
+		// service auth above, since these routes call core.CreateUser/
+		// ListServices/etc. directly. Wired into routes/protected/
+		// protected.go post-walk, below, not here (needs the aggregator
+		// file to already exist on disk).
+		if relSlash == "handlers/admin" && d.IsDir() {
+			if !hasDB || !needsJWT {
+				return fs.SkipDir
+			}
+		}
+
 		// The mysql/, postgres/, and mssql/ packages (simplified struct-based
 		// Get/GetOne/Insert/Update/Delete/Query/Call helpers, built on
 		// db.SQL) each only exist when their specific type is selected
@@ -353,6 +399,15 @@ func NewApp(cfg NewAppConfig) error {
 	if cfg.UI {
 		if err := writeAppUIHomepage(target); err != nil {
 			return fmt.Errorf("writing UI homepage templates: %w", err)
+		}
+	}
+
+	if hasDB && needsJWT {
+		if err := wireAggregator(target, "protected", cfg.ModulePath+"/handlers/admin/users", "adminusers"); err != nil {
+			return fmt.Errorf("wiring handlers/admin/users into routes/protected/protected.go: %w", err)
+		}
+		if err := wireAggregator(target, "protected", cfg.ModulePath+"/handlers/admin/services", "adminservices"); err != nil {
+			return fmt.Errorf("wiring handlers/admin/services into routes/protected/protected.go: %w", err)
 		}
 	}
 
@@ -481,6 +536,49 @@ func configGetQuerySQL(dbType string) string {
 		return "SELECT value FROM core_config WHERE [key] = @p1"
 	default: // postgres
 		return "SELECT value FROM core_config WHERE key = $1"
+	}
+}
+
+// userGetQuerySQL is configGetQuerySQL's counterpart for
+// core/users.go.tmpl's GetUser.
+func userGetQuerySQL(dbType string) string {
+	const cols = "user_id, username, user_role, user_type, status, created_at, updated_at"
+	switch dbType {
+	case "mysql":
+		return "SELECT " + cols + " FROM core_users WHERE user_id = ?"
+	case "mssql":
+		return "SELECT " + cols + " FROM core_users WHERE user_id = @p1"
+	default: // postgres
+		return "SELECT " + cols + " FROM core_users WHERE user_id = $1"
+	}
+}
+
+// serviceVerifyQuerySQL is configGetQuerySQL's counterpart for
+// core/services.go.tmpl's VerifyServiceKey — looked up by key_hash, never
+// the plaintext key, which is never stored.
+func serviceVerifyQuerySQL(dbType string) string {
+	switch dbType {
+	case "mysql":
+		return "SELECT name, status FROM core_services WHERE key_hash = ?"
+	case "mssql":
+		return "SELECT name, status FROM core_services WHERE key_hash = @p1"
+	default: // postgres
+		return "SELECT name, status FROM core_services WHERE key_hash = $1"
+	}
+}
+
+// serviceGetQuerySQL is serviceVerifyQuerySQL's counterpart for
+// core/services.go.tmpl's GetService — looked up by name (core_services'
+// primary key), never key_hash.
+func serviceGetQuerySQL(dbType string) string {
+	const cols = "name, status, created_at, updated_at"
+	switch dbType {
+	case "mysql":
+		return "SELECT " + cols + " FROM core_services WHERE name = ?"
+	case "mssql":
+		return "SELECT " + cols + " FROM core_services WHERE name = @p1"
+	default: // postgres
+		return "SELECT " + cols + " FROM core_services WHERE name = $1"
 	}
 }
 
