@@ -52,6 +52,7 @@ var updateChecks = []updateCheck{
 	{"kgate: webhook OpenAPI docs + startup test subscribe", ensureKgateOpenAPIAndTestSubscribe},
 	{"auth: API-key (service-to-service) auth", ensureServiceAuth},
 	{"auth: admin API for core_users/core_services", ensureAdminRoutes},
+	{"config: API base path (openapi servers)", ensureAPIBasePath},
 }
 
 // Update runs every registered check against appDir in order, stopping at

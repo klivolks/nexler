@@ -73,8 +73,9 @@ func Register(op Operation) {
 }
 
 // Spec builds an OpenAPI 3.0 document from every Operation registered so
-// far.
-func Spec(title string) map[string]any {
+// far. basePath, when non-empty, is advertised as a relative servers[0].url
+// entry — see the basePath handling below.
+func Spec(title, basePath string) map[string]any {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -233,6 +234,14 @@ func Spec(title string) map[string]any {
 			tags = append(tags, map[string]any{"name": t})
 		}
 		spec["tags"] = tags
+	}
+	if basePath != "" {
+		// A relative servers[0].url (not a full https://host/... URL) is
+		// deliberate: Swagger UI resolves it against the page's own origin,
+		// so the same spec works whether fetched from a dev host or the
+		// production domain — only the path prefix needs documenting, not
+		// the host.
+		spec["servers"] = []map[string]any{ {"url": basePath} }
 	}
 	return spec
 }

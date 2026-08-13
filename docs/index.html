@@ -621,8 +621,9 @@ err = resp.JSON(&amp;out)</pre></div>
 
       <div class="doc-sub" id="concept-config">
         <h3>Runtime configuration — <code>config</code> &amp; <code>.env</code></h3>
-        <p><code>config.C</code> is ready before <code>main()</code> runs, reading env vars namespaced per app as <code>{APPNAME}_HOST</code>/<code>{APPNAME}_PORT</code>/<code>{APPNAME}_SWAGGER_ENABLED</code> (default <code>true</code>). <code>.env</code>, scaffolded at the app root, is read by a hand-rolled parser — no third-party dependency, consistent with the generated <code>go.mod</code> having none. A key already present in the real environment always wins over <code>.env</code> — it's a committed-or-not local default, never an override mechanism.</p>
+        <p><code>config.C</code> is ready before <code>main()</code> runs, reading env vars namespaced per app as <code>{APPNAME}_HOST</code>/<code>{APPNAME}_PORT</code>/<code>{APPNAME}_SWAGGER_ENABLED</code> (default <code>true</code>)/<code>{APPNAME}_API_BASE_PATH</code> (no default). <code>.env</code>, scaffolded at the app root, is read by a hand-rolled parser — no third-party dependency, consistent with the generated <code>go.mod</code> having none. A key already present in the real environment always wins over <code>.env</code> — it's a committed-or-not local default, never an override mechanism.</p>
         <p><code>{APPNAME}_SWAGGER_ENABLED</code> gates <code>GET /swagger</code> and <code>GET /openapi.json</code> — set it to <code>false</code> in production to 404 both. The check happens inside each handler, not by leaving the routes unregistered: Go's <code>net/http.ServeMux</code> treats <code>GET /</code> (every app's homepage route) as a subtree pattern that would otherwise silently catch an unregistered <code>/swagger</code>/<code>/openapi.json</code> and serve the homepage instead of a 404. Every other route is unaffected.</p>
+        <p><code>{APPNAME}_API_BASE_PATH</code> documents the path prefix an external gateway mounts this service under (e.g. <code>/api/my-service</code>), left unset by default for direct/local access. When set, <code>openapi.Spec</code> adds a relative <code>servers[0].url</code> entry to <code>/openapi.json</code>, so Swagger UI's "Try it out" requests resolve correctly whether the app is hit directly or through the gateway — it's purely documentational and never affects actual route registration or matching.</p>
       </div>
     </section>
 
@@ -633,6 +634,12 @@ err = resp.JSON(&amp;out)</pre></div>
       <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
 
       <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-13</div>
+          <h4><code>{APPNAME}_API_BASE_PATH</code> — OpenAPI <code>servers</code> for gateway-mounted apps</h4>
+          <p>New <code>Config.APIBasePath</code> setting, unset by default (no fallback — an operator deploying behind an API gateway sets it explicitly). When set, <code>openapi.Spec</code> now emits a relative <code>servers[0].url</code> entry, so Swagger UI resolves requests correctly when the app is reverse-proxied under a path prefix (e.g. a gateway mounting it at <code>/api/&lt;service&gt;</code>) instead of only working at the origin root. Purely documentational — doesn't affect actual route registration or matching. Existing apps pick it up via <code>nexler update</code>.</p>
+          <div class="change-tags"><span class="change-tag">config</span><span class="change-tag">openapi</span></div>
+        </div>
         <div class="change-entry">
           <div class="change-date">2026-08-13</div>
           <h4><code>kpass.Authorise</code> — resolve a login code via kpass</h4>

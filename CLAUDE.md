@@ -351,6 +351,22 @@ established (see "`nexler init kgate`" below), and appends `{PREFIX}_SWAGGER_ENA
 `.env` **only if that key is missing** — never overwriting an already-present value, since a
 production deployment may have deliberately set it to `false`.
 
+**`{APPNAME}_API_BASE_PATH`** (`Config.APIBasePath`, no default — stays empty unless an operator
+sets it) documents the path prefix an external gateway mounts this service under (e.g. an app
+reverse-proxied at `/api/my-service`). When non-empty, `openapi.Spec` (`openapi/openapi.go.tmpl`)
+adds a relative `servers[0].url` entry to the generated document — relative, not a full
+`https://host/...` URL, since Swagger UI resolves a relative server URL against the page's own
+origin, so the same spec works correctly whether fetched from a dev host or through the
+production gateway; only the path prefix needs documenting, not the host. Purely documentational
+— it has no effect on `mux.HandleFunc`'s own route registration/matching, which is unaware of any
+prefix. An app scaffolded before this setting existed picks it up via `nexler update`
+(`ensureAPIBasePath` in `route.go`) — same fixed-literal-anchor technique as `ensureSwaggerToggle`
+for `config.go` (reusing its own `Port` field/load()-line anchors, so it doesn't depend on
+`ensureSwaggerToggle` having run first), plus turning `home.go`'s single-argument
+`openapi.Spec("<AppName>")` call into the two-argument
+`openapi.Spec("<AppName>", config.C.APIBasePath)` form, and appending
+`{PREFIX}_API_BASE_PATH=` (blank) to `.env` only if that key is missing.
+
 ### Authentication (`-auth none|jwt|session|both`, `-remember-me`)
 
 `middleware.RequireAuth` — what every `-protected` route wraps its handlers in — is

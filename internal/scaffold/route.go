@@ -1069,7 +1069,7 @@ func detectExistingProtection(appDir, modulePath, relDirSlash string) (protected
 // added its own RespUnwrapped before Tags existed, or vice versa) — a
 // single-marker check would wrongly consider such a file current. Add the
 // new field's name here whenever openapi.go.tmpl gains another one.
-var openAPIUpToDateMarkers = []string{"Tags", "RespUnwrapped", "ClientIdAuth"}
+var openAPIUpToDateMarkers = []string{"Tags", "RespUnwrapped", "ClientIdAuth", "basePath"}
 
 // ensureOpenAPIUpToDate rewrites appDir/openapi/openapi.go from the current
 // embedded template if it predates any Operation field nexler now expects
@@ -1581,6 +1581,114 @@ func ensureSwaggerToggle(appDir string) (bool, error) {
 			b.WriteString("\n")
 		}
 		b.WriteString(envKey + "=true\n")
+		if err := os.WriteFile(envPath, []byte(b.String()), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	return changed, nil
+}
+
+// apiBasePathHomeSpecOld/apiBasePathHomeSpecOpen anchor ensureAPIBasePath's
+// patch of home.go's HandleOpenAPI: openapi.Spec is always called as
+// openapi.Spec("<AppName>") before this feature — the app name itself isn't
+// a fixed anchor (it varies per app), so the match is done in two steps:
+// find the fixed openapi.Spec(" prefix, then the next ") after it closes
+// the string literal.
+const apiBasePathHomeSpecOpen = `openapi.Spec("`
+
+// ensureAPIBasePath brings an app scaffolded before Config gained
+// APIBasePath up to date: adds the field + load() wiring to
+// config/config.go (reusing the same Port anchors ensureSwaggerToggle
+// already established, so this doesn't depend on ensureSwaggerToggle having
+// run first), turns home.go's single-arg openapi.Spec("<AppName>") call
+// into the two-arg openapi.Spec("<AppName>", config.C.APIBasePath) form,
+// and appends {PREFIX}_API_BASE_PATH= (blank — this setting has no default)
+// to .env, only when that key isn't already present.
+//
+// Registered in update.go's updateChecks after ensureOpenAPIUpToDate and
+// ensureSwaggerToggle, so by the time this runs, openapi/openapi.go's Spec
+// already takes two arguments (ensureOpenAPIUpToDate regenerates it — see
+// the "basePath" marker in openAPIUpToDateMarkers) and home.go already
+// imports config (ensureSwaggerToggle adds it if missing).
+func ensureAPIBasePath(appDir string) (bool, error) {
+	changed := false
+
+	prefix, err := recoverEnvPrefix(appDir)
+	if err != nil {
+		return changed, err
+	}
+
+	configPath := filepath.Join(appDir, "config", "config.go")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", configPath, err)
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if !strings.Contains(content, "APIBasePath") {
+		fieldIdx := strings.Index(content, swaggerConfigFieldAnchor)
+		loadIdx := strings.Index(content, swaggerConfigLoadAnchor)
+		if fieldIdx == -1 || loadIdx == -1 {
+			return changed, fmt.Errorf("%s doesn't look like a generated config.go (missing the expected Port field/load() lines) — has it been hand-rewritten? Add manually: an `APIBasePath string` field to Config, and `APIBasePath: os.Getenv(%q),` to load()'s returned Config literal", configPath, prefix+"_API_BASE_PATH")
+		}
+
+		fieldInsertAt := fieldIdx + strings.Index(content[fieldIdx:], "\n") + 1
+		fieldLine := "\tAPIBasePath string // " + prefix + "_API_BASE_PATH — path prefix the external gateway mounts this service under (e.g. \"/api/v1\"); empty means openapi.json advertises no prefix (direct access). Purely documentational — does not affect actual route registration/matching.\n"
+		content = content[:fieldInsertAt] + fieldLine + content[fieldInsertAt:]
+
+		// Re-find loadIdx: the field insertion above may have shifted it.
+		loadIdx = strings.Index(content, swaggerConfigLoadAnchor)
+		loadInsertAt := loadIdx + strings.Index(content[loadIdx:], "\n") + 1
+		loadLine := "\t\tAPIBasePath: os.Getenv(\"" + prefix + "_API_BASE_PATH\"),\n"
+		content = content[:loadInsertAt] + loadLine + content[loadInsertAt:]
+
+		if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	homePath := filepath.Join(appDir, "handlers", "home", "home.go")
+	homeRaw, err := os.ReadFile(homePath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", homePath, err)
+	}
+	homeContent := strings.ReplaceAll(string(homeRaw), "\r\n", "\n")
+	if !strings.Contains(homeContent, "config.C.APIBasePath") {
+		openIdx := strings.Index(homeContent, apiBasePathHomeSpecOpen)
+		if openIdx == -1 {
+			return changed, fmt.Errorf("%s doesn't look like a generated home.go (no openapi.Spec(\"...\") call found) — has it been hand-rewritten? Add config.C.APIBasePath as Spec's second argument manually", homePath)
+		}
+		closeRel := strings.Index(homeContent[openIdx:], "\")")
+		if closeRel == -1 {
+			return changed, fmt.Errorf("%s: openapi.Spec(\" call has no closing \") — has it been hand-rewritten?", homePath)
+		}
+		closeIdx := openIdx + closeRel + 2 // position right after the closing ")
+		call := homeContent[openIdx:closeIdx]
+		newCall := call[:len(call)-1] + ", config.C.APIBasePath)"
+		homeContent = homeContent[:openIdx] + newCall + homeContent[closeIdx:]
+
+		if err := os.WriteFile(homePath, []byte(homeContent), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	envPath := filepath.Join(appDir, ".env")
+	envRaw, err := os.ReadFile(envPath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", envPath, err)
+	}
+	envContent := strings.ReplaceAll(string(envRaw), "\r\n", "\n")
+	envKey := prefix + "_API_BASE_PATH"
+	if !envHasKey(envContent, envKey) {
+		var b strings.Builder
+		b.WriteString(envContent)
+		if len(envContent) > 0 && !strings.HasSuffix(envContent, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(envKey + "=\n")
 		if err := os.WriteFile(envPath, []byte(b.String()), 0o644); err != nil {
 			return changed, err
 		}

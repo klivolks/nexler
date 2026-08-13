@@ -24,6 +24,7 @@ type Config struct {
 	Host string // {{ .EnvPrefix }}_HOST — interface to listen on; empty means all interfaces
 	Port string // {{ .EnvPrefix }}_PORT — defaults to "8080"
 	SwaggerEnabled bool // {{ .EnvPrefix }}_SWAGGER_ENABLED — enables /swagger and /openapi.json; default true, set to false in production
+	APIBasePath string // {{ .EnvPrefix }}_API_BASE_PATH — path prefix the external gateway mounts this service under (e.g. "/api/v1"); empty means openapi.json advertises no prefix (direct access). Purely documentational — does not affect actual route registration/matching.
 {{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
 	JWTSecret string // {{ .EnvPrefix }}_JWT_SECRET — signs/verifies issued JWTs (see auth/jwt.go)
 {{- end }}
@@ -40,6 +41,7 @@ func load() Config {
 		Host: os.Getenv("{{ .EnvPrefix }}_HOST"),
 		Port: getEnvOr("{{ .EnvPrefix }}_PORT", "8080"),
 		SwaggerEnabled: getEnvBoolOr("{{ .EnvPrefix }}_SWAGGER_ENABLED", true),
+		APIBasePath: os.Getenv("{{ .EnvPrefix }}_API_BASE_PATH"),
 {{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
 		JWTSecret: os.Getenv("{{ .EnvPrefix }}_JWT_SECRET"),
 {{- end }}

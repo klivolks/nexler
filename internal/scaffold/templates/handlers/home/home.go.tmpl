@@ -27,7 +27,7 @@ func HandleOpenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(openapi.Spec("{{ .AppName }}"))
+	json.NewEncoder(w).Encode(openapi.Spec("{{ .AppName }}", config.C.APIBasePath))
 }
 
 // HandleSwagger serves the bundled Swagger UI page, gated on
