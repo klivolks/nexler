@@ -44,7 +44,7 @@ type Result struct {
 	UserType string `json:"user_type"`
 }
 
-// Check calls kpass's POST {KPASS_URL}/permission/check/ for userID's
+// Check calls kpass's POST {KPASS_URL}/api/v1/permission/check/ for userID's
 // access to resource (e.g. "myapp.users.create"), and returns kpass's
 // full response — including UserRole/UserType — so callers can write
 // their own conditions on top of it (e.g. restricting which data a given
@@ -70,7 +70,7 @@ func Check(ctx context.Context, userID, resource string, extra map[string]any) (
 		"X-Api-Secret": os.Getenv("KPASS_API_SECRET"),
 	}
 
-	resp, err := apiclient.Post(ctx, strings.TrimRight(base, "/")+"/permission/check/", headers, payload)
+	resp, err := apiclient.Post(ctx, strings.TrimRight(base, "/")+"/api/v1/permission/check/", headers, payload)
 	if err != nil {
 		return nil, fmt.Errorf("kpass: calling permission/check: %w", err)
 	}
