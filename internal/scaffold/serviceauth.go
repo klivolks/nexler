@@ -111,15 +111,32 @@ func ensureServiceAuth(appDir string) (bool, error) {
 		return changed, err
 	}
 
+	// An app already on the -merge-service-auth design (folded into
+	// middleware/auth.go's own RequireAuth — see MergeServiceAuth in
+	// mergeserviceauth.go) never gets middleware/service_auth.go written
+	// back here: that file's whole capability already lives in auth.go, so
+	// resurrecting it on every plain `nexler update` would silently
+	// reintroduce dead/duplicate service-key-checking code into a merged
+	// app. Detected the same way MergeServiceAuth itself detects merged
+	// state — middleware/auth.go already checking X-Api-Secret.
+	authGoPath := filepath.Join(appDir, "middleware", "auth.go")
+	authGoRaw, err := os.ReadFile(authGoPath)
+	if err != nil {
+		return changed, fmt.Errorf("%s does not exist — is %s a nexler app directory? %w", authGoPath, appDir, err)
+	}
+	mergedServiceAuth := strings.Contains(string(authGoRaw), "X-Api-Secret")
+
 	middlewarePath := filepath.Join(appDir, "middleware", "service_auth.go")
-	if _, err := os.Stat(middlewarePath); os.IsNotExist(err) {
-		mwData := struct{ ModulePath string }{ModulePath: modulePath}
-		if err := writeTemplateFile(templatesRoot+"/middleware/service_auth.go.tmpl", middlewarePath, mwData); err != nil {
+	if !mergedServiceAuth {
+		if _, err := os.Stat(middlewarePath); os.IsNotExist(err) {
+			mwData := struct{ ModulePath string }{ModulePath: modulePath}
+			if err := writeTemplateFile(templatesRoot+"/middleware/service_auth.go.tmpl", middlewarePath, mwData); err != nil {
+				return changed, err
+			}
+			changed = true
+		} else if err != nil {
 			return changed, err
 		}
-		changed = true
-	} else if err != nil {
-		return changed, err
 	}
 
 	contextPath := filepath.Join(appDir, "auth", "context.go")

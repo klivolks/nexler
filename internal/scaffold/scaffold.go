@@ -92,6 +92,17 @@ type NewAppConfig struct {
 	// original blank-DSN behavior exactly, for anyone who'd rather fill
 	// .env in by hand.
 	CoreDBHost, CoreDBPort, CoreDBName, CoreDBUser, CoreDBPassword string
+	// MergeServiceAuth, when AuthKind is "jwt" or "both" AND DBTypes is
+	// non-empty, folds X-Api-Secret service-key auth (core.VerifyServiceKey)
+	// into middleware.RequireAuth itself as a fallback after JWT/session,
+	// instead of generating a separate middleware.RequireServiceAuth — so a
+	// service/automation caller can hit the exact same -protected routes a
+	// human user would. Ignored otherwise (same eligibility as
+	// RequireServiceAuth itself). Default false preserves today's
+	// separate-middleware behavior — deliberately not the new default, since
+	// keeping user-only and service-only routes structurally distinct is
+	// still the right choice for a pure API app.
+	MergeServiceAuth bool
 }
 
 // TargetPath returns the full path of the app directory to be created.
@@ -118,6 +129,11 @@ type templateData struct {
 	CoreDB         string
 	HasCoreDB      bool
 	CoreDBAccessor string
+	// MergeServiceAuth folds X-Api-Secret service-key auth into
+	// middleware.RequireAuth itself (as a fallback after JWT/session)
+	// instead of generating a separate middleware.RequireServiceAuth. See
+	// NewAppConfig.MergeServiceAuth.
+	MergeServiceAuth bool
 	// CoreConfigGetQuery is the dialect-correct, parameterized SELECT
 	// core/config.go.tmpl's GetSetting uses — empty when CoreDBAccessor is
 	// "Mongo" (unused there). See configGetQuerySQL.
@@ -225,6 +241,7 @@ func NewApp(cfg NewAppConfig) error {
 		DBTypesCSV:             dbTypesCSV(dbTypes),
 		CoreDB:                 coreDB,
 		HasCoreDB:              hasDB,
+		MergeServiceAuth:       cfg.MergeServiceAuth && hasDB && needsJWT,
 		CoreDBAccessor:         coreDBAccessor,
 		CoreConfigGetQuery:     coreConfigGetQuery,
 		CoreUserGetQuery:       coreUserGetQuery,
@@ -308,6 +325,18 @@ func NewApp(cfg NewAppConfig) error {
 			}
 		}
 
+		// store/common (Base{ID}, meant to be embedded anonymously in every
+		// Mongo domain struct — see store/common/common.go.tmpl) is
+		// app-wide infrastructure, not tied to any particular route, so it's
+		// scaffolded here rather than by `nexler create <route>`. Mongo-only
+		// (bson.ObjectID has no SQL-dialect equivalent this shared type
+		// could sensibly hold), same gate as mongo/ itself.
+		if relSlash == "store" && d.IsDir() {
+			if !hasMongo {
+				return fs.SkipDir
+			}
+		}
+
 		// The core/ package (app-wide system data like Config — independent
 		// of whatever business data your own store/ packages manage; see
 		// core/config.go.tmpl) only exists when a core database connection
@@ -320,17 +349,27 @@ func NewApp(cfg NewAppConfig) error {
 			}
 		}
 
-		// core/users.go.tmpl, core/services.go.tmpl, and
-		// middleware/service_auth.go.tmpl (API-key/service-to-service auth
-		// — see core/services.go.tmpl's own doc comment) only exist when
-		// there's both a core database connection AND a JWT-capable
-		// -auth choice: API-key auth is documented as JWT's
-		// service-to-service companion, and core_users' UserId is
+		// core/users.go.tmpl and core/services.go.tmpl (API-key/
+		// service-to-service auth — see core/services.go.tmpl's own doc
+		// comment) only exist when there's both a core database connection
+		// AND a JWT-capable -auth choice: API-key auth is documented as
+		// JWT's service-to-service companion, and core_users' UserId is
 		// explicitly the same value as the JWT "sub" claim, so neither
 		// makes sense for -auth none|session alone.
 		switch relSlash {
-		case "core/users.go.tmpl", "core/services.go.tmpl", "middleware/service_auth.go.tmpl":
+		case "core/users.go.tmpl", "core/services.go.tmpl":
 			if !hasDB || !needsJWT {
+				return nil
+			}
+		}
+
+		// middleware/service_auth.go.tmpl has that same eligibility, PLUS
+		// it's skipped whenever cfg.MergeServiceAuth is set — merged mode
+		// folds its X-Api-Secret check into middleware/auth.go.tmpl's own
+		// RequireAuth instead, so the separate file (and its now-unused
+		// RequireServiceAuth) would just be dead code alongside it.
+		if relSlash == "middleware/service_auth.go.tmpl" {
+			if !hasDB || !needsJWT || cfg.MergeServiceAuth {
 				return nil
 			}
 		}

@@ -73,8 +73,9 @@ func Register(op Operation) {
 }
 
 // Spec builds an OpenAPI 3.0 document from every Operation registered so
-// far.
-func Spec(title string) map[string]any {
+// far. basePath, when non-empty, is advertised as a relative servers[0].url
+// entry — see the basePath handling below.
+func Spec(title, basePath string) map[string]any {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -194,6 +195,10 @@ func Spec(title string) map[string]any {
 			needsSecurity = true
 			sec := map[string][]string{"ApiKeyAuth": {}, "BearerAuth": {}, "ClientIdAuth": {}}
 			operation["security"] = []map[string][]string{sec}
+		} else {
+			needsSecurity = true
+			sec := map[string][]string{"ClientIdAuth": {}}
+			operation["security"] = []map[string][]string{sec}
 		}
 
 		if len(op.Tags) > 0 {
@@ -212,6 +217,10 @@ func Spec(title string) map[string]any {
 		components["securitySchemes"] = map[string]any{
 			"ApiKeyAuth":   map[string]any{"type": "apiKey", "in": "header", "name": "X-Api-Key"},
 			"BearerAuth":   map[string]any{"type": "http", "scheme": "bearer"},
+			"ClientIdAuth": map[string]any{"type": "apiKey", "in": "header", "name": "X-Client-Id"},
+		}
+	} else {
+		components["securitySchemes"] = map[string]any{
 			"ClientIdAuth": map[string]any{"type": "apiKey", "in": "header", "name": "X-Client-Id"},
 		}
 	}
@@ -233,6 +242,14 @@ func Spec(title string) map[string]any {
 			tags = append(tags, map[string]any{"name": t})
 		}
 		spec["tags"] = tags
+	}
+	if basePath != "" {
+		// A relative servers[0].url (not a full https://host/... URL) is
+		// deliberate: Swagger UI resolves it against the page's own origin,
+		// so the same spec works whether fetched from a dev host or the
+		// production domain — only the path prefix needs documenting, not
+		// the host.
+		spec["servers"] = []map[string]any{ {"url": basePath} }
 	}
 	return spec
 }

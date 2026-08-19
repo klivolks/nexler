@@ -23,9 +23,9 @@ import (
 // auth.ContextWithService — read it back with auth.Service(r).
 func RequireServiceAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("X-Api-Key")
+		key := r.Header.Get("X-Api-Secret")
 		if key == "" {
-			http.Error(w, "missing X-Api-Key", http.StatusUnauthorized)
+			http.Error(w, "missing X-Api-Secret", http.StatusUnauthorized)
 			return
 		}
 		name, ok, err := core.VerifyServiceKey(r.Context(), key)

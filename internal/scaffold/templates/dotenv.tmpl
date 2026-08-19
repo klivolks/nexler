@@ -2,6 +2,7 @@
 {{ .EnvPrefix }}_HOST=
 {{ .EnvPrefix }}_PORT=8080
 {{ .EnvPrefix }}_SWAGGER_ENABLED=true
+{{ .EnvPrefix }}_API_BASE_PATH=
 {{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
 {{ .EnvPrefix }}_JWT_SECRET={{ .JWTSecret }}
 {{- end }}

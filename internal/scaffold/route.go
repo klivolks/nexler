@@ -74,6 +74,13 @@ type RouteResult struct {
 	// landed, independently of which file (NewFile, or -file's existing
 	// target) their handler function(s)/model(s) landed in.
 	PrimaryFile string
+	// RegisterFuncName is the exact Go function name this invocation's
+	// mux-wiring landed in — "Register" for the ordinary fold-into-existing
+	// case (NewFile != PrimaryFile, or Created), or "Register"+Name (e.g.
+	// "RegisterSms") when RouteConfig.OwnRegister created an independent
+	// second resource (NewFile == PrimaryFile) — set so the CLI can report
+	// the exact generated identifier without re-deriving it.
+	RegisterFuncName string
 }
 
 // RouteConfig holds the parameters for scaffolding one route.
@@ -101,9 +108,12 @@ type RouteConfig struct {
 	// Go package name, handlers, and everything else about it are
 	// unaffected, but its code now spans more than one file. A FileName
 	// that matches an already-existing file appends to it instead, same as
-	// today. Either way, this invocation's mux.HandleFunc/openapi.Register
-	// wiring always lands in the package's one primary (Register-holding)
-	// file, since Go permits only one func Register per package.
+	// today. By default, either way, this invocation's mux.HandleFunc/
+	// openapi.Register wiring lands in the package's one primary
+	// (Register-holding) file, since Go permits only one func Register per
+	// package — unless OwnRegister is set, in which case a brand-new
+	// FileName instead becomes its own independent primary file with its
+	// own Register<Name> function (see OwnRegister).
 	FileName string
 	// IdentName optionally overrides the identifier base normally derived
 	// from Module/Submodule — used to build every handler function name,
@@ -172,6 +182,21 @@ type RouteConfig struct {
 	// "module" gives this route its own templates/html/<module>/layout.html
 	// copy instead. Ignored when ResponseKind isn't "html".
 	LayoutKind string
+	// OwnRegister, when true, scaffolds this route as an independent second
+	// (third, ...) resource inside an already-existing package directory —
+	// its own handler file with its own Register<Name> function (Go allows
+	// only one func Register per package, so a second one needs a distinct
+	// name), own openapi/middleware wiring, and an additional
+	// <alias>.Register<Name>(mux) call in the aggregator alongside the
+	// package's existing Register call — instead of folding this
+	// invocation's method(s) into the package's single existing Register,
+	// which is what a plain -file (without OwnRegister) still does. Only
+	// meaningful when FileName names a file that doesn't already exist in
+	// an already-existing route package, and requires IdentName to be set
+	// (to disambiguate this resource's identifiers from the package's
+	// existing one(s) — see addOwnRegisterResource). False (default)
+	// preserves every existing -file/-name behavior exactly.
+	OwnRegister bool
 }
 
 // routeMethod is one HTTP method's worth of generated identifiers,
@@ -195,6 +220,14 @@ type routeMethod struct {
 type routeData struct {
 	PkgName           string   // e.g. "verify"
 	Name              string   // e.g. "Verify" — used in identifiers like HandleVerify
+	// RegisterFuncName is the name of this file's mux-wiring function —
+	// "Register" for every package's original/only resource (the default,
+	// rendered identically to before this field existed), or "Register"+Name
+	// for a second independent resource added via -own-register (see
+	// addOwnRegisterResource) — Go allows only one func Register per
+	// package, so a second one needs a distinct name, matching the
+	// "RegisterSms" convention a hand-built app already established.
+	RegisterFuncName string
 	Route             string   // e.g. "/asd" — empty for a standalone service/store, not tied to any route
 	RouteLabel        string   // descriptive text for service.go.tmpl/store.go.tmpl's TODO comments: Route when set, else "this package"
 	Standalone        bool     // true when this service/store was generated via `nexler create service|store` (NewLayer), not as part of a route
@@ -379,6 +412,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 	data := routeData{
 		PkgName:           pkgName,
 		Name:              name,
+		RegisterFuncName:  "Register",
 		Route:             cfg.Route,
 		RouteLabel:        cfg.Route,
 		ModulePath:        modulePath,
@@ -462,7 +496,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 			strings.Join(written, ", "), group, group, err, alias, modulePath+"/handlers/"+relDirSlash, alias)
 	}
 
-	return RouteResult{Created: true, Added: verbs}, nil
+	return RouteResult{Created: true, Added: verbs, RegisterFuncName: "Register"}, nil
 }
 
 // writeRouteLayerFile renders tmplPath (from fs) against data and writes it
@@ -618,26 +652,59 @@ func addToExistingRoute(appDir, modulePath, relDir, fileName string, data routeD
 	handlersDir := filepath.Join(appDir, "handlers", filepath.FromSlash(data.RelDirSlash))
 	modelsDir := filepath.Join(appDir, "models", filepath.FromSlash(data.RelDirSlash))
 
-	primaryPath, found, err := findMarkedFile(handlersDir, registerMarker)
-	if err != nil {
-		return RouteResult{}, err
-	}
-	if !found {
-		return RouteResult{}, fmt.Errorf("no existing handler file found containing the %q marker under handlers/%s — it may predate this feature; add the marker manually or edit the route directly", registerMarker, data.RelDirSlash)
-	}
-	primaryRaw, err := os.ReadFile(primaryPath)
-	if err != nil {
-		return RouteResult{}, fmt.Errorf("reading %s: %w", primaryPath, err)
-	}
-	primaryContent := strings.ReplaceAll(string(primaryRaw), "\r\n", "\n")
-
-	// Resolve fileName's own target handler/model files directly — never
-	// via a directory-wide marker scan, so a -file value naming a file
-	// that doesn't exist yet is recognized as "create a new file" rather
-	// than silently redirected to whichever file a scan happens to find
-	// first (the root cause of the bug this function now fixes).
+	// Resolve fileName's own target handler/model files directly, first —
+	// never via a directory-wide marker scan — so a -file value naming a
+	// file that doesn't exist yet is recognized as "create a new file"
+	// rather than silently redirected to whichever file a scan happens to
+	// find first, and so a -file value that already has its own
+	// registerMarker (this package's original primary, or an earlier
+	// -own-register resource — see OwnRegister) is always treated as ITS
+	// OWN primary, never misattributed to a different marked file in the
+	// same directory (the root cause of the bug this direct-first
+	// resolution fixes).
 	targetHandlerPath := filepath.Join(handlersDir, fileName+".go")
 	targetModelPath := filepath.Join(modelsDir, fileName+".go")
+
+	var primaryPath, primaryContent string
+	targetRaw, targetStatErr := os.ReadFile(targetHandlerPath)
+	targetHasOwnRegister := targetStatErr == nil && strings.Contains(string(targetRaw), registerMarker)
+
+	switch {
+	case targetHasOwnRegister:
+		primaryPath = targetHandlerPath
+		primaryContent = strings.ReplaceAll(string(targetRaw), "\r\n", "\n")
+	case cfg.OwnRegister:
+		switch {
+		case targetStatErr == nil:
+			return RouteResult{}, fmt.Errorf("%s already exists but has no Register function of its own — it's a secondary file already folded into a different resource's Register; pick a different -file name to create a new independent resource, or omit -own-register to add method(s) to it as-is", targetHandlerPath)
+		case !os.IsNotExist(targetStatErr):
+			return RouteResult{}, targetStatErr
+		}
+		return addOwnRegisterResource(appDir, modulePath, relDir, fileName, data, cfg)
+	default:
+		matches, err := findAllMarkedFiles(handlersDir, registerMarker)
+		if err != nil {
+			return RouteResult{}, err
+		}
+		switch len(matches) {
+		case 0:
+			return RouteResult{}, fmt.Errorf("no existing handler file found containing the %q marker under handlers/%s — it may predate this feature; add the marker manually or edit the route directly", registerMarker, data.RelDirSlash)
+		case 1:
+			primaryPath = matches[0]
+		default:
+			names := make([]string, len(matches))
+			for i, m := range matches {
+				names[i] = filepath.Base(m)
+			}
+			return RouteResult{}, fmt.Errorf("handlers/%s already has more than one independent resource (%s), and -file %q doesn't match any of them — target one of them directly via -file, or add a new one with -own-register (and -name)", data.RelDirSlash, strings.Join(names, ", "), fileName)
+		}
+		primaryRaw, err := os.ReadFile(primaryPath)
+		if err != nil {
+			return RouteResult{}, fmt.Errorf("reading %s: %w", primaryPath, err)
+		}
+		primaryContent = strings.ReplaceAll(string(primaryRaw), "\r\n", "\n")
+	}
+
 	targetIsPrimary := targetHandlerPath == primaryPath
 
 	var targetHandlerContent string
@@ -733,7 +800,7 @@ func addToExistingRoute(appDir, modulePath, relDir, fileName string, data routeD
 	if err != nil {
 		return RouteResult{}, err
 	}
-	if err := detectIdentifierCollisions(allHandlerContent, allModelContent, newMethods, data.Route); err != nil {
+	if err := detectIdentifierCollisions(allHandlerContent, allModelContent, newMethods, "", data.Route); err != nil {
 		return RouteResult{}, err
 	}
 	data.Methods = newMethods
@@ -826,7 +893,7 @@ func addToExistingRoute(appDir, modulePath, relDir, fileName string, data routeD
 		note = fmt.Sprintf("note: this route package was already registered as %s; the newly added method(s) (%s) are %s instead — only those handlers wrap themselves with middleware.RequireAuth, the rest of the package is untouched", existingLabel, strings.Join(added, ", "), addedLabel)
 	}
 
-	result := RouteResult{Created: false, Added: added, Skipped: skipped, LayersAdded: layersAdded, Note: note}
+	result := RouteResult{Created: false, Added: added, Skipped: skipped, LayersAdded: layersAdded, Note: note, RegisterFuncName: "Register"}
 	if newFileCreated {
 		result.NewFile = fileName + ".go"
 	}
@@ -834,6 +901,118 @@ func addToExistingRoute(appDir, modulePath, relDir, fileName string, data routeD
 		result.PrimaryFile = filepath.Base(primaryPath)
 	}
 	return result, nil
+}
+
+// addOwnRegisterResource scaffolds fileName as a brand-new, independent
+// resource inside relDir's already-existing package: its own primary-shaped
+// handler file (own Register<Name> function, own middleware/openapi
+// imports, own handlerMarker/registerMarker — rendered from the very same
+// handler.go.tmpl a package's first resource uses, just with
+// data.RegisterFuncName set to something other than "Register"), its own
+// model file, and — unless this invocation's own -service/-store skip or
+// reuse them — its own service/store files, all living alongside (never
+// touching) the package's existing resource's files. Finally wires an
+// additional <alias>.Register<Name>(mux) call into the aggregator alongside
+// the package's existing Register call (see wireAggregatorAdditionalCall).
+//
+// Dispatched from addToExistingRoute when RouteConfig.OwnRegister is set
+// and fileName doesn't already name a file with its own registerMarker —
+// by that point the caller has already confirmed fileName's target handler
+// file doesn't exist yet, so every write below is a fresh file, never an
+// overwrite. data is this invocation's own routeData exactly as NewRoute
+// built it (Methods/HasServiceRef/HasStoreRef/etc. all reflect only this
+// invocation's own flags — not the package's existing resource's), so this
+// mirrors NewRoute's brand-new-package path almost exactly, just writing
+// into an already-existing package directory instead of a fresh one.
+func addOwnRegisterResource(appDir, modulePath, relDir, fileName string, data routeData, cfg RouteConfig) (RouteResult, error) {
+	handlersDir := filepath.Join(appDir, "handlers", filepath.FromSlash(data.RelDirSlash))
+	modelsDir := filepath.Join(appDir, "models", filepath.FromSlash(data.RelDirSlash))
+
+	data.RegisterFuncName = "Register" + data.Name
+
+	// Collisions are checked package-wide (every existing file in the
+	// directory, from any earlier resource), same reasoning as
+	// addToExistingRoute's own check — plus the new resource's own
+	// Register<Name> function name, which only this path can ever
+	// introduce.
+	allHandlerContent, err := concatGoFiles(handlersDir)
+	if err != nil {
+		return RouteResult{}, err
+	}
+	allModelContent, err := concatGoFiles(modelsDir)
+	if err != nil {
+		return RouteResult{}, err
+	}
+	if err := detectIdentifierCollisions(allHandlerContent, allModelContent, data.Methods, data.RegisterFuncName, data.Route); err != nil {
+		return RouteResult{}, err
+	}
+
+	if data.HTMLResponse {
+		layoutKind := cfg.LayoutKind
+		if layoutKind == "" {
+			layoutKind = "shared"
+		}
+		if err := validateLayoutKind(layoutKind); err != nil {
+			return RouteResult{}, err
+		}
+		if err := writeHTMLTemplates(appDir, data.RelDirSlash, data.Methods, layoutKind); err != nil {
+			return RouteResult{}, fmt.Errorf("could not write HTML templates for the new resource: %w", err)
+		}
+	}
+
+	if _, err := writeRouteLayerFile(appDir, "handlers", routeHandlerTmpl, routeTemplateFS, relDir, fileName, data); err != nil {
+		return RouteResult{}, err
+	}
+	// !data.HasServiceRef && data.HasService is exactly "this invocation's
+	// own -service resolved to 'generate fresh'" — the same condition
+	// NewRoute's brand-new-package path uses (there expressed directly as
+	// !hasServiceRef && !skipService, which data.HasService/HasServiceRef
+	// already encode: HasService is hasServiceRef || !skipService). Doesn't
+	// consult what's already on disk for the package's OTHER resource(s)
+	// the way addToExistingRoute's own on-disk detection does — an existing
+	// resource's services/<relDir>/email.go must never be mistaken for this
+	// new resource already having a service of its own.
+	if !data.HasServiceRef && data.HasService {
+		if _, err := writeRouteLayerFile(appDir, "services", routeServiceTmpl, routeTemplateFS, relDir, fileName, data); err != nil {
+			return RouteResult{}, err
+		}
+	}
+	if !data.HasStoreRef && data.HasStore {
+		if _, err := writeRouteLayerFile(appDir, "store", routeStoreTmpl, routeTemplateFS, relDir, fileName, data); err != nil {
+			return RouteResult{}, err
+		}
+	}
+	if _, err := writeRouteLayerFile(appDir, "models", routeModelTmpl, routeTemplateFS, relDir, fileName, data); err != nil {
+		return RouteResult{}, err
+	}
+
+	// This invocation's own -protected decides which aggregator file this
+	// resource is wired into, independently of wherever the package's
+	// existing resource was wired — so email (public) and sms (-protected)
+	// can legitimately live in different aggregator files while sharing
+	// one handlers/services/store/models package.
+	group := "public"
+	if cfg.Protected {
+		group = "protected"
+	}
+	importPath := modulePath + "/handlers/" + data.RelDirSlash
+	if err := wireAggregatorAdditionalCall(appDir, group, importPath, data.Alias, data.RegisterFuncName); err != nil {
+		return RouteResult{}, fmt.Errorf("generated the new resource's files, but could not wire routes/%s/%s.go automatically: %w\nAdd manually in that file:\n  %s.%s(mux)",
+			group, group, err, data.Alias, data.RegisterFuncName)
+	}
+
+	var added []string
+	for _, m := range data.Methods {
+		added = append(added, m.Verb)
+	}
+
+	newFile := fileName + ".go"
+	return RouteResult{
+		Added:            added,
+		NewFile:          newFile,
+		PrimaryFile:      newFile,
+		RegisterFuncName: data.RegisterFuncName,
+	}, nil
 }
 
 // detectIdentifierCollisions checks whether any of methods' generated
@@ -860,8 +1039,18 @@ func addToExistingRoute(appDir, modulePath, relDir, fileName string, data routeD
 // models/<relDir> respectively (via concatGoFiles) — a colliding
 // identifier can live in any file in the package, not just the one this
 // invocation happens to be reading or writing.
-func detectIdentifierCollisions(handlerContent, modelContent string, methods []routeMethod, route string) error {
+//
+// registerFuncName, when non-empty, additionally checks that function name
+// itself against handlerContent — used by addOwnRegisterResource (see
+// OwnRegister) to catch two separate -own-register calls accidentally
+// reusing the same -name, producing the same "Register<Name>" twice in one
+// package. Pass "" (the ordinary fold-into-existing-primary path, which
+// never introduces a new Register function) to skip this check.
+func detectIdentifierCollisions(handlerContent, modelContent string, methods []routeMethod, registerFuncName, route string) error {
 	var collisions []string
+	if registerFuncName != "" && strings.Contains(handlerContent, "func "+registerFuncName+"(") {
+		collisions = append(collisions, fmt.Sprintf("register function %s", registerFuncName))
+	}
 	for _, m := range methods {
 		if strings.Contains(handlerContent, "func "+m.HandlerName+"(") {
 			collisions = append(collisions, fmt.Sprintf("handler function %s", m.HandlerName))
@@ -937,6 +1126,38 @@ func findMarkedFile(dir, marker string) (path string, found bool, err error) {
 		}
 	}
 	return "", false, nil
+}
+
+// findAllMarkedFiles is findMarkedFile's plural sibling: instead of
+// stopping at the first match (which silently picks an arbitrary one once
+// more than one file in dir carries marker — the scenario -own-register
+// makes possible, see addToExistingRoute), it returns every match, so the
+// caller can tell "exactly one, unambiguous" apart from "more than one,
+// needs a caller-supplied -file to disambiguate" and error accordingly
+// instead of guessing.
+func findAllMarkedFiles(dir, marker string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var matches []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(raw), marker) {
+			matches = append(matches, p)
+		}
+	}
+	return matches, nil
 }
 
 // dirHasGoFile reports whether dir contains at least one top-level *.go
@@ -1069,7 +1290,7 @@ func detectExistingProtection(appDir, modulePath, relDirSlash string) (protected
 // added its own RespUnwrapped before Tags existed, or vice versa) — a
 // single-marker check would wrongly consider such a file current. Add the
 // new field's name here whenever openapi.go.tmpl gains another one.
-var openAPIUpToDateMarkers = []string{"Tags", "RespUnwrapped", "ClientIdAuth"}
+var openAPIUpToDateMarkers = []string{"Tags", "RespUnwrapped", "ClientIdAuth", "basePath"}
 
 // ensureOpenAPIUpToDate rewrites appDir/openapi/openapi.go from the current
 // embedded template if it predates any Operation field nexler now expects
@@ -1174,6 +1395,178 @@ func ensureResponseJSONRaw(appDir string) (bool, error) {
 	return true, nil
 }
 
+// responseHTMLOldFunc is the exact byte-for-byte body of HTML in every
+// nexler-generated response.go before the composeHTML extraction (see
+// ensureResponseHTMLUpgrade) — zero per-app templating, so identical
+// across every app. Used both to detect "not yet upgraded" and as the
+// literal anchor replaced by the new, much shorter composeHTML-calling
+// body. Only the function body is anchored, not its doc comment above —
+// deliberately: the comment is prose, more likely to have been reformatted
+// by an editor, and leaving it as-is on retrofit is a purely cosmetic
+// staleness, not a correctness issue.
+const responseHTMLOldFunc = `func HTML(w http.ResponseWriter, r *http.Request, module, name, title string, data any) {
+	contentPath, err := resolveHTMLFile(module, name+".html")
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	contentSrc, err := os.ReadFile(contentPath)
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("reading %s: %v", contentPath, err))
+		return
+	}
+	layoutPath, err := resolveHTMLFile(module, "layout.html")
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	layoutSrc, err := os.ReadFile(layoutPath)
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("reading %s: %v", layoutPath, err))
+		return
+	}
+
+	page := struct {
+		Title string
+		Data  any
+	}{title, data}
+
+	contentTmpl, err := template.New(name).Parse(string(contentSrc))
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("parsing %s: %v", contentPath, err))
+		return
+	}
+	var content bytes.Buffer
+	if err := contentTmpl.Execute(&content, page); err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("rendering %s: %v", contentPath, err))
+		return
+	}
+
+	layoutTmpl, err := template.New("layout").Parse(string(layoutSrc))
+	if err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("parsing %s: %v", layoutPath, err))
+		return
+	}
+	var out bytes.Buffer
+	if err := layoutTmpl.Execute(&out, struct {
+		Title   string
+		Content template.HTML
+	}{title, template.HTML(content.String())}); err != nil {
+		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("rendering %s: %v", layoutPath, err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out.Bytes())
+}`
+
+// ensureResponseHTMLUpgrade brings an app scaffolded before HTML's
+// rendering was extracted into composeHTML up to date: adds
+// composeHTML/renderOptionalPartial (optional header/sidebar/footer
+// partials, and Subject/Path on the page template data) and the new
+// HTMLError/Unauthorised functions, and rewrites HTML's own body to call
+// composeHTML instead of duplicating its rendering logic inline — see
+// response.go.tmpl's own doc comments for what each of these does.
+//
+// Deliberately not a full-file regeneration (same reasoning
+// ensureResponseJSONRaw already gives for response.go specifically being
+// hand-extension-prone): re-renders the current response.go.tmpl to a
+// string (never written to disk directly) purely to obtain the exact,
+// correctly-conditioned (on this app's own HasDB/-auth) new HTML body and
+// new-functions text, then splices just those two pieces into the
+// existing file — same append-before-responseMarker precedent
+// ensureResponseJSONRaw's own JSONRaw insertion already established,
+// coexisting safely with it. HasDB/-auth are inferred from disk
+// (readCoreDBType/detectAuthFiles), the same way ensureServiceAuth and
+// this session's own MergeServiceAuth already do, since a retrofit
+// function is never handed the original NewAppConfig.
+func ensureResponseHTMLUpgrade(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "response", "response.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, fmt.Errorf("%s does not exist — is %s a nexler app directory?", path, appDir)
+		}
+		return false, err
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if strings.Contains(content, "func composeHTML") {
+		return false, nil
+	}
+	if !strings.Contains(content, responseHTMLOldFunc) {
+		return false, fmt.Errorf("%s's HTML function doesn't match what nexler generated (has it been hand-rewritten?) — add composeHTML/renderOptionalPartial/HTMLError/Unauthorised by hand (see response.go.tmpl), and have HTML call composeHTML, or restore it from a fresh scaffold and reapply your changes", path)
+	}
+
+	modulePath, err := readModulePath(appDir)
+	if err != nil {
+		return false, err
+	}
+	_, hasCoreDB := readCoreDBType(appDir)
+	hasJWT, hasSession := detectAuthFiles(appDir)
+	authKind := "none"
+	if hasJWT || hasSession {
+		authKind = "jwt"
+	}
+	data := struct {
+		ModulePath string
+		HasDB      bool
+		AuthKind   string
+	}{ModulePath: modulePath, HasDB: hasCoreDB, AuthKind: authKind}
+
+	tmplPath := templatesRoot + "/response/response.go.tmpl"
+	tmplRaw, err := templateFS.ReadFile(tmplPath)
+	if err != nil {
+		return false, fmt.Errorf("reading embedded template %s: %w", tmplPath, err)
+	}
+	rendered, err := render(tmplPath, tmplRaw, data)
+	if err != nil {
+		return false, fmt.Errorf("rendering %s: %w", tmplPath, err)
+	}
+	renderedStr := string(rendered)
+
+	newHTMLStart := strings.Index(renderedStr, "func HTML(w http.ResponseWriter")
+	if newHTMLStart == -1 {
+		return false, errors.New("internal error: rendered response.go.tmpl is missing HTML's new body")
+	}
+	newHTMLBodyEnd := strings.Index(renderedStr[newHTMLStart:], "\n}\n")
+	if newHTMLBodyEnd == -1 {
+		return false, errors.New("internal error: could not find the end of HTML's new body")
+	}
+	newHTMLFunc := renderedStr[newHTMLStart : newHTMLStart+newHTMLBodyEnd+2]
+
+	const newFuncsStart = "\n// HTMLError renders"
+	funcsStart := strings.Index(renderedStr, newFuncsStart)
+	if funcsStart == -1 {
+		return false, errors.New("internal error: rendered response.go.tmpl is missing the expected HTMLError block")
+	}
+	funcsEnd := strings.Index(renderedStr, "\n"+responseMarker)
+	if funcsEnd == -1 || funcsEnd < funcsStart {
+		return false, fmt.Errorf("internal error: rendered response.go.tmpl is missing the expected %q marker", responseMarker)
+	}
+	newFuncsBlock := strings.Trim(renderedStr[funcsStart:funcsEnd], "\n") + "\n"
+
+	content = strings.Replace(content, responseHTMLOldFunc, newHTMLFunc, 1)
+
+	anchor := responseMarker
+	if !strings.Contains(content, anchor) {
+		anchor = responseErrorAnchor
+		if !strings.Contains(content, anchor) {
+			return false, fmt.Errorf("could not find an insertion point for the new functions in %s (has it been hand-rewritten?)", path)
+		}
+	}
+	content = strings.Replace(content, anchor, newFuncsBlock+"\n"+anchor, 1)
+
+	if (hasJWT || hasSession) && !strings.Contains(content, `"`+modulePath+`/auth"`) {
+		content = strings.Replace(content, "\t\"strings\"\n", "\t\"strings\"\n\n\t\""+modulePath+"/auth\"\n", 1)
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ensureAuthSubjectContext brings an app scaffolded before RequireAuth
 // started attaching the verified subject (userID) to the request context
 // up to date: it adds auth/context.go if missing (ContextWithSubject/
@@ -1240,7 +1633,17 @@ func ensureAuthSubjectContext(appDir string) (bool, error) {
 	case hasJWT:
 		authKind = "jwt"
 	}
-	data := struct{ AuthKind, ModulePath string }{AuthKind: authKind, ModulePath: modulePath}
+	// MergeServiceAuth is always false here: this path only regenerates an
+	// app whose middleware/auth.go predates ContextWithSubject entirely
+	// (see this function's own doc comment) — long before -merge-service-auth
+	// existed, so there's no merged state to preserve. An app that's already
+	// on the merged design (via -merge-service-auth at scaffold time, or via
+	// MergeServiceAuth's own retrofit) already contains ContextWithSubject
+	// and so never reaches this regeneration branch at all.
+	data := struct {
+		AuthKind, ModulePath string
+		MergeServiceAuth     bool
+	}{AuthKind: authKind, ModulePath: modulePath}
 	tmplPath := templatesRoot + "/middleware/auth.go.tmpl"
 	tmplRaw, err := templateFS.ReadFile(tmplPath)
 	if err != nil {
@@ -1423,6 +1826,121 @@ func ensureMongoDatabaseName(appDir string) (bool, error) {
 	return changed, nil
 }
 
+// mongoStructToBSONOldLoop/mongoStructToBSONNewLoop are the exact
+// byte-for-byte text of structToBSON's field loop in mongo/mongo.go,
+// before and after the embedded-field-flattening fix (see
+// mongo.go.tmpl) — structToBSON has zero per-app templating, so its
+// rendered text is identical across every app, making an exact literal
+// replacement (rather than a full-file regeneration) both safe and
+// precise, the same "narrow, anchor-based patch of an exact known body"
+// precedent ensureKgateResumeAll already established for kgate.go's
+// Register.
+const (
+	mongoStructToBSONOldLoop = `	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if fv.IsZero() {
+			continue
+		}
+		key := bsonFieldName(f)
+		if key == "-" {
+			continue
+		}
+		out[key] = fv.Interface()
+	}`
+	mongoStructToBSONNewLoop = `	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if f.Anonymous && fv.Kind() == reflect.Struct {
+			// An embedded field (e.g. a shared store/common.Base
+			// contributing _id) is flattened into this same top-level
+			// filter rather than nested under its own key — matching how
+			// the Mongo driver's own default (non-inline) BSON encoding
+			// treats an embedded struct, and how Set/InsertID already
+			// expect callers to build filters (T{Base: common.Base{ID: id}}).
+			nested, err := structToBSON(fv)
+			if err != nil {
+				return nil, err
+			}
+			maps.Copy(out, nested)
+			continue
+		}
+		if fv.IsZero() {
+			continue
+		}
+		key := bsonFieldName(f)
+		if key == "-" {
+			continue
+		}
+		out[key] = fv.Interface()
+	}`
+)
+
+// ensureMongoEmbeddedFilterFix brings an app scaffolded before
+// structToBSON flattened anonymously embedded struct fields (see
+// mongo.go.tmpl's own doc comment, and store/common.Base below) up to
+// date: a filter like T{Base: common.Base{ID: id}} used to silently build
+// {"base": ...} instead of {"_id": id}, breaking every by-ID lookup for
+// any type embedding a shared base struct. A silent no-op if
+// mongo/mongo.go doesn't exist (app wasn't scaffolded with -db mongo).
+// Errors, naming the file, if structToBSON's loop doesn't match the exact
+// text this checks for — i.e. it's been hand-rewritten — rather than
+// silently overwriting it.
+func ensureMongoEmbeddedFilterFix(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "mongo", "mongo.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if strings.Contains(content, "maps.Copy(out, nested)") {
+		return false, nil
+	}
+	if !strings.Contains(content, mongoStructToBSONOldLoop) {
+		return false, fmt.Errorf("%s's structToBSON doesn't match what nexler generated (has it been hand-rewritten?) — add the embedded-field-flattening branch by hand (see mongo.go.tmpl's own structToBSON), or restore it from a fresh scaffold and reapply your changes", path)
+	}
+	content = strings.Replace(content, mongoStructToBSONOldLoop, mongoStructToBSONNewLoop, 1)
+	if !strings.Contains(content, "\n\t\"maps\"\n") {
+		content = strings.Replace(content, "\t\"fmt\"\n", "\t\"fmt\"\n\t\"maps\"\n", 1)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ensureStoreCommon brings an app scaffolded with -db mongo before
+// store/common.Base existed up to date: writes store/common/common.go if
+// missing. A silent no-op if mongo/mongo.go doesn't exist (app wasn't
+// scaffolded with -db mongo) or store/common/common.go already exists —
+// never overwrites, matching kpass.go's own "never clobber a possibly
+// hand-edited file" precedent (Base has no versioned content to bring up
+// to date, just present-or-absent).
+func ensureStoreCommon(appDir string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(appDir, "mongo", "mongo.go")); err != nil {
+		return false, nil
+	}
+	path := filepath.Join(appDir, "store", "common", "common.go")
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := writeTemplateFile(templatesRoot+"/store/common/common.go.tmpl", path, nil); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // swaggerConfigFieldAnchor/swaggerConfigLoadAnchor are fixed,
 // template-variable-free substrings of every generated config/config.go —
 // identical regardless of EnvPrefix/AuthKind — that ensureSwaggerToggle
@@ -1581,6 +2099,114 @@ func ensureSwaggerToggle(appDir string) (bool, error) {
 			b.WriteString("\n")
 		}
 		b.WriteString(envKey + "=true\n")
+		if err := os.WriteFile(envPath, []byte(b.String()), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	return changed, nil
+}
+
+// apiBasePathHomeSpecOld/apiBasePathHomeSpecOpen anchor ensureAPIBasePath's
+// patch of home.go's HandleOpenAPI: openapi.Spec is always called as
+// openapi.Spec("<AppName>") before this feature — the app name itself isn't
+// a fixed anchor (it varies per app), so the match is done in two steps:
+// find the fixed openapi.Spec(" prefix, then the next ") after it closes
+// the string literal.
+const apiBasePathHomeSpecOpen = `openapi.Spec("`
+
+// ensureAPIBasePath brings an app scaffolded before Config gained
+// APIBasePath up to date: adds the field + load() wiring to
+// config/config.go (reusing the same Port anchors ensureSwaggerToggle
+// already established, so this doesn't depend on ensureSwaggerToggle having
+// run first), turns home.go's single-arg openapi.Spec("<AppName>") call
+// into the two-arg openapi.Spec("<AppName>", config.C.APIBasePath) form,
+// and appends {PREFIX}_API_BASE_PATH= (blank — this setting has no default)
+// to .env, only when that key isn't already present.
+//
+// Registered in update.go's updateChecks after ensureOpenAPIUpToDate and
+// ensureSwaggerToggle, so by the time this runs, openapi/openapi.go's Spec
+// already takes two arguments (ensureOpenAPIUpToDate regenerates it — see
+// the "basePath" marker in openAPIUpToDateMarkers) and home.go already
+// imports config (ensureSwaggerToggle adds it if missing).
+func ensureAPIBasePath(appDir string) (bool, error) {
+	changed := false
+
+	prefix, err := recoverEnvPrefix(appDir)
+	if err != nil {
+		return changed, err
+	}
+
+	configPath := filepath.Join(appDir, "config", "config.go")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", configPath, err)
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if !strings.Contains(content, "APIBasePath") {
+		fieldIdx := strings.Index(content, swaggerConfigFieldAnchor)
+		loadIdx := strings.Index(content, swaggerConfigLoadAnchor)
+		if fieldIdx == -1 || loadIdx == -1 {
+			return changed, fmt.Errorf("%s doesn't look like a generated config.go (missing the expected Port field/load() lines) — has it been hand-rewritten? Add manually: an `APIBasePath string` field to Config, and `APIBasePath: os.Getenv(%q),` to load()'s returned Config literal", configPath, prefix+"_API_BASE_PATH")
+		}
+
+		fieldInsertAt := fieldIdx + strings.Index(content[fieldIdx:], "\n") + 1
+		fieldLine := "\tAPIBasePath string // " + prefix + "_API_BASE_PATH — path prefix the external gateway mounts this service under (e.g. \"/api/v1\"); empty means openapi.json advertises no prefix (direct access). Purely documentational — does not affect actual route registration/matching.\n"
+		content = content[:fieldInsertAt] + fieldLine + content[fieldInsertAt:]
+
+		// Re-find loadIdx: the field insertion above may have shifted it.
+		loadIdx = strings.Index(content, swaggerConfigLoadAnchor)
+		loadInsertAt := loadIdx + strings.Index(content[loadIdx:], "\n") + 1
+		loadLine := "\t\tAPIBasePath: os.Getenv(\"" + prefix + "_API_BASE_PATH\"),\n"
+		content = content[:loadInsertAt] + loadLine + content[loadInsertAt:]
+
+		if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	homePath := filepath.Join(appDir, "handlers", "home", "home.go")
+	homeRaw, err := os.ReadFile(homePath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", homePath, err)
+	}
+	homeContent := strings.ReplaceAll(string(homeRaw), "\r\n", "\n")
+	if !strings.Contains(homeContent, "config.C.APIBasePath") {
+		openIdx := strings.Index(homeContent, apiBasePathHomeSpecOpen)
+		if openIdx == -1 {
+			return changed, fmt.Errorf("%s doesn't look like a generated home.go (no openapi.Spec(\"...\") call found) — has it been hand-rewritten? Add config.C.APIBasePath as Spec's second argument manually", homePath)
+		}
+		closeRel := strings.Index(homeContent[openIdx:], "\")")
+		if closeRel == -1 {
+			return changed, fmt.Errorf("%s: openapi.Spec(\" call has no closing \") — has it been hand-rewritten?", homePath)
+		}
+		closeIdx := openIdx + closeRel + 2 // position right after the closing ")
+		call := homeContent[openIdx:closeIdx]
+		newCall := call[:len(call)-1] + ", config.C.APIBasePath)"
+		homeContent = homeContent[:openIdx] + newCall + homeContent[closeIdx:]
+
+		if err := os.WriteFile(homePath, []byte(homeContent), 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	envPath := filepath.Join(appDir, ".env")
+	envRaw, err := os.ReadFile(envPath)
+	if err != nil {
+		return changed, fmt.Errorf("reading %s: %w", envPath, err)
+	}
+	envContent := strings.ReplaceAll(string(envRaw), "\r\n", "\n")
+	envKey := prefix + "_API_BASE_PATH"
+	if !envHasKey(envContent, envKey) {
+		var b strings.Builder
+		b.WriteString(envContent)
+		if len(envContent) > 0 && !strings.HasSuffix(envContent, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(envKey + "=\n")
 		if err := os.WriteFile(envPath, []byte(b.String()), 0o644); err != nil {
 			return changed, err
 		}
@@ -2004,14 +2630,67 @@ func wireAggregator(appDir, group, importPath, alias string) error {
 		return fmt.Errorf("%s: %w (has it been hand-edited?)", aggPath, err)
 	}
 
-	const registerAnchor = "\t// nexler:routes (do not remove this marker)"
-	if !strings.Contains(content, registerAnchor) {
-		return fmt.Errorf("could not find the registration anchor in %s (has it been hand-edited?)", aggPath)
+	content, err = insertAggregatorCall(content, alias, "Register")
+	if err != nil {
+		return fmt.Errorf("%s: %w (has it been hand-edited?)", aggPath, err)
 	}
-	newRegister := fmt.Sprintf("\t%s.Register(mux)\n%s", alias, registerAnchor)
-	content = strings.Replace(content, registerAnchor, newRegister, 1)
 
 	return os.WriteFile(aggPath, []byte(content), 0o644)
+}
+
+// wireAggregatorAdditionalCall is wireAggregator's tolerant sibling, for a
+// second (third, ...) independent resource sharing an already-wired
+// package (see RouteConfig.OwnRegister / addOwnRegisterResource). Unlike
+// wireAggregator, it does NOT error when importPath is already imported —
+// that's the expected case here, since the package's first resource
+// already wired the import. It only adds the import if genuinely missing
+// (e.g. this resource is -protected while the package's existing resource
+// is public, so it belongs in the *other* aggregator file) via the same
+// insertImport helper, then inserts "<alias>.<funcName>(mux)" before the
+// // nexler:routes marker — idempotently: a no-op if that exact call line
+// is already present, so re-running the same `nexler create` invocation
+// never double-registers.
+func wireAggregatorAdditionalCall(appDir, group, importPath, alias, funcName string) error {
+	aggPath := filepath.Join(appDir, "routes", group, group+".go")
+
+	raw, err := os.ReadFile(aggPath)
+	if err != nil {
+		return fmt.Errorf("reading %s (are you in a nexler app directory?): %w", aggPath, err)
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+
+	if !strings.Contains(content, `"`+importPath+`"`) {
+		content, err = insertImport(content, alias, importPath)
+		if err != nil {
+			return fmt.Errorf("%s: %w (has it been hand-edited?)", aggPath, err)
+		}
+	}
+
+	callLine := fmt.Sprintf("\t%s.%s(mux)\n", alias, funcName)
+	if strings.Contains(content, callLine) {
+		return os.WriteFile(aggPath, []byte(content), 0o644)
+	}
+
+	content, err = insertAggregatorCall(content, alias, funcName)
+	if err != nil {
+		return fmt.Errorf("%s: %w (has it been hand-edited?)", aggPath, err)
+	}
+
+	return os.WriteFile(aggPath, []byte(content), 0o644)
+}
+
+// insertAggregatorCall inserts "<alias>.<funcName>(mux)" immediately before
+// the // nexler:routes marker in content — the shared splice both
+// wireAggregator and wireAggregatorAdditionalCall use, parameterized by
+// funcName instead of a hardcoded "Register" so a second independent
+// resource's differently-named Register<X> can be wired the same way.
+func insertAggregatorCall(content, alias, funcName string) (string, error) {
+	const registerAnchor = "\t// nexler:routes (do not remove this marker)"
+	if !strings.Contains(content, registerAnchor) {
+		return "", errors.New("could not find the registration anchor")
+	}
+	newRegister := fmt.Sprintf("\t%s.%s(mux)\n%s", alias, funcName, registerAnchor)
+	return strings.Replace(content, registerAnchor, newRegister, 1), nil
 }
 
 // insertImport adds `alias "importPath"` to content's single import block,
