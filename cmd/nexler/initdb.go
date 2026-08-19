@@ -349,7 +349,13 @@ func kgateChannelStatements(dbType string) []string {
 // (see auth/context.go.tmpl's ContextWithService/Service doc comments and
 // core/users.go.tmpl's package doc comment) — this table is a minimal
 // local record (username/role/type/status), never a profile store; real
-// user info lives wherever it already does, kpass-backed or not.
+// user info lives wherever it already does, kpass-backed or not. org_id
+// (for -multitenant apps' core.User.OrgId) is provisioned unconditionally
+// for every -db app, same "zero-cost-when-unused" precedent as
+// core_kgate_channels — a non-multitenant app's generated code simply
+// never reads/writes it. The separate ALTER TABLE (alongside CREATE TABLE
+// IF NOT EXISTS) is what lets an app that already ran `nexler init db`
+// before org_id existed pick up the column on a re-run.
 func usersStatements(dbType string) []string {
 	switch dbType {
 	case "mysql":
@@ -359,15 +365,17 @@ func usersStatements(dbType string) []string {
 				"username VARCHAR(255) NOT NULL, " +
 				"user_role VARCHAR(255) NOT NULL DEFAULT '', " +
 				"user_type VARCHAR(255) NOT NULL DEFAULT '', " +
+				"org_id VARCHAR(255) NOT NULL DEFAULT '', " +
 				"status VARCHAR(32) NOT NULL DEFAULT 'active', " +
 				"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
 				"updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
+			"ALTER TABLE core_users ADD COLUMN IF NOT EXISTS org_id VARCHAR(255) NOT NULL DEFAULT ''",
 			"DROP PROCEDURE IF EXISTS core_user_upsert",
-			"CREATE PROCEDURE core_user_upsert(IN p_user_id VARCHAR(255), IN p_username VARCHAR(255), IN p_user_role VARCHAR(255), IN p_user_type VARCHAR(255)) " +
+			"CREATE PROCEDURE core_user_upsert(IN p_user_id VARCHAR(255), IN p_username VARCHAR(255), IN p_user_role VARCHAR(255), IN p_user_type VARCHAR(255), IN p_org_id VARCHAR(255)) " +
 				"BEGIN " +
-				"INSERT INTO core_users (user_id, username, user_role, user_type, created_at, updated_at) " +
-				"VALUES (p_user_id, p_username, p_user_role, p_user_type, NOW(), NOW()) " +
-				"ON DUPLICATE KEY UPDATE username = p_username, user_role = p_user_role, user_type = p_user_type, updated_at = NOW(); " +
+				"INSERT INTO core_users (user_id, username, user_role, user_type, org_id, created_at, updated_at) " +
+				"VALUES (p_user_id, p_username, p_user_role, p_user_type, p_org_id, NOW(), NOW()) " +
+				"ON DUPLICATE KEY UPDATE username = p_username, user_role = p_user_role, user_type = p_user_type, org_id = p_org_id, updated_at = NOW(); " +
 				"END",
 			"DROP PROCEDURE IF EXISTS core_user_set_status",
 			"CREATE PROCEDURE core_user_set_status(IN p_user_id VARCHAR(255), IN p_status VARCHAR(32)) " +
@@ -382,15 +390,17 @@ func usersStatements(dbType string) []string {
 				"username TEXT NOT NULL, " +
 				"user_role TEXT NOT NULL DEFAULT '', " +
 				"user_type TEXT NOT NULL DEFAULT '', " +
+				"org_id TEXT NOT NULL DEFAULT '', " +
 				"status TEXT NOT NULL DEFAULT 'active', " +
 				"created_at TIMESTAMPTZ NOT NULL DEFAULT now(), " +
 				"updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-			"CREATE OR REPLACE PROCEDURE core_user_upsert(p_user_id TEXT, p_username TEXT, p_user_role TEXT, p_user_type TEXT) " +
+			"ALTER TABLE core_users ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT ''",
+			"CREATE OR REPLACE PROCEDURE core_user_upsert(p_user_id TEXT, p_username TEXT, p_user_role TEXT, p_user_type TEXT, p_org_id TEXT) " +
 				"LANGUAGE plpgsql AS $$ " +
 				"BEGIN " +
-				"INSERT INTO core_users (user_id, username, user_role, user_type, created_at, updated_at) " +
-				"VALUES (p_user_id, p_username, p_user_role, p_user_type, now(), now()) " +
-				"ON CONFLICT (user_id) DO UPDATE SET username = p_username, user_role = p_user_role, user_type = p_user_type, updated_at = now(); " +
+				"INSERT INTO core_users (user_id, username, user_role, user_type, org_id, created_at, updated_at) " +
+				"VALUES (p_user_id, p_username, p_user_role, p_user_type, p_org_id, now(), now()) " +
+				"ON CONFLICT (user_id) DO UPDATE SET username = p_username, user_role = p_user_role, user_type = p_user_type, org_id = p_org_id, updated_at = now(); " +
 				"END; $$",
 			"CREATE OR REPLACE PROCEDURE core_user_set_status(p_user_id TEXT, p_status TEXT) " +
 				"LANGUAGE plpgsql AS $$ " +
@@ -406,18 +416,21 @@ func usersStatements(dbType string) []string {
 				"username NVARCHAR(255) NOT NULL, " +
 				"user_role NVARCHAR(255) NOT NULL DEFAULT '', " +
 				"user_type NVARCHAR(255) NOT NULL DEFAULT '', " +
+				"org_id NVARCHAR(255) NOT NULL DEFAULT '', " +
 				"status NVARCHAR(32) NOT NULL DEFAULT 'active', " +
 				"created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(), " +
 				"updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME())",
+			"IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('core_users') AND name = 'org_id') " +
+				"ALTER TABLE core_users ADD org_id NVARCHAR(255) NOT NULL DEFAULT ''",
 			"CREATE OR ALTER PROCEDURE core_user_upsert " +
-				"@p_user_id NVARCHAR(255), @p_username NVARCHAR(255), @p_user_role NVARCHAR(255), @p_user_type NVARCHAR(255) AS " +
+				"@p_user_id NVARCHAR(255), @p_username NVARCHAR(255), @p_user_role NVARCHAR(255), @p_user_type NVARCHAR(255), @p_org_id NVARCHAR(255) AS " +
 				"BEGIN " +
 				"MERGE core_users AS target " +
 				"USING (SELECT @p_user_id AS user_id) AS src " +
 				"ON target.[user_id] = src.[user_id] " +
-				"WHEN MATCHED THEN UPDATE SET username = @p_username, user_role = @p_user_role, user_type = @p_user_type, updated_at = SYSUTCDATETIME() " +
-				"WHEN NOT MATCHED THEN INSERT ([user_id], username, user_role, user_type, created_at, updated_at) " +
-				"VALUES (@p_user_id, @p_username, @p_user_role, @p_user_type, SYSUTCDATETIME(), SYSUTCDATETIME()); " +
+				"WHEN MATCHED THEN UPDATE SET username = @p_username, user_role = @p_user_role, user_type = @p_user_type, org_id = @p_org_id, updated_at = SYSUTCDATETIME() " +
+				"WHEN NOT MATCHED THEN INSERT ([user_id], username, user_role, user_type, org_id, created_at, updated_at) " +
+				"VALUES (@p_user_id, @p_username, @p_user_role, @p_user_type, @p_org_id, SYSUTCDATETIME(), SYSUTCDATETIME()); " +
 				"END",
 			"CREATE OR ALTER PROCEDURE core_user_set_status " +
 				"@p_user_id NVARCHAR(255), @p_status NVARCHAR(32) AS " +

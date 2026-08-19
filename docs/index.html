@@ -213,6 +213,7 @@ go run main.go</pre></div>
               <tr><td class="flag-name">-db-user</td><td class="flag-default">""</td><td class="flag-desc">Core database username (blank = no auth).</td></tr>
               <tr><td class="flag-name">-db-password</td><td class="flag-default">""</td><td class="flag-desc">Core database password (blank = no auth). Passed/prompted in <strong>plain text</strong> — there's no masked-input prompt in this CLI.</td></tr>
               <tr><td class="flag-name">-merge-service-auth</td><td class="flag-default">false</td><td class="flag-desc">Only with <code>-auth jwt|both</code> and <code>-db</code> — folds <code>X-Api-Secret</code> service-key auth into <code>middleware.RequireAuth</code> itself (as a fallback after JWT/session) instead of generating a separate <code>middleware.RequireServiceAuth</code>, so a service/automation caller can hit the exact same <code>-protected</code> routes a human user would. See "Authentication" below for the tradeoff against the default separate-middleware design.</td></tr>
+              <tr><td class="flag-name">-multitenant</td><td class="flag-default">false</td><td class="flag-desc">Only with <code>-auth jwt|session|both</code> — errors otherwise. Threads a tenant Org through <code>auth.ContextWithOrg</code>/<code>Org</code>, <code>StartSession</code>/<code>SessionFromRequest</code>'s <code>org</code> parameter (when <code>-auth</code> includes session), and <code>core.User.OrgId</code> (when a core database connection and a JWT-capable <code>-auth</code> choice are both present). See "Authentication" below.</td></tr>
             </tbody>
           </table>
         </div>
@@ -224,7 +225,8 @@ nexler create app test -auth jwt
 nexler create app test -auth both -remember-me
 nexler create app test -db postgres,mongo -core mongo
 nexler create app test -db mongo -db-host localhost -db-name test
-nexler create app test -auth both -db mongo -merge-service-auth</pre></div>
+nexler create app test -auth both -db mongo -merge-service-auth
+nexler create app test -auth session -multitenant</pre></div>
       </div>
     </section>
 
@@ -340,7 +342,7 @@ nexler add @popperjs/core</pre></div>
         <h3><code>nexler init db</code></h3>
         <span class="badge badge-network">needs network</span>
         <div class="cmd-line">nexler init db [-dir &lt;app-dir&gt;]</div>
-        <p>Provisions a generated app's "core" system data on its actual core database connection (read from <code>.env</code>'s <code>{APPNAME}_DB_CORE_TYPE</code>/<code>_DSN</code>): <code>core_config</code> (backing <code>GetSetting</code>/<code>SetSetting</code>), <code>core_error_log</code> (backing <code>LogError</code>, auto-called on a recovered panic or any 5xx response), <code>core_kgate_channels</code> (backing kgate's channel registry, if <code>init kgate</code> has been run), <code>core_users</code>, and <code>core_services</code> (backing API-key/service-to-service auth, if the app has <code>-auth jwt|both</code>) — each a table plus its own stored procedure for mysql/postgres/mssql, or a unique index for mongo. All five are provisioned unconditionally on every <code>-db</code> app regardless of which optional features are actually used.</p>
+        <p>Provisions a generated app's "core" system data on its actual core database connection (read from <code>.env</code>'s <code>{APPNAME}_DB_CORE_TYPE</code>/<code>_DSN</code>): <code>core_config</code> (backing <code>GetSetting</code>/<code>SetSetting</code>), <code>core_error_log</code> (backing <code>LogError</code>, auto-called on a recovered panic or any 5xx response), <code>core_kgate_channels</code> (backing kgate's channel registry, if <code>init kgate</code> has been run), <code>core_users</code>, and <code>core_services</code> (backing API-key/service-to-service auth, if the app has <code>-auth jwt|both</code>) — each a table plus its own stored procedure for mysql/postgres/mssql, or a unique index for mongo. All five are provisioned unconditionally on every <code>-db</code> app regardless of which optional features are actually used. <code>core_users</code> also carries an <code>org_id</code> column (for <a href="#concept-multitenant"><code>-multitenant</code></a>'s <code>core.User.OrgId</code>), provisioned unconditionally too — re-running <code>init db</code> against a database provisioned before <code>org_id</code> existed adds the column via an idempotent <code>ALTER TABLE</code>.</p>
         <p>This is a deliberately separate, explicit step — not run automatically by <code>create app</code> or by the app's own startup, since a physical database can be shared by several apps and production setups often run with a low-privilege DB user that can't run DDL at all. Every statement is idempotent — safe to run again, including against a database another app already provisioned. Requires <code>-db</code> to have been set at <code>create app</code> time.</p>
         <div class="code-block"><pre>nexler init db -dir ./myapp</pre></div>
       </div>
@@ -453,11 +455,13 @@ nexler init kube -dir ./myapp -image ghcr.io/me/myapp:latest -replicas 3</pre></
       <div class="doc-sub">
         <h3><code>nexler update</code></h3>
         <span class="badge badge-local">local only</span>
-        <div class="cmd-line">nexler update [-dir &lt;app-dir&gt;] [-merge-service-auth]</div>
+        <div class="cmd-line">nexler update [-dir &lt;app-dir&gt;] [-merge-service-auth] [-multitenant]</div>
         <p>Brings an existing app's Nexler-owned files — ones you generally don't hand-edit — up to date with whatever the current <code>nexler</code> binary knows how to generate, without needing to trigger it as a side effect of <code>create &lt;route&gt;</code>. Covers things like <code>openapi/openapi.go</code> (regenerated when it predates a field Nexler now sets) and <code>response/response.go</code> (missing helpers appended, never rewritten). Never touches <code>handlers/services/store/models</code>, <code>main.go</code>, <code>.env</code>, or <code>templates/html/*</code> — anything you're expected to hand-edit stays out of scope. Prints "updated" or "already up to date" per file checked.</p>
         <p><code>-merge-service-auth</code> is a separate, explicit opt-in step — not one of the checks that always run. It converts an already-scaffolded <code>-auth jwt|both -db</code> app from a separate <code>middleware.RequireServiceAuth</code> to the folded-into-<code>RequireAuth</code> design (see <a href="#concept-service-auth">API-key auth</a>), removing <code>middleware/service_auth.go</code> and regenerating <code>middleware/auth.go</code>. It's never run as part of a plain <code>nexler update</code>, since merged-vs-separate is a real per-app design choice, not a one-true-shape fix — and it refuses (naming the file) if <code>middleware/service_auth.go</code> has been hand-edited since it was generated, rather than discarding the changes.</p>
+        <p><code>-multitenant</code> is likewise a separate, explicit opt-in step. It threads a tenant Org through an already-scaffolded <code>-auth jwt|session|both</code> app's <code>auth/context.go</code> (<code>ContextWithOrg</code>/<code>Org</code>), <code>auth/session.go</code> (<code>StartSession</code>/<code>SessionFromRequest</code>'s <code>org</code> parameter, when the app has sessions), <code>middleware/auth.go</code> (attaching Org after a successful JWT or session check), and <code>core/users.go</code> (<code>OrgId</code>, when present) — see <a href="#concept-multitenant">multi-tenant Org propagation</a>. Never runs automatically, same reasoning as <code>-merge-service-auth</code>: whether an app wants tenant-scoped data is a per-app design choice. Refuses (naming the file) if any of these files has been hand-edited since it was generated. A no-op if the app isn't eligible (needs <code>-auth jwt</code>, <code>session</code>, or <code>both</code>) or is already on the multitenant shape.</p>
         <div class="code-block"><pre>nexler update -dir ./myapp
-nexler update -dir ./myapp -merge-service-auth</pre></div>
+nexler update -dir ./myapp -merge-service-auth
+nexler update -dir ./myapp -multitenant</pre></div>
       </div>
     </section>
 
@@ -572,6 +576,24 @@ userID, ok := auth.Subject(r)</pre></div>
         <p><strong><code>-merge-service-auth</code></strong> is the opt-in alternative: instead of a separate <code>RequireServiceAuth</code>, the <code>X-Api-Secret</code> check is folded into <code>RequireAuth</code> itself, tried after JWT (and session, for <code>-auth both</code>) — so a service/automation caller can hit the exact same <code>-protected</code> routes a human user would, without a route needing a service-only variant of itself. A matching service key still attaches <code>auth.ContextWithService</code>, plus <code>auth.ContextWithSubject</code> set to the service's name, purely so subject-reading code has something to evaluate. Off by default: a pure API service that wants user-only and service-only routes to stay structurally distinct should leave this unset and keep the separate <code>RequireServiceAuth</code>. Retrofit an already-scaffolded app with <code>nexler update -merge-service-auth</code> (a separate, explicit opt-in step, never run automatically by a plain <code>nexler update</code>).</p>
       </div>
 
+      <div class="doc-sub" id="concept-multitenant">
+        <h3>Multi-tenant Org propagation (<code>-multitenant</code>)</h3>
+        <p>Only with <code>-auth jwt|session|both</code> — errors if combined with <code>-auth none</code>, since there's no authenticated subject to attach an Org to. Threads a tenant Org end to end: <code>auth/jwt.go</code>'s <code>Claims.Org</code> field and <code>IssueJWT</code>'s <code>org</code> parameter are already unconditional (present regardless of <code>-multitenant</code>), so a JWT-only app needs no further wiring. <code>-multitenant</code> adds the rest — <code>auth.ContextWithOrg</code>/<code>auth.Org(r)</code> (a context key deliberately distinct from <code>Subject</code>), <code>StartSession</code>/<code>SessionFromRequest</code> gaining an <code>org</code> parameter/return value (only when <code>-auth</code> includes session), and <code>core.User.OrgId</code> (only when a core database connection <em>and</em> a JWT-capable <code>-auth</code> choice are both present — the same eligibility <code>core/users.go</code> itself already has). Whichever credential succeeds, <code>middleware.RequireAuth</code> attaches Org alongside Subject: a JWT's <code>claims.Org</code>, or a session's stored org. A service-key-authenticated request (<code>X-Api-Secret</code>, with <code>-merge-service-auth</code>) never gets an Org attached — a service isn't tied to a tenant org.</p>
+        <p>Usage — same login handler as above, now threading <code>org</code> through:</p>
+        <div class="code-block"><pre><span class="cmt">// -auth jwt or both</span>
+token, err := auth.IssueJWT(userID, name, org, userType, userRole, 24*time.Hour)
+response.JSON(w, http.StatusOK, LoginResponse{Token: token})
+
+<span class="cmt">// -auth session or both</span>
+auth.StartSession(w, userID, org, false)  <span class="cmt">// rememberMe if -remember-me was set</span>
+response.JSON(w, http.StatusOK, LoginResponse{})
+
+<span class="cmt">// any protected handler downstream</span>
+userID, ok := auth.Subject(r)
+org, ok := auth.Org(r)  <span class="cmt">// scope your own store/service queries to this</span></pre></div>
+        <p>Retrofit an already-scaffolded app with <code>nexler update -multitenant</code> (a separate, explicit opt-in step — see <a href="#cmd-update"><code>nexler update</code></a>).</p>
+      </div>
+
       <div class="doc-sub" id="cmd-admin-api">
         <h3>Admin API: <code>/admin/users</code> &amp; <code>/admin/services</code></h3>
         <p>Every <code>-auth jwt|both</code> + <code>-db</code> app also gets a Swagger-documented admin API wrapping the <code>core</code> functions above — hand-authored, not routed through <code>nexler create &lt;route&gt;</code>'s generic machinery, since these are infrastructure endpoints with real field definitions from day one. Wired into <code>routes/protected/protected.go</code> automatically, same as <code>kgate</code>'s webhook route.</p>
@@ -646,6 +668,20 @@ err = resp.JSON(&amp;out)</pre></div>
       <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
 
       <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-19</div>
+          <h4><code>-auth none</code> stub: TODO removed, honest doc comment</h4>
+          <p>The <code>-auth none</code> branch of generated <code>middleware.RequireAuth</code> carried a <code>// TODO: verify apiKey and token against real credentials.</code> comment left over from before <code>-auth</code> existed — but this stub structurally has nothing to verify against (no <code>core_services</code>, <code>core_users</code>, JWT, or session package is ever generated for <code>-auth none</code>), so the TODO could never be resolved as written. The comment now says plainly that <code>-auth none</code> performs no real verification by design, and points at <code>-auth jwt|session|both</code> for a real implementation. Also fixed a stray <code>X-Api-Key</code>/<code>X-Api-Secret</code> naming mismatch in the same comment (the code has always checked <code>X-Api-Secret</code>). No behavior change; not retrofitted to existing apps, same precedent as the comment's previous revision.</p>
+          <div class="change-tags"><span class="change-tag">auth</span><span class="change-tag">docs</span></div>
+        </div>
+
+        <div class="change-entry">
+          <div class="change-date">2026-08-19</div>
+          <h4><code>-multitenant</code> — thread a tenant Org through auth, session, and <code>core.User</code></h4>
+          <p>New opt-in flag on <code>nexler create app</code> (only meaningful with <code>-auth jwt|session|both</code> — errors with <code>-auth none</code>), generalizing a pattern already proven in a live Nexler app: threads a tenant Org through <code>auth.ContextWithOrg</code>/<code>Org</code> (a new context key pair, distinct from <code>Subject</code>), <code>StartSession</code>/<code>SessionFromRequest</code>'s <code>org</code> parameter (when <code>-auth</code> includes session), and <code>core.User.OrgId</code> (when a core database connection and a JWT-capable <code>-auth</code> choice are both present). <code>auth/jwt.go</code>'s <code>Claims.Org</code> field and <code>IssueJWT</code>'s <code>org</code> parameter were already unconditional from an earlier pass, so a JWT-only app needs no further wiring. A service-key-authenticated request never gets an Org attached — a service isn't tied to a tenant org. <code>core_users</code> also gains an <code>org_id</code> column, provisioned unconditionally by <code>nexler init db</code> for every <code>-db</code> app (zero-cost when unused, same precedent as <code>core_kgate_channels</code>), including an idempotent <code>ALTER TABLE</code> for databases provisioned before this column existed. Retrofit an already-scaffolded app with the new <code>nexler update -multitenant</code> flag, a deliberately separate, explicit opt-in step — never run automatically, and it refuses (naming the file) if <code>auth/context.go</code>, <code>auth/session.go</code>, <code>middleware/auth.go</code>, or <code>core/users.go</code> has been hand-edited. Along the way, fixed a pre-existing bug in the unrelated <code>ensureAuthSubjectContext</code> retrofit (<code>nexler update</code>'s automatic <code>auth/context.go</code>-creation path): it rendered <code>auth/context.go.tmpl</code> without the <code>HasCoreDB</code>/<code>AuthKind</code> fields that template's service-key block already depends on, which would fail template execution for an app old enough to hit that path and new/DB-enabled enough to have a JWT-capable core DB.</p>
+          <div class="change-tags"><span class="change-tag">auth</span><span class="change-tag">multitenant</span><span class="change-tag">bugfix</span></div>
+        </div>
+
         <div class="change-entry">
           <div class="change-date">2026-08-19</div>
           <h4>Mongo filter fix, <code>store/common.Base</code>, and richer HTML responses</h4>

@@ -15,16 +15,18 @@ import (
 )
 {{ if eq .AuthKind "none" }}
 // RequireAuth wraps a handler so every protected route enforces the
-// presence of both an X-Api-Key header and a Bearer token in the
-// Authorization header. It only checks that both were sent — actual
-// verification of the key/token values is TODO. Scaffold the app with
+// presence of an X-Api-Secret header and a Bearer token in the
+// Authorization header. This is -auth none's stub: it deliberately
+// performs no real credential verification — any non-empty value in
+// either header passes — so it documents the wire shape a real check
+// would enforce without actually gating access. Scaffold the app with
 // -auth jwt|session|both to generate a real implementation backed by
 // the auth package instead of this stub.
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.Header.Get("X-Api-Key")
+		apiKey := r.Header.Get("X-Api-Secret")
 		if apiKey == "" {
-			http.Error(w, "missing X-Api-Key header", http.StatusUnauthorized)
+			http.Error(w, "missing X-Api-Secret header", http.StatusUnauthorized)
 			return
 		}
 
@@ -33,8 +35,6 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
 		}
-
-		// TODO: verify apiKey and token against real credentials.
 
 		next(w, r)
 	}
@@ -64,7 +64,13 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
 			if claims, err := auth.VerifyJWT(token); err == nil {
+{{- if $.Multitenant }}
+				ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
+				ctx = auth.ContextWithOrg(ctx, claims.Org)
+				next(w, r.WithContext(ctx))
+{{- else }}
 				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+{{- end }}
 				return
 			}
 		}
@@ -97,7 +103,13 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "invalid or expired token", http.StatusUnauthorized)
 			return
 		}
+{{- if $.Multitenant }}
+		ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
+		ctx = auth.ContextWithOrg(ctx, claims.Org)
+		next(w, r.WithContext(ctx))
+{{- else }}
 		next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+{{- end }}
 	}
 }
 {{- end }}
@@ -109,12 +121,22 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 // can read it back via auth.Subject(r).
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+{{- if .Multitenant }}
+		subject, org, ok := auth.SessionFromRequest(r)
+{{- else }}
 		subject, ok := auth.SessionFromRequest(r)
+{{- end }}
 		if !ok {
 			http.Error(w, "not logged in", http.StatusUnauthorized)
 			return
 		}
+{{- if .Multitenant }}
+		ctx := auth.ContextWithSubject(r.Context(), subject)
+		ctx = auth.ContextWithOrg(ctx, org)
+		next(w, r.WithContext(ctx))
+{{- else }}
 		next(w, r.WithContext(auth.ContextWithSubject(r.Context(), subject)))
+{{- end }}
 	}
 }
 {{ else }}
@@ -143,14 +165,29 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
 			if claims, err := auth.VerifyJWT(token); err == nil {
+{{- if .Multitenant }}
+				ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
+				ctx = auth.ContextWithOrg(ctx, claims.Org)
+				next(w, r.WithContext(ctx))
+{{- else }}
 				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+{{- end }}
 				return
 			}
 		}
+{{- if .Multitenant }}
+		if subject, org, ok := auth.SessionFromRequest(r); ok {
+			ctx := auth.ContextWithSubject(r.Context(), subject)
+			ctx = auth.ContextWithOrg(ctx, org)
+			next(w, r.WithContext(ctx))
+			return
+		}
+{{- else }}
 		if subject, ok := auth.SessionFromRequest(r); ok {
 			next(w, r.WithContext(auth.ContextWithSubject(r.Context(), subject)))
 			return
 		}
+{{- end }}
 		if key := r.Header.Get("X-Api-Secret"); key != "" {
 			if name, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
 				ctx := auth.ContextWithService(r.Context(), name)
@@ -174,14 +211,29 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
 			if claims, err := auth.VerifyJWT(token); err == nil {
+{{- if .Multitenant }}
+				ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
+				ctx = auth.ContextWithOrg(ctx, claims.Org)
+				next(w, r.WithContext(ctx))
+{{- else }}
 				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+{{- end }}
 				return
 			}
 		}
+{{- if .Multitenant }}
+		if subject, org, ok := auth.SessionFromRequest(r); ok {
+			ctx := auth.ContextWithSubject(r.Context(), subject)
+			ctx = auth.ContextWithOrg(ctx, org)
+			next(w, r.WithContext(ctx))
+			return
+		}
+{{- else }}
 		if subject, ok := auth.SessionFromRequest(r); ok {
 			next(w, r.WithContext(auth.ContextWithSubject(r.Context(), subject)))
 			return
 		}
+{{- end }}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }

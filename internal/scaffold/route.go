@@ -1597,12 +1597,33 @@ func ensureAuthSubjectContext(appDir string) (bool, error) {
 		return false, err
 	}
 
+	_, hasCoreDB := readCoreDBType(appDir)
+	authKind := "session"
+	switch {
+	case hasJWT && hasSession:
+		authKind = "both"
+	case hasJWT:
+		authKind = "jwt"
+	}
+
 	contextPath := filepath.Join(appDir, "auth", "context.go")
 	addedContext := false
 	if _, err := os.Stat(contextPath); os.IsNotExist(err) {
-		data := struct{ AppName, ModulePath string }{
+		// HasCoreDB/AuthKind are needed because context.go.tmpl's
+		// ContextWithService/Service block is gated on them
+		// ({{- if and .HasCoreDB (or (eq .AuthKind "jwt") (eq .AuthKind
+		// "both")) }}); Multitenant is always false here for the same
+		// reason MergeServiceAuth is below — this path only regenerates an
+		// app old enough to predate ContextWithSubject entirely, long
+		// before -multitenant could exist.
+		data := struct {
+			AppName, ModulePath, AuthKind string
+			HasCoreDB, Multitenant        bool
+		}{
 			AppName:    filepath.Base(modulePath),
 			ModulePath: modulePath,
+			AuthKind:   authKind,
+			HasCoreDB:  hasCoreDB,
 		}
 		tmplPath := templatesRoot + "/auth/context.go.tmpl"
 		if err := writeTemplateFile(tmplPath, contextPath, data); err != nil {
@@ -1626,23 +1647,17 @@ func ensureAuthSubjectContext(appDir string) (bool, error) {
 		return addedContext, fmt.Errorf("%s doesn't look like a generated RequireAuth (no \"func RequireAuth\" found) — has it been hand-rewritten? Regenerate it manually to attach the subject via auth.ContextWithSubject, or restore it from a fresh scaffold and reapply your changes", authGoPath)
 	}
 
-	authKind := "session"
-	switch {
-	case hasJWT && hasSession:
-		authKind = "both"
-	case hasJWT:
-		authKind = "jwt"
-	}
-	// MergeServiceAuth is always false here: this path only regenerates an
-	// app whose middleware/auth.go predates ContextWithSubject entirely
-	// (see this function's own doc comment) — long before -merge-service-auth
-	// existed, so there's no merged state to preserve. An app that's already
-	// on the merged design (via -merge-service-auth at scaffold time, or via
-	// MergeServiceAuth's own retrofit) already contains ContextWithSubject
-	// and so never reaches this regeneration branch at all.
+	// MergeServiceAuth/Multitenant are always false here: this path only
+	// regenerates an app whose middleware/auth.go predates
+	// ContextWithSubject entirely (see this function's own doc comment) —
+	// long before -merge-service-auth/-multitenant existed, so there's no
+	// merged/multitenant state to preserve. An app that's already on either
+	// design already contains ContextWithSubject and so never reaches this
+	// regeneration branch at all.
 	data := struct {
 		AuthKind, ModulePath string
 		MergeServiceAuth     bool
+		Multitenant          bool
 	}{AuthKind: authKind, ModulePath: modulePath}
 	tmplPath := templatesRoot + "/middleware/auth.go.tmpl"
 	tmplRaw, err := templateFS.ReadFile(tmplPath)

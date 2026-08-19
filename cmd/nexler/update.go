@@ -16,6 +16,7 @@ func runUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
 	mergeServiceAuth := fs.Bool("merge-service-auth", false, "explicit opt-in: convert an already-scaffolded -auth jwt|both -db app from a separate middleware.RequireServiceAuth to service-key auth folded into RequireAuth (see 'create app -merge-service-auth'); not run automatically, since merged-vs-separate is a per-app design choice, not a one-true-shape fix")
+	multitenant := fs.Bool("multitenant", false, "explicit opt-in: thread a tenant Org through an already-scaffolded -auth jwt|session|both app's auth/context.go, auth/session.go, middleware/auth.go, and core/users.go (see 'create app -multitenant'); not run automatically")
 	fs.Parse(args)
 
 	result, err := scaffold.Update(*dir)
@@ -41,6 +42,19 @@ func runUpdate(args []string) {
 			fmt.Println("auth: merged service-key auth into RequireAuth: updated")
 		} else {
 			fmt.Println("auth: merged service-key auth into RequireAuth: already up to date (or not eligible — needs -auth jwt|both and -db)")
+		}
+	}
+
+	if *multitenant {
+		changed, err := scaffold.Multitenant(*dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "nexler: %v\n", err)
+			os.Exit(1)
+		}
+		if changed {
+			fmt.Println("auth: multi-tenant Org propagation: updated")
+		} else {
+			fmt.Println("auth: multi-tenant Org propagation: already up to date (or not eligible — needs -auth jwt, session, or both)")
 		}
 	}
 }

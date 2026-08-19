@@ -79,13 +79,14 @@ func MergeServiceAuth(appDir string) (bool, error) {
 		CoreUserGetQuery       string
 		CoreServiceVerifyQuery string
 		CoreServiceGetQuery    string
+		Multitenant            bool
 	}{
 		ModulePath:     modulePath,
 		CoreDB:         coreDBType,
 		CoreDBAccessor: coreDBAccessor,
 	}
 	if coreDBAccessor != "Mongo" {
-		coreData.CoreUserGetQuery = userGetQuerySQL(coreDBType)
+		coreData.CoreUserGetQuery = userGetQuerySQL(coreDBType, false)
 		coreData.CoreServiceVerifyQuery = serviceVerifyQuerySQL(coreDBType)
 		coreData.CoreServiceGetQuery = serviceGetQuerySQL(coreDBType)
 	}

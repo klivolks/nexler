@@ -110,6 +110,7 @@ func runCreateApp(args []string) {
 	dbUser := fs.String("db-user", "", "core database username (blank = no auth)")
 	dbPassword := fs.String("db-password", "", "core database password (blank = no auth; passed/prompted in plain text, never masked)")
 	mergeServiceAuth := fs.Bool("merge-service-auth", false, "fold X-Api-Secret service-key auth into RequireAuth itself (JWT/session, then service key) instead of a separate RequireServiceAuth — lets a service/automation caller hit the same protected routes a user would; only meaningful with -auth jwt|both and -db")
+	multitenant := fs.Bool("multitenant", false, "thread a tenant Org through auth.ContextWithOrg/Org, StartSession/SessionFromRequest, and core.User.OrgId — requires -auth jwt, session, or both")
 	fs.Parse(reorderFlagsFirst(fs, args))
 
 	set := map[string]bool{}
@@ -209,6 +210,11 @@ func runCreateApp(args []string) {
 		mergeServiceAuthVal = promptBool("Fold service-key (X-Api-Secret) auth into RequireAuth instead of a separate RequireServiceAuth?", mergeServiceAuthVal)
 	}
 
+	multitenantVal := *multitenant
+	if !set["multitenant"] && (authVal == "jwt" || authVal == "session" || authVal == "both") {
+		multitenantVal = promptBool("Multi-tenant Org propagation (auth.ContextWithOrg, session/JWT Org, core.User.OrgId)?", multitenantVal)
+	}
+
 	cfg := scaffold.NewAppConfig{
 		AppName:          appName,
 		OutputDir:        dir,
@@ -225,6 +231,7 @@ func runCreateApp(args []string) {
 		CoreDBUser:       dbUserVal,
 		CoreDBPassword:   dbPasswordVal,
 		MergeServiceAuth: mergeServiceAuthVal,
+		Multitenant:      multitenantVal,
 	}
 
 	if err := scaffold.NewApp(cfg); err != nil {
@@ -250,6 +257,9 @@ func runCreateApp(args []string) {
 	}
 	if mergeServiceAuthVal {
 		fmt.Println("Service auth: folded into RequireAuth (X-Api-Secret, after JWT/session) — no separate RequireServiceAuth generated.")
+	}
+	if multitenantVal {
+		fmt.Println("Multi-tenant: Org threaded through auth.ContextWithOrg/Org, session/JWT, and core.User.OrgId (see auth/context.go, auth/session.go, core/users.go).")
 	}
 	if len(dbTypes) > 0 {
 		displayTypes := make([]string, len(dbTypes))
@@ -589,7 +599,7 @@ interactively instead — press Enter to accept the shown default, or pass the f
 skip the question entirely (e.g. for scripts/CI).
 
 Usage:
-  nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>] [-db-host <host>] [-db-port <port>] [-db-name <name>] [-db-user <user>] [-db-password <password>] [-merge-service-auth]
+  nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>] [-db-host <host>] [-db-port <port>] [-db-name <name>] [-db-user <user>] [-db-password <password>] [-merge-service-auth] [-multitenant]
       Scaffold a new app with the standard handlers/services/store/models
       layout. Scaffolding itself is always fully self-contained: no
       network access, no git required — every template ships embedded
@@ -652,6 +662,19 @@ Usage:
       separate RequireServiceAuth. Retrofit an already-scaffolded app with
       "nexler update -merge-service-auth".
 
+      -multitenant (only meaningful with -auth jwt|session|both; default
+      false) threads a tenant Org through auth.ContextWithOrg/Org
+      (auth/context.go), StartSession/SessionFromRequest's org parameter
+      (auth/session.go, when -auth includes session), and core.User.OrgId
+      (core/users.go, when a core database connection AND a JWT-capable
+      -auth choice are both present). auth/jwt.go's Claims.Org field and
+      IssueJWT's org parameter are already unconditional, so JWT-only apps
+      need no further wiring. A service-key-authenticated request (X-Api-
+      Secret) never gets an Org attached — a service isn't tied to a
+      tenant org. Combining -multitenant with -auth none is an error:
+      there's no authenticated subject to attach an Org to. Retrofit an
+      already-scaffolded app with "nexler update -multitenant".
+
       -db (default none) picks which database driver(s) get generated
       support in db/ — any comma-separated subset of mongo, mysql,
       postgres, mssql. This only selects which drivers are compiled in
@@ -699,6 +722,7 @@ Usage:
       Example: nexler create app test -db postgres,mongo -core mongo
       Example: nexler create app test -db mongo -db-host localhost -db-name test
       Example: nexler create app test -auth both -db mongo -merge-service-auth
+      Example: nexler create app test -auth session -multitenant
 
   nexler create <route> -module <name> [-submodule <name>] [-protected] [-methods GET,POST] [-body json] [-response json] [-layout shared] [-dir <app-dir>] [-file <name>] [-name <name>] [-own-register]
       Scaffold a route inside an existing app: generates a handler,
@@ -941,7 +965,7 @@ Usage:
       Example: nexler add bootstrap@5.3.3 -as bootstrap
       Example: nexler add @popperjs/core
 
-  nexler update [-dir <app-dir>] [-merge-service-auth]
+  nexler update [-dir <app-dir>] [-merge-service-auth] [-multitenant]
       Brings an existing generated app's nexler-owned files — ones you generally don't
       hand-edit — up to date with whatever the current nexler binary knows how to generate,
       without needing to coincidentally trigger it via "nexler create <route>" (which already
@@ -969,8 +993,21 @@ Usage:
       app isn't eligible (needs -auth jwt|both and -db) or is already
       merged.
 
+      -multitenant is likewise a separate, explicit opt-in step: it threads a
+      tenant Org through an already-scaffolded -auth jwt|session|both app's
+      auth/context.go (ContextWithOrg/Org), auth/session.go
+      (StartSession/SessionFromRequest's org parameter, when the app has
+      sessions), middleware/auth.go (attaching Org after a successful JWT or
+      session check), and core/users.go (OrgId, when present) — see
+      "create app -multitenant" above. Never runs automatically, same
+      reasoning as -merge-service-auth: whether an app wants tenant-scoped
+      data is a per-app design choice. Refuses (naming the file) if any of
+      these files has been hand-edited since it was generated. A no-op if
+      the app isn't eligible (needs -auth jwt, session, or both).
+
       Example: nexler update -dir ./myapp
       Example: nexler update -dir ./myapp -merge-service-auth
+      Example: nexler update -dir ./myapp -multitenant
 
   nexler version
       Print the CLI version.

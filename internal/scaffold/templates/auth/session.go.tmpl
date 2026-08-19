@@ -28,6 +28,9 @@ const (
 
 type sessionEntry struct {
 	Subject   string
+{{- if .Multitenant }}
+	Org       string
+{{- end }}
 	ExpiresAt time.Time
 }
 
@@ -39,23 +42,40 @@ var (
 // StartSession creates a server-side session for subject, sets
 // SessionCookieName on w, and returns the session ID. Call this from
 // your own login handler once credentials are verified.
+{{- if .Multitenant }}
+// org is the authenticated subject's tenant organization — resources in
+// your own store/service layers should scope to it (see
+// auth.ContextWithOrg), not Subject alone.
+{{- end }}
 {{- if .RememberMe }}
 // rememberMe extends the session/cookie lifetime from sessionTTL to
 // rememberMeTTL (e.g. a "remember me" checkbox on your login form).
+{{- if .Multitenant }}
+func StartSession(w http.ResponseWriter, subject, org string, rememberMe bool) string {
+{{- else }}
 func StartSession(w http.ResponseWriter, subject string, rememberMe bool) string {
+{{- end }}
 	ttl := sessionTTL
 	if rememberMe {
 		ttl = rememberMeTTL
 	}
 {{- else }}
+{{- if .Multitenant }}
+func StartSession(w http.ResponseWriter, subject, org string) string {
+{{- else }}
 func StartSession(w http.ResponseWriter, subject string) string {
+{{- end }}
 	ttl := sessionTTL
 {{- end }}
 	id := randomID()
 	exp := time.Now().Add(ttl)
 
 	sessionsMu.Lock()
+{{- if .Multitenant }}
+	sessions[id] = sessionEntry{Subject: subject, Org: org, ExpiresAt: exp}
+{{- else }}
 	sessions[id] = sessionEntry{Subject: subject, ExpiresAt: exp}
+{{- end }}
 	sessionsMu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
@@ -72,6 +92,27 @@ func StartSession(w http.ResponseWriter, subject string) string {
 // SessionFromRequest looks up the session referenced by r's session
 // cookie. ok is false if there's no cookie, or the session doesn't
 // exist or has expired (an expired session is also removed here).
+{{- if .Multitenant }}
+func SessionFromRequest(r *http.Request) (subject, org string, ok bool) {
+	c, err := r.Cookie(SessionCookieName)
+	if err != nil {
+		return "", "", false
+	}
+
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+
+	entry, found := sessions[c.Value]
+	if !found {
+		return "", "", false
+	}
+	if time.Now().After(entry.ExpiresAt) {
+		delete(sessions, c.Value)
+		return "", "", false
+	}
+	return entry.Subject, entry.Org, true
+}
+{{- else }}
 func SessionFromRequest(r *http.Request) (subject string, ok bool) {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil {
@@ -91,6 +132,7 @@ func SessionFromRequest(r *http.Request) (subject string, ok bool) {
 	}
 	return entry.Subject, true
 }
+{{- end }}
 
 // EndSession destroys the session referenced by r's cookie (if any) and
 // clears the cookie on w. Call this from your own logout handler.
