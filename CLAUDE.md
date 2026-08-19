@@ -448,19 +448,21 @@ credentials are verified — matching every other generated handler's `// TODO: 
 
 Apps with `-auth jwt|both` and `-db` set also get a second, wholly separate auth
 mechanism for app-to-app calls: `middleware.RequireServiceAuth` (`middleware/
-service_auth.go.tmpl`), checking the `X-Api-Key` header — nexler's existing convention
+service_auth.go.tmpl`), checking the `X-Api-Secret` header — nexler's existing convention
 for this concept (the `-auth none` stub in `middleware/auth.go.tmpl` already checks for
-this same header's presence, unverified) — against a new `core_services` table, backed
-by `core/services.go.tmpl`'s `CreateService`/`VerifyServiceKey`/`RevokeService`.
-Deliberately **independent** of `RequireAuth`, not a third fallback alongside JWT/session
-the way `-auth both` already tries JWT then session on the same route: a service-only
-route must never be able to accept an end-user JWT just because it happens to share
-middleware with a user-facing one. A route is either user-facing (`-protected`,
-`RequireAuth`) or service-only (`RequireServiceAuth`) — never both via one combined
-check. **The `X-Api-Key` it validates must never be embedded in any UI-facing code**
-(browser JS, a mobile app binary) — treat it the same as a database credential; nexler
-has no way to enforce this at the framework level, so it's a documented discipline, not
-a runtime check.
+an `X-Api-Key` header's presence, unverified — a separate, older stub convention, not
+literally the same header name as this real check) — against a new `core_services`
+table, backed by `core/services.go.tmpl`'s `CreateService`/`VerifyServiceKey`/
+`RevokeService`. Deliberately **independent** of `RequireAuth` by default, not a third
+fallback alongside JWT/session the way `-auth both` already tries JWT then session on
+the same route: a service-only route must never be able to accept an end-user JWT just
+because it happens to share middleware with a user-facing one. A route is either
+user-facing (`-protected`, `RequireAuth`) or service-only (`RequireServiceAuth`) — never
+both via one combined check, unless `-merge-service-auth` opts in (see below). **The
+`X-Api-Secret` it validates must never be embedded in any UI-facing code** (browser JS,
+a mobile app binary) — treat it the same as a database credential; nexler has no way to
+enforce this at the framework level, so it's a documented discipline, not a runtime
+check.
 
 `core.CreateService(ctx, name) (key string, err error)` generates a random 32-byte key
 (`crypto/rand`, hex-encoded), stores only its SHA-256 hash in `core_services`, and
@@ -504,6 +506,48 @@ as `ensureAuthSubjectContext`) and append-only-adds `ContextWithService`/`Servic
 connection and a JWT-capable `-auth` choice, same precedent as every other retrofit
 skipping a feature the app was never eligible for. Never re-runs `nexler init db` itself
 — table provisioning stays a separate, explicit, manual step.
+
+#### Folding service auth into `RequireAuth` (`-merge-service-auth`)
+
+`-merge-service-auth` (new `create app` flag, same eligibility as service auth itself —
+`-auth jwt|both` + `-db`) is the opt-in alternative to the separate-middleware design
+above: instead of generating `middleware/service_auth.go.tmpl` at all, its
+`X-Api-Secret` check is folded directly into `middleware/auth.go.tmpl`'s own
+`RequireAuth`, tried after JWT (and after session too, for `-auth both`) — so a
+service/automation caller can hit the exact same `-protected` routes a human user
+would, instead of a route needing a structurally separate service-only variant of
+itself. `templateData.MergeServiceAuth` (from `NewAppConfig.MergeServiceAuth`) drives
+both a new branch inside `middleware/auth.go.tmpl` (a merged "jwt" branch and a merged
+"both" branch, alongside the existing unmerged ones — no new branch for "session" or
+"none", since merging isn't eligible there either) and a skip on
+`middleware/service_auth.go.tmpl` itself in `scaffold.go`'s `NewApp`. A matching
+service key still attaches both `auth.ContextWithService` and
+`auth.ContextWithSubject` (set to the service's name) — same reasoning as the unmerged
+design's own `Subject`-for-RBAC note, just inlined into one middleware instead of two.
+
+Deliberately **not** the new default: this is a real per-app design tradeoff, not a
+one-true-shape improvement — a pure API service that wants user-only and service-only
+routes to stay structurally distinct (so a service key can never reach a route meant
+only for end users, or vice versa) should leave it unset and keep the separate
+`RequireServiceAuth`. Default `false` preserves today's behavior exactly for anyone who
+doesn't pass it.
+
+An already-scaffolded app opts in via `nexler update -merge-service-auth`
+(`MergeServiceAuth` in `internal/scaffold/mergeserviceauth.go`) — a deliberately
+separate, explicit flag on the `update` command, **not** one of the unconditional
+`updateChecks` (`update.go`): every check there converges every eligible app to one
+canonical current shape, but merged-vs-separate isn't that kind of fix, so nothing
+flips it without being asked. It ensures `core/users.go`/`core/services.go`/
+`auth/context.go`'s `ContextWithService` exist (same as `ensureServiceAuth`, for an app
+that predates API-key auth entirely), then — if `middleware/service_auth.go` exists —
+byte-compares it against what the current template would render for this app before
+removing it, refusing instead (naming the file) if it's been hand-edited, same
+"has it been hand-rewritten?" precedent `ensureAuthSubjectContext` already uses; finally
+regenerates `middleware/auth.go` in merged form. A silent no-op if the app is already
+merged, or was never eligible. `ensureServiceAuth` itself is merge-aware too — it never
+writes `middleware/service_auth.go` back for an app whose `middleware/auth.go` already
+checks `X-Api-Secret` inline, so a plain `nexler update` (no flag) can never resurrect
+the separate file on an already-merged app.
 
 #### Admin API for `core_users`/`core_services`
 
@@ -755,12 +799,38 @@ way a direct field would be); if it's still zero, generates a real `bson.NewObje
 before inserting
 and returns it. If `T` has no such field at all (e.g. `core/errorlog.go.tmpl`'s
 `errorLogDoc`, which has none by design), `InsertID` just delegates to `Insert`
-unchanged and returns a zero `ObjectID` — never an error, never a requirement. Note this
-locator is intentionally more capable than `filterToBSON`/`structToBSON` above (which
-don't flatten anonymous embeds at all) — that's `InsertID`'s own reflection walk, not a
-change to the existing filter builder; a struct literal used as a `Get`/`Set` filter
-still needs the qualified embedded form and still won't match on a bare embedded field
-the way `Insert`'s own driver-level BSON marshaling already does.
+unchanged and returns a zero `ObjectID` — never an error, never a requirement. This
+locator's own reflection walk is separate from `structToBSON`'s (below) — one finds and
+sets an `_id` field for insertion, the other builds a filter — but both now recurse into
+anonymous embedded struct fields, for the same reason: a shared "base" struct (e.g.
+`store/common.Base`, below) every domain type embeds is the expected, common shape.
+
+**`store/common/common.go.tmpl`** (generated whenever mongo is selected via `-db`, same
+`HasMongo` gate as `mongo/` itself) provides exactly that shared base:
+a `Base` struct holding just an `ID bson.ObjectID` field tagged `bson:"_id,omitempty"`,
+meant to be embedded anonymously (tagged `bson:",inline"`) in every Mongo domain struct
+so `_id` is picked up the same way every time without every model redeclaring it. Two
+apps independently hand-built an identical package with the same shape before this
+existed — the signal it belonged in the scaffold itself, not left to be re-solved per
+app. An app scaffolded before it existed picks it up via `nexler update`
+(`ensureStoreCommon` in `route.go`) — writes the file only if missing (never overwrites;
+`Base` has no versioned content to bring up to date, just present-or-absent), a silent
+no-op if the app wasn't scaffolded with mongo at all.
+
+**`structToBSON` flattens anonymous embedded fields into the same top-level filter**,
+not just `InsertID`'s locator — a filter struct literal like `T{Base: common.Base{ID:
+id}}` used with `Get`/`GetOne`/`Set`/`Delete` builds `{"_id": id}`, matching how the
+Mongo driver's own default (non-inline) BSON encoding already treats an embedded struct.
+This was a real, initially-shipped bug (fixed later): the filter builder used to only
+handle direct fields, so that same literal silently built `{"base": ...}` instead,
+breaking every by-ID lookup for any type embedding a shared base struct — never caught
+until a real app's `{id}` routes were the first to actually use `store/common.Base`
+embedding. An app scaffolded before the fix picks it up via `nexler update`
+(`ensureMongoEmbeddedFilterFix` in `route.go`) — an exact literal-text anchor
+replacement of `structToBSON`'s loop body (zero per-app templating, so identical across
+every app), same "narrow, anchor-based patch of a known-exact body" precedent
+`ensureKgateResumeAll` already established for `kgate.go`'s `Register`; errors, naming
+the file, if that loop doesn't match exactly (hand-rewritten) rather than overwriting it.
 
 #### The `mysql`/`postgres`/`mssql` packages: struct-based SQL helpers
 
@@ -1252,6 +1322,39 @@ its output is embedded as `template.HTML` into the layout's `{{.Content}}` — t
 `{{define "content"}}` block convention to keep the two files in sync, which matters because the
 content file may just be a placeholder that doesn't know about its layout's structure.
 
+The page template data also carries `{{.Subject}}` (the caller's authenticated subject, via
+`auth.Subject(r)` — always present as a field, but always `""` for an `-auth none` app, since
+there's no `auth.Subject` to call at all in that case) and `{{.Path}}` (`r.URL.Path`, always
+present). `HTML`'s own rendering is factored into an unexported `composeHTML(r, module, name,
+title, data) ([]byte, error)` — returns bytes rather than writing directly, so it can be shared by
+`HTML` (always writes 200) and two more exported functions, `HTMLError(w, r, module, status, title,
+data)` and `Unauthorised(w, r, module, data)` (a fixed 403), which render `module`'s
+`error-content.html`/`unauthorised-content.html` the same way, for an admin page that wants a
+styled error instead of `Error`'s plain JSON envelope — falling back to that same JSON envelope if
+the page itself can't be found/rendered, rather than risking a recursive failure. A `>= 500` through
+either goes through `core.LogError` the same way `Error` already does (gated on `HasDB`, same as
+`Error`'s own gate).
+
+`composeHTML` also composes three more **optional** partials — `header.html`/`sidebar.html`/
+`footer.html`, resolved through the same `resolveHTMLFile` hierarchy walk and rendered with the same
+page data, injected into `layout.html` as `{{.Header}}`/`{{.Sidebar}}`/`{{.Footer}}` via a new
+`renderOptionalPartial` — the one place `resolveHTMLFile`'s "not found" case is *not* an error:
+missing anywhere in the hierarchy (not just this module, all the way up through `shared/`) simply
+renders as an empty string, so a module with no header/sidebar/footer of its own is unaffected.
+
+An app scaffolded before any of this existed (the current file only had `HTML` itself, inlining what
+is now `composeHTML`'s body, with no `Subject`/`Path`/partials/`HTMLError`/`Unauthorised`) picks it
+up via `nexler update` (`ensureResponseHTMLUpgrade` in `route.go`). Same "response.go is realistically
+hand-extended, never a full rewrite" reasoning `ensureResponseJSONRaw` already established for this
+file: `HTML`'s old body has zero per-app templating, so it's byte-identical across every
+pre-upgrade app, making it a safe, exact anchor to replace (erroring, naming the file, if it's been
+hand-rewritten) — the retrofit re-renders the *current* `response.go.tmpl` to a string (with this
+app's own `HasDB`/`-auth` inferred from disk, the same `readCoreDBType`/`detectAuthFiles` precedent
+`ensureServiceAuth` already set, never written to disk directly) purely to extract the new `HTML`
+body and the new-functions block correctly conditioned for this app, then splices both into the
+existing file — the new-functions block inserted right before `responseMarker`, coexisting safely
+with `ensureResponseJSONRaw`'s own `JSONRaw` insertion at the same anchor.
+
 `nexler create app <name> -ui` wires the app's own homepage (`GET /`) through this same mechanism —
 `handlers/home/home.go.tmpl` branches on `.UI` to call `response.HTML(w, r, "home", "home", ...)`
 instead of the default `templates.ServePage("home.html")` (the embedded, compile-time homepage).
@@ -1283,9 +1386,11 @@ code without reparsing Go:
   this marker can appear in more than one file per package.
 - `// nexler:register` in a route's `handlers/.../<file>.go` — where new `mux.HandleFunc`/
   `openapi.Register` calls get inserted. Since Go permits only one `func Register` per package,
-  exactly one file per package ever contains this marker — that file is the package's **primary**
-  file, and every method's registration wiring lives there regardless of which file its handler
-  function itself is defined in.
+  by default exactly one file per package ever contains this marker — that file is the package's
+  **primary** file, and every method's registration wiring lives there regardless of which file
+  its handler function itself is defined in. `-own-register` (below) is the one way a package
+  legitimately ends up with more than one register-marked file, each its own independent primary
+  with its own distinctly-named `Register<Name>` function.
 - `// nexler:models` in a route's `models/.../<file>.go` — where new Request/Response struct
   pairs get inserted for the same case; also potentially more than one file per package.
 
@@ -1328,6 +1433,34 @@ If any marker is missing (e.g. a route scaffolded before this feature existed, o
 file), the corresponding insert fails with an error naming the exact marker text to add back by
 hand — it does not silently fall back to guessing a location.
 
+#### A second independent resource in an existing package (`-own-register`)
+
+`-file` naming a not-yet-existing file normally still folds its wiring into the package's one
+existing primary (above) — but `-own-register` (bool, default `false`) makes that same `-file`
+value instead create a genuinely **independent** second (third, ...) resource: its own
+`Register<Name>` function (rendered from the very same `handler.go.tmpl` a package's first
+resource uses — the template's one hardcoded `Register` identifier is now
+`{{ .RegisterFuncName }}`, defaulting to `"Register"` everywhere else so every other render stays
+byte-identical), its own `middleware`/`openapi` imports, its own `// nexler:handlers`/
+`// nexler:register` markers, and its own model/service/store files — living alongside, never
+touching, the package's existing resource. `wireAggregatorAdditionalCall` (`route.go`, a tolerant
+sibling of `wireAggregator` that doesn't error when the package's import already exists) adds one
+more `<alias>.Register<Name>(mux)` call into the aggregator, under the same import. This mirrors
+a pattern already hand-built in a live app before this feature existed: two resources
+(`email`/`sms`) sharing one `handlers/admin/providers` package, the second one hand-written with
+its own `RegisterSms` because no scaffold path for it existed yet.
+
+Requires both `-file` (a name not already used in the package) and `-name` (to disambiguate
+`Register<Name>` — and every other identifier — from the package's existing resource); only
+meaningful when the target package already exists. `addToExistingRoute`'s primary-file resolution
+checks `-file`'s own target file **directly** for `// nexler:register` first, before ever falling
+back to a directory-wide scan — this is what makes a later `nexler create <route>` adding a method
+to, say, `sms` (without `-own-register`) correctly land in `sms.go`'s own `RegisterSms`, never in
+`email.go`'s `Register`, regardless of which file a scan would otherwise find first. A directory
+that already has two or more independent resources, given a *new* `-file` value with **no**
+`-own-register`, is a hard, explicit error listing every existing resource rather than guessing
+which one it should fold into.
+
 #### Cross-invocation identifier collisions (`-name`)
 
 Every generated identifier for a method — its handler function name, Request/Response type
@@ -1360,6 +1493,12 @@ does for the on-disk file name) — e.g. adding `/purchase/new` to a package tha
 `HandlePurchasePost`. Not interactively prompted (same as `-file` isn't proactively surfaced
 beyond its own optional prompt) — the collision error itself is what tells a developer to pass it,
 since the flag is only ever needed in this one situation.
+
+`detectIdentifierCollisions` also guards one more identifier: `-own-register`'s derived
+`Register<Name>` function name (checked whenever a non-empty name is passed in, which only
+`addOwnRegisterResource` ever does) — since `-own-register` already makes `-name` effectively
+mandatory (see above), this is mostly defense-in-depth against two separate `-own-register` calls
+on the same package accidentally reusing the same `-name`.
 
 `-name` also protects `routeMethod.HTMLContentName` (the `templates/html/<relDir>/<name>.html`
 content file a `-response html` method writes to): it's keyed off the same identifier base

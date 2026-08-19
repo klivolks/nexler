@@ -11,17 +11,23 @@
 // middleware.RequireAuth's context-attached subject (see "Authentication"
 // in CLAUDE.md), ensureJWTClaims (route.go) brings auth/jwt.go's
 // Claims up to RFC 7519 (sub/exp/iat, plus Name/Org/UserType/UserRole),
-// and ensureKgateResumeAll (kgate.go) patches kgate/kgate.go's Register
-// to auto-resume recorded channels on startup. Update just runs these
-// functions directly, unconditionally, and reports what happened.
-// Deliberately never touches anything a developer is expected to
-// hand-edit — handlers/services/store/models, main.go, .env,
-// templates/html/*, kgate.go's handleEvent — only ever the same narrow
-// set of files/regions those functions already know how to safely
-// upgrade (full regeneration for pure generated infra like openapi.go,
-// middleware/auth.go, and auth/jwt.go; append-only or surgical-anchor
-// patching for files that are realistically hand-extended, like
-// response.go and kgate.go).
+// ensureResponseHTMLUpgrade (route.go) extracts HTML's rendering into
+// composeHTML and adds HTMLError/Unauthorised plus optional header/
+// sidebar/footer partials and Subject/Path on the page template data,
+// ensureMongoEmbeddedFilterFix (route.go) fixes structToBSON silently
+// dropping an anonymously embedded filter field (e.g. store/common.Base's
+// ID) instead of flattening it to _id, ensureStoreCommon (route.go) adds
+// store/common.Base itself if missing, and ensureKgateResumeAll (kgate.go)
+// patches kgate/kgate.go's Register to auto-resume recorded channels on
+// startup. Update just runs these functions directly, unconditionally,
+// and reports what happened. Deliberately never touches anything a
+// developer is expected to hand-edit — handlers/services/store/models,
+// main.go, .env, templates/html/*, kgate.go's handleEvent — only ever the
+// same narrow set of files/regions those functions already know how to
+// safely upgrade (full regeneration for pure generated infra like
+// openapi.go, middleware/auth.go, and auth/jwt.go; append-only or
+// surgical-anchor patching for files that are realistically hand-extended,
+// like response.go, mongo.go, and kgate.go).
 package scaffold
 
 // UpdateResult reports which of Update's checks changed something vs.
@@ -43,10 +49,13 @@ type updateCheck struct {
 var updateChecks = []updateCheck{
 	{"openapi/openapi.go", ensureOpenAPIUpToDate},
 	{"response/response.go (JSONRaw)", ensureResponseJSONRaw},
+	{"response/response.go (HTML composition: partials, HTMLError/Unauthorised)", ensureResponseHTMLUpgrade},
 	{"auth: subject in request context", ensureAuthSubjectContext},
 	{"auth: RFC 7519 JWT claims (sub/exp/iat)", ensureJWTClaims},
 	{"db: InsertID helpers", ensureInsertIDHelpers},
 	{"db: mongo database name from DSN", ensureMongoDatabaseName},
+	{"mongo: embedded-field filter fix", ensureMongoEmbeddedFilterFix},
+	{"store: common.Base helper", ensureStoreCommon},
 	{"config: SwaggerEnabled toggle", ensureSwaggerToggle},
 	{"kgate: resume subscriptions on startup (Register)", ensureKgateResumeAll},
 	{"kgate: webhook OpenAPI docs + startup test subscribe", ensureKgateOpenAPIAndTestSubscribe},

@@ -1,0 +1,23 @@
+// Package common holds document fields shared across every Mongo domain
+// type in this app. Base is embedded anonymously in a domain struct to
+// pick up ID (Mongo's _id) the same way every time.
+package common
+
+import "go.mongodb.org/mongo-driver/v2/bson"
+
+// Base provides ID, aliased to Mongo's _id. Embed it anonymously:
+//
+//	type Widget struct {
+//		common.Base `bson:",inline"`
+//		Name string `bson:"name"`
+//		...
+//	}
+//
+// widget.ID reads/writes normally (Go field promotion); a struct literal
+// used as a mongo.Get/Set filter needs the qualified form,
+// Widget{Base: common.Base{ID: id}}, same as any other embedded field —
+// this app's mongo package's filter builder flattens it back into a
+// top-level _id.
+type Base struct {
+	ID bson.ObjectID `bson:"_id,omitempty"`
+}

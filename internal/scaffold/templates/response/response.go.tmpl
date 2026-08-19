@@ -22,6 +22,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+{{- if ne .AuthKind "none" }}
+
+	"{{ .ModulePath }}/auth"
+{{- end }}
 {{- if .HasDB }}
 
 	"{{ .ModulePath }}/core"
@@ -89,15 +94,36 @@ const htmlSharedDir = "shared"
 // e.g. a single layout.html can serve every module that doesn't need its
 // own override. Errors naming both checked paths if neither exists.
 func resolveHTMLFile(module, filename string) (string, error) {
-	modPath := filepath.Join(htmlTemplatesDir, filepath.FromSlash(module), filename)
-	if _, err := os.Stat(modPath); err == nil {
-		return modPath, nil
+	module = strings.Trim(module, "/\\")
+	modPath := filepath.Join(htmlTemplatesDir, filepath.FromSlash(module))
+
+	for {
+		path := filepath.Join(modPath, filename)
+
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+
+		parent := filepath.Dir(modPath)
+
+		if parent == modPath || parent == htmlTemplatesDir {
+			break
+		}
+
+		modPath = parent
 	}
+
 	sharedPath := filepath.Join(htmlTemplatesDir, htmlSharedDir, filename)
+
 	if _, err := os.Stat(sharedPath); err == nil {
 		return sharedPath, nil
 	}
-	return "", fmt.Errorf("neither %s nor %s exists (nexler create writes one of these at scaffold time — restore or recreate it by hand)", modPath, sharedPath)
+
+	return "", fmt.Errorf(
+		"HTML template %q not found in module hierarchy %q or shared directory",
+		filename,
+		module,
+	)
 }
 
 // HTML renders module's content file (resolved by resolveHTMLFile: its own
@@ -112,63 +138,178 @@ func resolveHTMLFile(module, filename string) (string, error) {
 // shared copy exists (e.g. hand-deleted), it reports a clear error instead
 // of silently recreating a placeholder over whatever was there.
 //
+// layout.html may also reference {{"{{.Header}}"}}, {{"{{.Sidebar}}"}}, and
+// {{"{{.Footer}}"}} — each resolved and rendered the same way as content
+// (module's own copy, walking up to shared), but unlike layout.html and
+// the content file, these three are optional: a module with no
+// header/sidebar/footer of its own (and none in any ancestor or shared)
+// simply renders as an empty string there, rather than an error.
+//
 // data is available to the content template as {{"{{.Data}}"}}; title is
-// available to both content and layout as {{"{{.Title}}"}}.
+// available to content, layout, and every partial as {{"{{.Title}}"}}. The
+// current request's authenticated subject (empty if unauthenticated, or if
+// this app has no -auth) is available as {{"{{.Subject}}"}}, and the
+// request path as {{"{{.Path}}"}}.
 func HTML(w http.ResponseWriter, r *http.Request, module, name, title string, data any) {
-	contentPath, err := resolveHTMLFile(module, name+".html")
+	out, err := composeHTML(r, module, name, title, data)
 	if err != nil {
 		Error(w, r, http.StatusInternalServerError, err.Error())
 		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+}
+
+// HTMLError renders module's "error-content.html" (composed into the same
+// layout/header/sidebar/footer as HTML) with the given status — for
+// admin-page requests where an error should show as a styled page instead
+// of Error's JSON envelope. data is available to error-content.html as
+// {{"{{.Data}}"}}, same as HTML.
+{{- if .HasDB }}
+// A status >= 500 is logged the same way Error logs one.
+{{- end }}
+// If error-content.html itself can't be found/rendered (e.g. a module with
+// no error page at all, nor a shared one), falls back to Error's plain
+// JSON rather than risking a recursive rendering failure.
+func HTMLError(w http.ResponseWriter, r *http.Request, module string, status int, title string, data any) {
+	htmlErrorPage(w, r, module, "error-content", status, title, data)
+}
+
+// Unauthorised renders module's "unauthorised-content.html" with a 403 —
+// for an authorization denial (e.g. a permission-check middleware), as
+// distinct from plain unauthenticated access. Same fallback-to-JSON
+// behavior as HTMLError if the page itself can't render.
+func Unauthorised(w http.ResponseWriter, r *http.Request, module string, data any) {
+	htmlErrorPage(w, r, module, "unauthorised-content", http.StatusForbidden, "Unauthorised", data)
+}
+
+// htmlErrorPage is HTMLError and Unauthorised's shared implementation:
+// renders module's name+".html" (composed into the same layout/header/
+// sidebar/footer as HTML) with the given status, for admin-page requests
+// where an error should show as a styled page instead of Error's JSON
+// envelope. data is available to the page as {{"{{.Data}}"}}, same as HTML.
+{{- if .HasDB }}
+// A status >= 500 is logged the same way Error logs one.
+{{- end }}
+// If the page itself can't be found/rendered (e.g. a module with no such
+// page at all, nor a shared one), falls back to Error's plain JSON rather
+// than risking a recursive rendering failure.
+func htmlErrorPage(w http.ResponseWriter, r *http.Request, module, name string, status int, title string, data any) {
+{{- if .HasDB }}
+	if status >= 500 {
+		core.LogError(r.Context(), title, fmt.Sprintf("status %d", status), r.URL.Path)
+	}
+{{- end }}
+	out, err := composeHTML(r, module, name, title, data)
+	if err != nil {
+		write(w, status, Envelope{Error: title})
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	w.Write(out)
+}
+
+// composeHTML resolves and renders module's name+".html" content file
+// inside its layout.html (plus the optional header/sidebar/footer
+// partials — see HTML's doc comment), returning the composed bytes
+// without writing anything to a response. Shared by HTML (always writes
+// status 200) and HTMLError/Unauthorised (write the caller's status) so
+// they never drift in how they build a page.
+func composeHTML(r *http.Request, module, name, title string, data any) ([]byte, error) {
+	contentPath, err := resolveHTMLFile(module, name+".html")
+	if err != nil {
+		return nil, err
 	}
 	contentSrc, err := os.ReadFile(contentPath)
 	if err != nil {
-		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("reading %s: %v", contentPath, err))
-		return
+		return nil, fmt.Errorf("reading %s: %w", contentPath, err)
 	}
 	layoutPath, err := resolveHTMLFile(module, "layout.html")
 	if err != nil {
-		Error(w, r, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
 	layoutSrc, err := os.ReadFile(layoutPath)
 	if err != nil {
-		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("reading %s: %v", layoutPath, err))
-		return
+		return nil, fmt.Errorf("reading %s: %w", layoutPath, err)
 	}
 
+{{- if ne .AuthKind "none" }}
+	subject, _ := auth.Subject(r)
+{{- else }}
+	subject := ""
+{{- end }}
 	page := struct {
-		Title string
-		Data  any
-	}{title, data}
+		Title   string
+		Data    any
+		Subject string
+		Path    string
+	}{title, data, subject, r.URL.Path}
 
 	contentTmpl, err := template.New(name).Parse(string(contentSrc))
 	if err != nil {
-		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("parsing %s: %v", contentPath, err))
-		return
+		return nil, fmt.Errorf("parsing %s: %w", contentPath, err)
 	}
 	var content bytes.Buffer
 	if err := contentTmpl.Execute(&content, page); err != nil {
-		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("rendering %s: %v", contentPath, err))
-		return
+		return nil, fmt.Errorf("rendering %s: %w", contentPath, err)
+	}
+
+	header, err := renderOptionalPartial(module, "header.html", page)
+	if err != nil {
+		return nil, err
+	}
+	sidebar, err := renderOptionalPartial(module, "sidebar.html", page)
+	if err != nil {
+		return nil, err
+	}
+	footer, err := renderOptionalPartial(module, "footer.html", page)
+	if err != nil {
+		return nil, err
 	}
 
 	layoutTmpl, err := template.New("layout").Parse(string(layoutSrc))
 	if err != nil {
-		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("parsing %s: %v", layoutPath, err))
-		return
+		return nil, fmt.Errorf("parsing %s: %w", layoutPath, err)
 	}
 	var out bytes.Buffer
 	if err := layoutTmpl.Execute(&out, struct {
-		Title   string
-		Content template.HTML
-	}{title, template.HTML(content.String())}); err != nil {
-		Error(w, r, http.StatusInternalServerError, fmt.Sprintf("rendering %s: %v", layoutPath, err))
-		return
+		Title                            string
+		Content, Header, Sidebar, Footer template.HTML
+	}{title, template.HTML(content.String()), header, sidebar, footer}); err != nil {
+		return nil, fmt.Errorf("rendering %s: %w", layoutPath, err)
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	w.Write(out.Bytes())
+	return out.Bytes(), nil
+}
+
+// renderOptionalPartial resolves and renders module's filename (walking up
+// to shared, same as resolveHTMLFile always has) with page as its
+// template data, for the optional header/sidebar/footer partials HTML
+// composes into layout.html. Unlike resolveHTMLFile's other two callers
+// (layout.html and the content file, both required), a partial that
+// doesn't exist anywhere in the hierarchy is not an error — it just
+// renders as empty, so modules without their own header/sidebar/footer
+// are unaffected.
+func renderOptionalPartial(module, filename string, page any) (template.HTML, error) {
+	path, err := resolveHTMLFile(module, filename)
+	if err != nil {
+		return "", nil
+	}
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	tmpl, err := template.New(filename).Parse(string(src))
+	if err != nil {
+		return "", fmt.Errorf("parsing %s: %w", path, err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, page); err != nil {
+		return "", fmt.Errorf("rendering %s: %w", path, err)
+	}
+	return template.HTML(buf.String()), nil
 }
 
 // nexler:response (do not remove this marker) — nexler anchors future

@@ -9,6 +9,9 @@ import (
 
 	"{{ .ModulePath }}/auth"
 {{- end }}
+{{- if .MergeServiceAuth }}
+	"{{ .ModulePath }}/core"
+{{- end }}
 )
 {{ if eq .AuthKind "none" }}
 // RequireAuth wraps a handler so every protected route enforces the
@@ -37,6 +40,46 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 {{ else if eq .AuthKind "jwt" }}
+{{- if .MergeServiceAuth }}
+// RequireAuth wraps a handler so every protected route accepts either a
+// valid JWT bearer token (Authorization: Bearer <token>, verified via
+// auth.VerifyJWT) or a valid X-Api-Secret service key (verified via
+// core.VerifyServiceKey against core_services) — one middleware for both
+// user-facing and service-to-service callers, so a route never has to pick
+// between a user-facing and a service-facing variant of itself. This app
+// was scaffolded with -merge-service-auth; without it, service-key auth
+// is instead a wholly separate middleware.RequireServiceAuth (see that
+// flag's own help text, or `nexler help`, for the tradeoff between the two
+// designs).
+//
+// Whichever credential succeeds, its identity is attached to the request
+// context: a JWT sets auth.ContextWithSubject to the token's subject; a
+// service key sets auth.ContextWithService to the calling service's
+// core_services name, AND auth.ContextWithSubject to that same name — not
+// because a service should pass user-level authorization, but so
+// subject-reading code (e.g. a kpass.Check-style permission gate, if one
+// is added later) has something to evaluate instead of unconditionally
+// denying "no subject."
+func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
+			if claims, err := auth.VerifyJWT(token); err == nil {
+				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+				return
+			}
+		}
+		if key := r.Header.Get("X-Api-Secret"); key != "" {
+			if name, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
+				ctx := auth.ContextWithService(r.Context(), name)
+				ctx = auth.ContextWithSubject(ctx, name)
+				next(w, r.WithContext(ctx))
+				return
+			}
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+}
+{{- else }}
 // RequireAuth wraps a handler so every protected route requires a valid
 // JWT bearer token (Authorization: Bearer <token>), verified via
 // auth.VerifyJWT. The token's subject is attached to the request context
@@ -57,6 +100,7 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
 	}
 }
+{{- end }}
 {{ else if eq .AuthKind "session" }}
 // RequireAuth wraps a handler so every protected route requires a valid
 // session, identified by the auth.SessionCookieName cookie and looked
@@ -74,6 +118,51 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 {{ else }}
+{{- if .MergeServiceAuth }}
+// RequireAuth wraps a handler so every protected route accepts any of: a
+// valid JWT bearer token (auth.VerifyJWT), a valid session cookie
+// (auth.SessionFromRequest), or a valid X-Api-Secret service key
+// (verified via core.VerifyServiceKey against core_services) — one
+// middleware for user-facing routes (API clients via bearer token,
+// browser/UI clients via session cookie) and service-to-service callers
+// alike, so a route never has to pick between a user-facing and a
+// service-facing variant of itself. This app was scaffolded with
+// -merge-service-auth; without it, service-key auth is instead a wholly
+// separate middleware.RequireServiceAuth (see that flag's own help text,
+// or `nexler help`, for the tradeoff between the two designs).
+//
+// Whichever credential succeeds, its identity is attached to the request
+// context: JWT/session sets auth.ContextWithSubject to the real subject; a
+// service key sets auth.ContextWithService to the calling service's
+// core_services name, AND auth.ContextWithSubject to that same name — not
+// because a service should pass user-level authorization, but so
+// subject-reading code (e.g. a kpass.Check-style permission gate, if one
+// is added later) has something to evaluate instead of unconditionally
+// denying "no subject."
+func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
+			if claims, err := auth.VerifyJWT(token); err == nil {
+				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+				return
+			}
+		}
+		if subject, ok := auth.SessionFromRequest(r); ok {
+			next(w, r.WithContext(auth.ContextWithSubject(r.Context(), subject)))
+			return
+		}
+		if key := r.Header.Get("X-Api-Secret"); key != "" {
+			if name, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
+				ctx := auth.ContextWithService(r.Context(), name)
+				ctx = auth.ContextWithSubject(ctx, name)
+				next(w, r.WithContext(ctx))
+				return
+			}
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+}
+{{- else }}
 // RequireAuth wraps a handler so every protected route requires either a
 // valid JWT bearer token (auth.VerifyJWT) or a valid session cookie
 // (auth.SessionFromRequest) — so the same protected route serves both
@@ -96,4 +185,5 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
+{{- end }}
 {{ end }}

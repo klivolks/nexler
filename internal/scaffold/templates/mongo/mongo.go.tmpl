@@ -19,7 +19,11 @@
 // {"$or": [{"role": "admin"}, {"role": "owner"}]}). Field-to-key mapping
 // uses each field's bson tag, falling back to the lowercased field
 // name. Zero-valued fields are never part of the filter — there's no
-// way to filter for an explicit zero/empty value this way.
+// way to filter for an explicit zero/empty value this way. An anonymously
+// embedded struct field (e.g. a shared store/common.Base contributing
+// _id) is flattened into the same top-level filter rather than nested
+// under its own key, so User{Base: common.Base{ID: id}} still builds
+// {"_id": id} as expected.
 //
 // Aggregate remains pipeline-based (driver.Pipeline) — it's the escape
 // hatch for anything the struct-filter model can't express.
@@ -28,6 +32,7 @@ package mongo
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 
@@ -239,6 +244,20 @@ func structToBSON(v reflect.Value) (bson.M, error) {
 			continue
 		}
 		fv := v.Field(i)
+		if f.Anonymous && fv.Kind() == reflect.Struct {
+			// An embedded field (e.g. a shared store/common.Base
+			// contributing _id) is flattened into this same top-level
+			// filter rather than nested under its own key — matching how
+			// the Mongo driver's own default (non-inline) BSON encoding
+			// treats an embedded struct, and how Set/InsertID already
+			// expect callers to build filters (T{Base: common.Base{ID: id}}).
+			nested, err := structToBSON(fv)
+			if err != nil {
+				return nil, err
+			}
+			maps.Copy(out, nested)
+			continue
+		}
 		if fv.IsZero() {
 			continue
 		}

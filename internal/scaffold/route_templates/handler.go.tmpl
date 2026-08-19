@@ -53,7 +53,7 @@ func {{ .HandlerName }}(w http.ResponseWriter, r *http.Request) {
 // adds new methods' handler functions above this line when adding to an
 // existing route.
 
-// Register wires this package's route onto mux for every selected method,
+// {{ .RegisterFuncName }} wires this package's route onto mux for every selected method,
 // plus a blanket 200 OK for OPTIONS, and registers each method's
 // documentation (including real request/response field names, reflected
 // from the models package) with the openapi package so /openapi.json
@@ -69,7 +69,7 @@ func {{ .HandlerName }}(w http.ResponseWriter, r *http.Request) {
 // themselves in middleware.RequireAuth independently — a later
 // `nexler create` on this route can add protected methods alongside these.
 {{- end }}
-func Register(mux *http.ServeMux) {
+func {{ .RegisterFuncName }}(mux *http.ServeMux) {
 	mux.HandleFunc("OPTIONS {{ .Route }}", middleware.HandleOptions)
 {{- range .Methods }}
 	mux.HandleFunc("{{ .Verb }} {{ $.Route }}", {{ .RegisterExpr }})

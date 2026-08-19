@@ -109,6 +109,7 @@ func runCreateApp(args []string) {
 	dbName := fs.String("db-name", "", "core database name")
 	dbUser := fs.String("db-user", "", "core database username (blank = no auth)")
 	dbPassword := fs.String("db-password", "", "core database password (blank = no auth; passed/prompted in plain text, never masked)")
+	mergeServiceAuth := fs.Bool("merge-service-auth", false, "fold X-Api-Secret service-key auth into RequireAuth itself (JWT/session, then service key) instead of a separate RequireServiceAuth — lets a service/automation caller hit the same protected routes a user would; only meaningful with -auth jwt|both and -db")
 	fs.Parse(reorderFlagsFirst(fs, args))
 
 	set := map[string]bool{}
@@ -203,21 +204,27 @@ func runCreateApp(args []string) {
 		}
 	}
 
+	mergeServiceAuthVal := *mergeServiceAuth
+	if !set["merge-service-auth"] && len(dbTypes) > 0 && (authVal == "jwt" || authVal == "both") {
+		mergeServiceAuthVal = promptBool("Fold service-key (X-Api-Secret) auth into RequireAuth instead of a separate RequireServiceAuth?", mergeServiceAuthVal)
+	}
+
 	cfg := scaffold.NewAppConfig{
-		AppName:        appName,
-		OutputDir:      dir,
-		ModulePath:     mod,
-		UI:             uiVal,
-		AuthKind:       authVal,
-		RememberMe:     rememberMeVal,
-		JWTSecret:      jwtSecretVal,
-		DBTypes:        dbTypes,
-		CoreDB:         coreVal,
-		CoreDBHost:     dbHostVal,
-		CoreDBPort:     dbPortVal,
-		CoreDBName:     dbNameVal,
-		CoreDBUser:     dbUserVal,
-		CoreDBPassword: dbPasswordVal,
+		AppName:          appName,
+		OutputDir:        dir,
+		ModulePath:       mod,
+		UI:               uiVal,
+		AuthKind:         authVal,
+		RememberMe:       rememberMeVal,
+		JWTSecret:        jwtSecretVal,
+		DBTypes:          dbTypes,
+		CoreDB:           coreVal,
+		CoreDBHost:       dbHostVal,
+		CoreDBPort:       dbPortVal,
+		CoreDBName:       dbNameVal,
+		CoreDBUser:       dbUserVal,
+		CoreDBPassword:   dbPasswordVal,
+		MergeServiceAuth: mergeServiceAuthVal,
 	}
 
 	if err := scaffold.NewApp(cfg); err != nil {
@@ -240,6 +247,9 @@ func runCreateApp(args []string) {
 		fmt.Println("Auth: sessions — see auth/session.go (StartSession/SessionFromRequest/EndSession); in-memory only.")
 	case "both":
 		fmt.Printf("Auth: JWT bearer tokens + sessions — see auth/jwt.go and auth/session.go; %s.\n", jwtSecretNote)
+	}
+	if mergeServiceAuthVal {
+		fmt.Println("Service auth: folded into RequireAuth (X-Api-Secret, after JWT/session) — no separate RequireServiceAuth generated.")
 	}
 	if len(dbTypes) > 0 {
 		displayTypes := make([]string, len(dbTypes))
@@ -278,6 +288,7 @@ func runCreateRoute(route string, args []string) {
 	body := fs.String("body", "json", "request body shape for non-GET methods: json, form, or multipart")
 	response := fs.String("response", "json", "response kind for every method: json (response.JSON, default), html (response.HTML), or raw (response.JSONRaw, no {\"data\": ...} envelope)")
 	layout := fs.String("layout", "shared", "HTML layout for -response html: shared (default; reuses templates/html/shared/layout.html) or module (this route gets its own templates/html/<module>/layout.html copy)")
+	ownRegister := fs.Bool("own-register", false, "scaffold this route as an independent second resource in an already-existing package, with its own Register<name>(mux) function instead of folding into the package's existing Register — requires -file (a name not already used in the package) and -name; see 'nexler help' for details")
 	fs.Parse(reorderFlagsFirst(fs, args))
 
 	set := map[string]bool{}
@@ -355,6 +366,11 @@ func runCreateRoute(route string, args []string) {
 		dirVal = prompt("App directory", dirVal)
 	}
 
+	if *ownRegister && (fileVal == "" || nameVal == "") {
+		fmt.Fprintln(os.Stderr, "nexler: -own-register requires both -file (a name not already used in this package) and -name (to disambiguate this resource's identifiers from the package's existing one(s))")
+		os.Exit(1)
+	}
+
 	cfg := scaffold.RouteConfig{
 		Route:            route,
 		Module:           moduleVal,
@@ -371,6 +387,7 @@ func runCreateRoute(route string, args []string) {
 		BodyKind:         bodyVal,
 		ResponseKind:     responseVal,
 		LayoutKind:       layoutVal,
+		OwnRegister:      *ownRegister,
 	}
 
 	result, err := scaffold.NewRoute(cfg)
@@ -414,7 +431,10 @@ func runCreateRoute(route string, args []string) {
 		fmt.Println(", and wired the route into routes/" + kind + "/" + kind + ".go.")
 	} else {
 		if len(result.Added) > 0 {
-			if result.NewFile != "" {
+			if result.NewFile != "" && result.NewFile == result.PrimaryFile {
+				fmt.Printf("Route %s (%s) — created independent resource %s in the existing package (%s), with its own %s(mux); wired into routes/%s/%s.go alongside the package's existing Register call (%s)\n",
+					route, group, result.NewFile, strings.Join(result.Added, ", "), result.RegisterFuncName, kind, kind, kind)
+			} else if result.NewFile != "" {
 				fmt.Printf("Route %s (%s) already existed — added method(s) %s in a new file %s (Register wiring added to %s) (%s)\n",
 					route, group, strings.Join(result.Added, ", "), result.NewFile, result.PrimaryFile, kind)
 			} else {
@@ -569,7 +589,7 @@ interactively instead — press Enter to accept the shown default, or pass the f
 skip the question entirely (e.g. for scripts/CI).
 
 Usage:
-  nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>] [-db-host <host>] [-db-port <port>] [-db-name <name>] [-db-user <user>] [-db-password <password>]
+  nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>] [-db-host <host>] [-db-port <port>] [-db-name <name>] [-db-user <user>] [-db-password <password>] [-merge-service-auth]
       Scaffold a new app with the standard handlers/services/store/models
       layout. Scaffolding itself is always fully self-contained: no
       network access, no git required — every template ships embedded
@@ -615,6 +635,22 @@ Usage:
       UserId as the JWT's "sub" claim (Username/UserRole/UserType/Status
       only — not a profile store). Both tables are provisioned by
       "nexler init db", not here.
+
+      -merge-service-auth (only meaningful with -auth jwt|both and -db;
+      default false) folds that same X-Api-Key/X-Api-Secret service-key
+      check into RequireAuth itself instead of generating a separate
+      RequireServiceAuth — RequireAuth then tries JWT (then session, for
+      -auth both), then falls back to the service key, so a
+      service/automation caller can hit the exact same -protected routes a
+      human user would, rather than needing a service-only route. A
+      service-key match still attaches auth.ContextWithService, plus
+      auth.ContextWithSubject set to the service's name (purely so
+      subject-reading code has something to evaluate — not a claim that a
+      service should pass user-level authorization). Off by default: a pure
+      API service that wants user-only and service-only routes to stay
+      structurally distinct should leave this unset and keep using the
+      separate RequireServiceAuth. Retrofit an already-scaffolded app with
+      "nexler update -merge-service-auth".
 
       -db (default none) picks which database driver(s) get generated
       support in db/ — any comma-separated subset of mongo, mysql,
@@ -662,8 +698,9 @@ Usage:
       Example: nexler create app test -auth both -remember-me
       Example: nexler create app test -db postgres,mongo -core mongo
       Example: nexler create app test -db mongo -db-host localhost -db-name test
+      Example: nexler create app test -auth both -db mongo -merge-service-auth
 
-  nexler create <route> -module <name> [-submodule <name>] [-protected] [-methods GET,POST] [-body json] [-response json] [-layout shared] [-dir <app-dir>]
+  nexler create <route> -module <name> [-submodule <name>] [-protected] [-methods GET,POST] [-body json] [-response json] [-layout shared] [-dir <app-dir>] [-file <name>] [-name <name>] [-own-register]
       Scaffold a route inside an existing app: generates a handler,
       service, store, and model file grouped under module[/submodule].
       The route itself may contain "{name}" path parameter segments (Go
@@ -703,11 +740,26 @@ Usage:
       existing one (different path, overlapping verb) fails with an error
       naming the colliding identifier(s); pass -name <value> to override
       the identifier base for this route (e.g. -name New) without changing
-      where its files live.
+      where its files live. -file <name> targets a specific handler/model
+      file within the package (default: the package name) — naming a file
+      that doesn't exist yet creates a genuine second file for just this
+      invocation's method(s), but its mux.HandleFunc/openapi.Register
+      wiring still lands in the package's one existing Register, since Go
+      only allows one func Register per package.
+
+      -own-register changes that: combined with a -file value that doesn't
+      exist yet (and a required -name), it scaffolds that file as a fully
+      independent second resource instead — its own Register<name>
+      function, own middleware/openapi imports, own service/store/model
+      files, wired into the aggregator with an additional call alongside
+      the package's existing Register call. Only meaningful when the
+      target package already exists. Off by default — every existing
+      -file/-name combination keeps behaving exactly as before.
 
       Example: nexler create /purchase/verify -module purchase -submodule verify -methods GET,POST -body json -protected
       Example: nexler create /home -module home -response html
       Example: nexler create /purchase/new -module purchase -submodule verify -methods POST -name New
+      Example: nexler create /admin/providers/sms -module admin -submodule providers -file sms -name Sms -own-register -protected
 
   nexler db add <name> -type <mongo|mysql|postgres|mssql> [-dir <app-dir>] [-host <host>] [-port <port>] [-dbname <name>] [-user <user>] [-password <password>]
       Adds a new named database connection to an existing app's .env — not
@@ -889,7 +941,7 @@ Usage:
       Example: nexler add bootstrap@5.3.3 -as bootstrap
       Example: nexler add @popperjs/core
 
-  nexler update [-dir <app-dir>]
+  nexler update [-dir <app-dir>] [-merge-service-auth]
       Brings an existing generated app's nexler-owned files — ones you generally don't
       hand-edit — up to date with whatever the current nexler binary knows how to generate,
       without needing to coincidentally trigger it via "nexler create <route>" (which already
@@ -903,7 +955,22 @@ Usage:
       expected to hand-edit is out of scope by design. Prints "updated" or "already up to
       date" per file checked.
 
+      -merge-service-auth is a separate, explicit opt-in step (not one of the
+      unconditional checks above): it converts an already-scaffolded -auth
+      jwt|both -db app from a separate middleware.RequireServiceAuth to the
+      folded-into-RequireAuth form -merge-service-auth on "create app"
+      generates (see that flag's own help text above) — removing
+      middleware/service_auth.go and regenerating middleware/auth.go.
+      Deliberately never runs automatically: merged-vs-separate is a real
+      design choice per app, not a one-true-shape bugfix, so nothing flips it
+      without being asked. Refuses (naming the file) if
+      middleware/service_auth.go has been hand-edited since it was
+      generated, rather than silently discarding the changes. A no-op if the
+      app isn't eligible (needs -auth jwt|both and -db) or is already
+      merged.
+
       Example: nexler update -dir ./myapp
+      Example: nexler update -dir ./myapp -merge-service-auth
 
   nexler version
       Print the CLI version.

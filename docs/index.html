@@ -212,6 +212,7 @@ go run main.go</pre></div>
               <tr><td class="flag-name">-db-name</td><td class="flag-default">""</td><td class="flag-desc">Core database name.</td></tr>
               <tr><td class="flag-name">-db-user</td><td class="flag-default">""</td><td class="flag-desc">Core database username (blank = no auth).</td></tr>
               <tr><td class="flag-name">-db-password</td><td class="flag-default">""</td><td class="flag-desc">Core database password (blank = no auth). Passed/prompted in <strong>plain text</strong> — there's no masked-input prompt in this CLI.</td></tr>
+              <tr><td class="flag-name">-merge-service-auth</td><td class="flag-default">false</td><td class="flag-desc">Only with <code>-auth jwt|both</code> and <code>-db</code> — folds <code>X-Api-Secret</code> service-key auth into <code>middleware.RequireAuth</code> itself (as a fallback after JWT/session) instead of generating a separate <code>middleware.RequireServiceAuth</code>, so a service/automation caller can hit the exact same <code>-protected</code> routes a human user would. See "Authentication" below for the tradeoff against the default separate-middleware design.</td></tr>
             </tbody>
           </table>
         </div>
@@ -222,7 +223,8 @@ go run main.go</pre></div>
 nexler create app test -auth jwt
 nexler create app test -auth both -remember-me
 nexler create app test -db postgres,mongo -core mongo
-nexler create app test -db mongo -db-host localhost -db-name test</pre></div>
+nexler create app test -db mongo -db-host localhost -db-name test
+nexler create app test -auth both -db mongo -merge-service-auth</pre></div>
       </div>
     </section>
 
@@ -248,6 +250,7 @@ nexler create app test -db mongo -db-host localhost -db-name test</pre></div>
               <tr><td class="flag-name">-body</td><td class="flag-default">json</td><td class="flag-desc">Request body shape for non-GET methods: <code>json</code>, <code>form</code>, or <code>multipart</code>.</td></tr>
               <tr><td class="flag-name">-response</td><td class="flag-default">json</td><td class="flag-desc"><code>json</code> (<code>response.JSON</code>, <code>{"data": …}</code> envelope), <code>html</code> (<code>response.HTML</code>, renders an editable template), or <code>raw</code> (<code>response.JSONRaw</code>, no envelope).</td></tr>
               <tr><td class="flag-name">-layout</td><td class="flag-default">shared</td><td class="flag-desc">Only for <code>-response html</code>: <code>shared</code> reuses <code>templates/html/shared/layout.html</code>; <code>module</code> gives this route its own layout copy.</td></tr>
+              <tr><td class="flag-name">-own-register</td><td class="flag-default">false</td><td class="flag-desc">Combined with a not-yet-existing <code>-file</code> and a required <code>-name</code>, scaffolds an independent second resource in the package instead of folding into its existing <code>Register</code> — see below.</td></tr>
             </tbody>
           </table>
         </div>
@@ -256,9 +259,12 @@ nexler create app test -db mongo -db-host localhost -db-name test</pre></div>
 
         <p>Handler function names, Request/Response types, and OperationIDs are derived from <code>-module</code>/<code>-submodule</code> + HTTP verb, never the URL path — so adding a second, distinct route under the same <code>-module</code>/<code>-submodule</code> as an existing one (different path, overlapping verb) fails fast with an error naming the colliding identifier(s), instead of silently generating duplicate/broken code. Pass <code>-name</code> to disambiguate.</p>
 
+        <p><strong><code>-own-register</code></strong> goes a step further than a plain second <code>-file</code>: instead of that new file's method(s) still being wired into the package's one existing <code>Register</code> function (Go only allows one <code>func Register</code> per package), it becomes its own fully independent resource — its own <code>Register&lt;name&gt;</code> function, own <code>middleware</code>/<code>openapi</code> imports, own service/store/model files — wired into the aggregator with an <em>additional</em> call alongside the package's existing one, e.g. <code>adminproviders.Register(mux)</code> then <code>adminproviders.RegisterSms(mux)</code>, both from one shared import. Useful when two resources genuinely belong in the same package (shared permission scope, shared helpers) but each needs its own full CRUD route set. A later <code>nexler create &lt;route&gt;</code> targeting that same <code>-file</code> again (e.g. adding a method) correctly finds and extends its own <code>Register&lt;name&gt;</code>, without <code>-own-register</code> needing to be repeated. Off by default — every existing <code>-file</code>/<code>-name</code> combination keeps behaving exactly as before.</p>
+
         <div class="code-block"><pre>nexler create /purchase/verify -module purchase -submodule verify -methods GET,POST -body json -protected
 nexler create /home -module home -response html
-nexler create /purchase/new -module purchase -submodule verify -methods POST -name New</pre></div>
+nexler create /purchase/new -module purchase -submodule verify -methods POST -name New
+nexler create /admin/providers/sms -module admin -submodule providers -file sms -name Sms -own-register -protected</pre></div>
       </div>
     </section>
 
@@ -447,9 +453,11 @@ nexler init kube -dir ./myapp -image ghcr.io/me/myapp:latest -replicas 3</pre></
       <div class="doc-sub">
         <h3><code>nexler update</code></h3>
         <span class="badge badge-local">local only</span>
-        <div class="cmd-line">nexler update [-dir &lt;app-dir&gt;]</div>
+        <div class="cmd-line">nexler update [-dir &lt;app-dir&gt;] [-merge-service-auth]</div>
         <p>Brings an existing app's Nexler-owned files — ones you generally don't hand-edit — up to date with whatever the current <code>nexler</code> binary knows how to generate, without needing to trigger it as a side effect of <code>create &lt;route&gt;</code>. Covers things like <code>openapi/openapi.go</code> (regenerated when it predates a field Nexler now sets) and <code>response/response.go</code> (missing helpers appended, never rewritten). Never touches <code>handlers/services/store/models</code>, <code>main.go</code>, <code>.env</code>, or <code>templates/html/*</code> — anything you're expected to hand-edit stays out of scope. Prints "updated" or "already up to date" per file checked.</p>
-        <div class="code-block"><pre>nexler update -dir ./myapp</pre></div>
+        <p><code>-merge-service-auth</code> is a separate, explicit opt-in step — not one of the checks that always run. It converts an already-scaffolded <code>-auth jwt|both -db</code> app from a separate <code>middleware.RequireServiceAuth</code> to the folded-into-<code>RequireAuth</code> design (see <a href="#concept-service-auth">API-key auth</a>), removing <code>middleware/service_auth.go</code> and regenerating <code>middleware/auth.go</code>. It's never run as part of a plain <code>nexler update</code>, since merged-vs-separate is a real per-app design choice, not a one-true-shape fix — and it refuses (naming the file) if <code>middleware/service_auth.go</code> has been hand-edited since it was generated, rather than discarding the changes.</p>
+        <div class="code-block"><pre>nexler update -dir ./myapp
+nexler update -dir ./myapp -merge-service-auth</pre></div>
       </div>
     </section>
 
@@ -513,13 +521,13 @@ config/      <span class="c">loads {APPNAME}_-prefixed env vars once, at startup
           <tbody>
             <tr><td class="flag-name">// nexler:routes</td><td class="flag-desc">routes/public(or protected)/*.go</td><td class="flag-desc">New route imports and <code>Register(mux)</code> calls.</td></tr>
             <tr><td class="flag-name">// nexler:handlers</td><td class="flag-desc">handlers/.../&lt;file&gt;.go (one or more per package)</td><td class="flag-desc">New per-method handler functions when adding <code>-methods</code> to an already-scaffolded <code>-file</code>.</td></tr>
-            <tr><td class="flag-name">// nexler:register</td><td class="flag-desc">handlers/.../&lt;file&gt;.go (exactly one per package — the package's primary file)</td><td class="flag-desc">New <code>mux.HandleFunc</code>/<code>openapi.Register</code> calls, for every method regardless of which file its handler is defined in.</td></tr>
+            <tr><td class="flag-name">// nexler:register</td><td class="flag-desc">handlers/.../&lt;file&gt;.go (one per resource — usually exactly one per package, or more with <code>-own-register</code>)</td><td class="flag-desc">New <code>mux.HandleFunc</code>/<code>openapi.Register</code> calls, for every method regardless of which file its handler is defined in.</td></tr>
             <tr><td class="flag-name">// nexler:models</td><td class="flag-desc">models/.../&lt;file&gt;.go (one or more per package)</td><td class="flag-desc">New Request/Response struct pairs.</td></tr>
           </tbody>
         </table>
       </div>
       <div class="callout warn">If a marker is missing (e.g. a route scaffolded before this feature existed, or a hand-edited file), the insert fails with an error naming the exact marker text to add back by hand — it never silently guesses a location.</div>
-      <div class="callout">A package's handler/model code can span more than one file. <code>-file</code> names the specific handler/model file this invocation targets: if it already exists, new methods are appended to it; if it doesn't, a genuine new file pair is created for them (with no <code>Register</code> func of its own, since Go permits only one per package). Either way, registration wiring always lands in the package's one primary file.</div>
+      <div class="callout">A package's handler/model code can span more than one file. <code>-file</code> names the specific handler/model file this invocation targets: if it already exists, new methods are appended to it; if it doesn't, a genuine new file pair is created for them (with no <code>Register</code> func of its own, since Go permits only one per package). Either way, registration wiring lands in the package's existing primary file — unless <code>-own-register</code> is passed, in which case the new file becomes its own independent primary with its own distinctly-named <code>Register&lt;name&gt;</code> function instead (see <a href="#cmd-create-route">create &lt;route&gt;</a>).</div>
       <div class="callout warn">Adding a second, distinct route to an already-scaffolded package (same <code>-module</code>/<code>-submodule</code>, different path, overlapping verb) is checked for handler/type/OperationID collisions across every file in the package <em>before</em> anything is written — since identifiers are derived from <code>-module</code>/<code>-submodule</code> + verb, not the URL path, two different routes sharing those would otherwise generate duplicate/colliding code. Pass <code>-name</code> to give the new route distinct identifiers (this also disambiguates its HTML content file, for <code>-response html</code> routes).</div>
     </section>
 
@@ -553,7 +561,7 @@ userID, ok := auth.Subject(r)</pre></div>
 
       <div class="doc-sub" id="concept-service-auth">
         <h3>API-key (service-to-service) auth</h3>
-        <p>Apps with <code>-auth jwt|both</code> and <code>-db</code> set also get <code>middleware.RequireServiceAuth</code> — a second, <strong>wholly separate</strong> auth wrapper for app-to-app calls, checking the <code>X-Api-Key</code> header against a new <code>core_services</code> table. It never falls back to/from <code>RequireAuth</code>: a route is either user-facing (<code>RequireAuth</code>) or service-only (<code>RequireServiceAuth</code>), so a service-only route can never accidentally accept an end-user JWT. <strong>The API key must never be embedded in any UI-facing code</strong> — treat it like a database credential.</p>
+        <p>Apps with <code>-auth jwt|both</code> and <code>-db</code> set also get service-key auth, checking the <code>X-Api-Secret</code> header against a new <code>core_services</code> table. By default (without <code>-merge-service-auth</code>) this is <code>middleware.RequireServiceAuth</code> — a second, <strong>wholly separate</strong> auth wrapper for app-to-app calls, never falling back to/from <code>RequireAuth</code>: a route is either user-facing (<code>RequireAuth</code>) or service-only (<code>RequireServiceAuth</code>), so a service-only route can never accidentally accept an end-user JWT. <strong>The API key must never be embedded in any UI-facing code</strong> — treat it like a database credential.</p>
         <p><code>core.CreateService(ctx, name)</code> generates a random key, stores only its SHA-256 hash, and returns the plaintext key exactly once — it's never retrievable again. <code>VerifyServiceKey</code>/<code>RevokeService</code>/<code>ListServices</code>/<code>GetService</code> round out the set; on success, the calling service's name is attached via a new <code>auth.ContextWithService</code>/<code>auth.Service(r)</code> pair, kept as a distinct context key from the user <code>Subject</code>. A generated Swagger-documented admin API (<a href="#cmd-admin-api"><code>/admin/services</code>/<code>/admin/users</code></a>) wraps these functions for you — see below.</p>
         <p>Usage — a route meant to be called only by another backend service, never a browser:</p>
         <div class="code-block"><pre>mux.HandleFunc("POST /internal/sync", middleware.RequireServiceAuth(func(w http.ResponseWriter, r *http.Request) {
@@ -561,6 +569,7 @@ userID, ok := auth.Subject(r)</pre></div>
 	<span class="cmt">// ...</span>
 }))</pre></div>
         <p>A companion <code>core_users</code> table (<code>core.GetUser</code>/<code>CreateUser</code>/<code>SetUserStatus</code>/<code>ListUsers</code>) is a minimal local record, <strong>not</strong> a profile store: <code>UserId</code> is the same value as the JWT <code>sub</code> claim, plus <code>Username</code>/<code>UserRole</code>/<code>UserType</code> and a <code>Status</code> kill-switch. Real profile data (name, email, etc.) stays wherever it already lives.</p>
+        <p><strong><code>-merge-service-auth</code></strong> is the opt-in alternative: instead of a separate <code>RequireServiceAuth</code>, the <code>X-Api-Secret</code> check is folded into <code>RequireAuth</code> itself, tried after JWT (and session, for <code>-auth both</code>) — so a service/automation caller can hit the exact same <code>-protected</code> routes a human user would, without a route needing a service-only variant of itself. A matching service key still attaches <code>auth.ContextWithService</code>, plus <code>auth.ContextWithSubject</code> set to the service's name, purely so subject-reading code has something to evaluate. Off by default: a pure API service that wants user-only and service-only routes to stay structurally distinct should leave this unset and keep the separate <code>RequireServiceAuth</code>. Retrofit an already-scaffolded app with <code>nexler update -merge-service-auth</code> (a separate, explicit opt-in step, never run automatically by a plain <code>nexler update</code>).</p>
       </div>
 
       <div class="doc-sub" id="cmd-admin-api">
@@ -594,6 +603,8 @@ userID, ok := auth.Subject(r)</pre></div>
       <div class="doc-sub" id="concept-html">
         <h3>HTML responses (<code>-response html</code>)</h3>
         <p>A route scaffolded with <code>-response html</code> gets <code>response.HTML(w, r, module, name, title, data)</code> instead of <code>response.JSON</code>. Unlike everything else in the framework, this reads its content file and <code>layout.html</code> straight off disk on every request — not from the embedded binary — so you can edit the page without rebuilding. Content is rendered first (auto-escaped via <code>html/template</code>), then embedded as <code>{{.Content}}</code> inside the layout.</p>
+        <p>The page data also carries <code>{{.Subject}}</code> (the caller's authenticated subject — always empty for an <code>-auth none</code> app) and <code>{{.Path}}</code> (the request path). <code>layout.html</code> can additionally reference <code>{{.Header}}</code>, <code>{{.Sidebar}}</code>, and <code>{{.Footer}}</code> — three <strong>optional</strong> partials resolved the same module-then-shared way as content itself; missing anywhere in that hierarchy simply renders as empty, never an error, so a module with no header/sidebar/footer of its own is unaffected.</p>
+        <p><code>response.HTMLError(w, r, module, status, title, data)</code> and <code>response.Unauthorised(w, r, module, data)</code> (a fixed 403) render a module's <code>error-content.html</code>/<code>unauthorised-content.html</code> the same way, for an admin page that wants a styled error instead of the plain JSON envelope — falling back to that JSON envelope if the page itself can't be found or rendered.</p>
       </div>
 
       <div class="doc-sub" id="concept-helpers">
@@ -606,7 +617,8 @@ err = mysql.Insert(ctx, t, User{ID: id, Name: "x"})
 err = mysql.Update(ctx, t, User{ID: id}, User{Name: "y"})  <span class="cmt">// filter, then patch</span>
 err = mysql.Delete(ctx, t, User{ID: id})
 rows, err := mysql.Query[Report](ctx, mysql.Conn("core"), "select * from tbl_y")</pre></div>
-        <p>Field matching uses a struct's non-zero fields (AND'd together; a slice ORs each element), mapped via the <code>db</code> tag (or <code>bson</code> for Mongo). <code>Insert</code> writes every field, zeros included; <code>Update</code> patches only non-zero fields — worth remembering, since the two are intentionally asymmetric. <code>Query</code>/<code>Call</code> (or <code>Aggregate</code> for Mongo) are the raw escape hatches for anything the struct-filter model can't express.</p>
+        <p>Field matching uses a struct's non-zero fields (AND'd together; a slice ORs each element), mapped via the <code>db</code> tag (or <code>bson</code> for Mongo). <code>Insert</code> writes every field, zeros included; <code>Update</code> patches only non-zero fields — worth remembering, since the two are intentionally asymmetric. <code>Query</code>/<code>Call</code> (or <code>Aggregate</code> for Mongo) are the raw escape hatches for anything the struct-filter model can't express. An embedded anonymous struct field (e.g. <code>store/common.Base</code>, below) is flattened into the same top-level filter, so <code>Widget{Base: common.Base{ID: id}}</code> correctly filters on <code>_id</code>.</p>
+        <p>For <code>-db mongo</code> apps, <code>store/common.Base</code> (<code>type Base struct { ID bson.ObjectID }</code>, tagged for Mongo's <code>_id</code>) is generated for exactly this — embed it anonymously in any domain struct to pick up an ID field the same way every time, instead of redeclaring it per type.</p>
       </div>
 
       <div class="doc-sub" id="concept-apiclient">
@@ -634,6 +646,27 @@ err = resp.JSON(&amp;out)</pre></div>
       <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
 
       <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-19</div>
+          <h4>Mongo filter fix, <code>store/common.Base</code>, and richer HTML responses</h4>
+          <p>Three related fixes/additions, all ported from patterns already proven out in live Nexler apps. <strong>Fixed a real bug</strong>: <code>mongo</code>'s <code>Get</code>/<code>GetOne</code>/<code>Set</code>/<code>Delete</code> filter builder didn't flatten an anonymously embedded struct field into the top-level filter (only <code>InsertID</code>'s separate field-locator did), so <code>Widget{Base: common.Base{ID: id}}</code> silently built <code>{"base": ...}</code> instead of <code>{"_id": id}</code> — every by-ID lookup through an embedded base struct was broken. <strong>New</strong> <code>store/common.Base</code> (<code>-db mongo</code> apps): a small shared <code>ID bson.ObjectID</code> struct meant to be embedded anonymously in every domain type, instead of every model redeclaring its own ID field. <strong>Richer HTML responses</strong>: <code>response.HTML</code>'s page data gains <code>Subject</code>/<code>Path</code>, <code>layout.html</code> can reference three optional <code>Header</code>/<code>Sidebar</code>/<code>Footer</code> partials, and two new functions, <code>HTMLError</code>/<code>Unauthorised</code>, render a styled error page instead of the plain JSON envelope (falling back to it if the page itself can't render). All three existing apps pick up via <code>nexler update</code> — the mongo fix and the HTML upgrade are exact anchor-based patches of otherwise-identical generated code (refusing, naming the file, if it's been hand-rewritten); <code>store/common.Base</code> is written only if missing.</p>
+          <div class="change-tags"><span class="change-tag">mongo</span><span class="change-tag">html</span><span class="change-tag">bugfix</span></div>
+        </div>
+
+        <div class="change-entry">
+          <div class="change-date">2026-08-19</div>
+          <h4><code>-own-register</code> — an independent second resource in one package</h4>
+          <p>New opt-in flag on <code>nexler create &lt;route&gt;</code>, combined with a not-yet-existing <code>-file</code> and a required <code>-name</code>: scaffolds that file as a fully independent second (third, ...) resource inside an already-existing package, instead of folding its method(s) into the package's one existing <code>Register</code> function (Go only allows one <code>func Register</code> per package). The new resource gets its own <code>Register&lt;name&gt;</code> function, own <code>middleware</code>/<code>openapi</code> imports, own service/store/model files, and an additional wiring call in the aggregator alongside the package's existing one (e.g. <code>adminproviders.Register(mux)</code> then <code>adminproviders.RegisterSms(mux)</code>, sharing one import). Mirrors a pattern already hand-built in a live Nexler app before this flag existed — two resources sharing one package, the second one hand-written with its own <code>RegisterSms</code> because no scaffold path for it existed yet. A later <code>nexler create &lt;route&gt;</code> targeting that same <code>-file</code> again correctly extends its own <code>Register&lt;name&gt;</code>, without repeating <code>-own-register</code>. Off by default — every existing <code>-file</code>/<code>-name</code> combination keeps behaving exactly as before.</p>
+          <div class="change-tags"><span class="change-tag">routes</span><span class="change-tag">scaffolding</span></div>
+        </div>
+
+        <div class="change-entry">
+          <div class="change-date">2026-08-19</div>
+          <h4><code>-merge-service-auth</code> — fold service-key auth into <code>RequireAuth</code></h4>
+          <p>New opt-in flag on <code>nexler create app</code> (only meaningful with <code>-auth jwt|both</code> and <code>-db</code>): folds <code>X-Api-Secret</code> service-key auth into <code>middleware.RequireAuth</code> itself, tried after JWT/session, instead of generating a separate <code>middleware.RequireServiceAuth</code> — so a service/automation caller can hit the exact same <code>-protected</code> routes a human user would, without a route needing a service-only variant of itself. A matching service key still attaches <code>auth.ContextWithService</code> plus <code>auth.ContextWithSubject</code> (set to the service's name). Off by default — the separate-middleware design stays the right choice for a pure API app that wants user-only and service-only routes kept structurally distinct. Retrofit an already-scaffolded app with the new <code>nexler update -merge-service-auth</code> flag, a deliberately separate, explicit opt-in step — never run automatically by a plain <code>nexler update</code>, and it refuses (naming the file) if <code>middleware/service_auth.go</code> has been hand-edited.</p>
+          <div class="change-tags"><span class="change-tag">auth</span><span class="change-tag">service-auth</span></div>
+        </div>
+
         <div class="change-entry">
           <div class="change-date">2026-08-13</div>
           <h4><code>{APPNAME}_API_BASE_PATH</code> — OpenAPI <code>servers</code> for gateway-mounted apps</h4>
