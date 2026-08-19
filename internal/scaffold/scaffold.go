@@ -103,6 +103,18 @@ type NewAppConfig struct {
 	// keeping user-only and service-only routes structurally distinct is
 	// still the right choice for a pure API app.
 	MergeServiceAuth bool
+	// Multitenant threads a tenant Org through auth.ContextWithOrg/Org
+	// (auth/context.go), StartSession/SessionFromRequest's org parameter
+	// (auth/session.go, only when AuthKind includes "session"), and
+	// core.User.OrgId (core/users.go, only when a core DB connection AND a
+	// JWT-capable AuthKind are both present — same eligibility core/users.go
+	// itself already has). auth/jwt.go.tmpl's Claims.Org field and
+	// IssueJWT's org parameter are already unconditional, so nothing
+	// changes there. Requires AuthKind to be "jwt", "session", or "both" —
+	// NewApp errors if combined with "none", since there's no authenticated
+	// subject to attach an Org to. Default false preserves today's
+	// behavior exactly.
+	Multitenant bool
 }
 
 // TargetPath returns the full path of the app directory to be created.
@@ -151,6 +163,10 @@ type templateData struct {
 	// {{.EnvPrefix}}_DB_CORE_DSN — empty (the default) writes a blank
 	// value, same as before this field existed. See NewAppConfig.CoreDBHost.
 	CoreDBDSN string
+	// Multitenant threads a tenant Org through auth/context.go,
+	// auth/session.go, middleware/auth.go, and core/users.go. See
+	// NewAppConfig.Multitenant.
+	Multitenant bool
 }
 
 // NewApp scaffolds a new app directory at cfg.TargetPath() by walking the
@@ -168,6 +184,9 @@ func NewApp(cfg NewAppConfig) error {
 	}
 	if err := validateAuthKind(authKind); err != nil {
 		return err
+	}
+	if cfg.Multitenant && authKind == "none" {
+		return fmt.Errorf("-multitenant requires -auth jwt, session, or both (got %q)", authKind)
 	}
 	needsJWT := authKind == "jwt" || authKind == "both"
 	needsSession := authKind == "session" || authKind == "both"
@@ -216,7 +235,7 @@ func NewApp(cfg NewAppConfig) error {
 	coreServiceGetQuery := ""
 	if hasDB && coreDB != "" && coreDB != "mongo" {
 		coreConfigGetQuery = configGetQuerySQL(coreDB)
-		coreUserGetQuery = userGetQuerySQL(coreDB)
+		coreUserGetQuery = userGetQuerySQL(coreDB, cfg.Multitenant)
 		coreServiceVerifyQuery = serviceVerifyQuerySQL(coreDB)
 		coreServiceGetQuery = serviceGetQuerySQL(coreDB)
 	}
@@ -248,6 +267,7 @@ func NewApp(cfg NewAppConfig) error {
 		CoreServiceVerifyQuery: coreServiceVerifyQuery,
 		CoreServiceGetQuery:    coreServiceGetQuery,
 		CoreDBDSN:              coreDBDSN,
+		Multitenant:            cfg.Multitenant,
 	}
 
 	err = fs.WalkDir(templateFS, templatesRoot, func(path string, d fs.DirEntry, err error) error {
@@ -579,9 +599,16 @@ func configGetQuerySQL(dbType string) string {
 }
 
 // userGetQuerySQL is configGetQuerySQL's counterpart for
-// core/users.go.tmpl's GetUser.
-func userGetQuerySQL(dbType string) string {
-	const cols = "user_id, username, user_role, user_type, status, created_at, updated_at"
+// core/users.go.tmpl's GetUser. cols includes org_id only when
+// multitenant — the column itself is provisioned unconditionally by
+// `nexler init db` (see initdb.go's usersStatements), but a
+// non-multitenant app's generated code has no OrgId field to scan it
+// into, so it's left out of the SELECT entirely (zero-cost-when-unused).
+func userGetQuerySQL(dbType string, multitenant bool) string {
+	cols := "user_id, username, user_role, user_type, status, created_at, updated_at"
+	if multitenant {
+		cols = "user_id, username, user_role, user_type, org_id, status, created_at, updated_at"
+	}
 	switch dbType {
 	case "mysql":
 		return "SELECT " + cols + " FROM core_users WHERE user_id = ?"

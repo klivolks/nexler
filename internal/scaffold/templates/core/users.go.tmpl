@@ -23,6 +23,9 @@ type User struct {
 	Username  string
 	UserRole  string
 	UserType  string
+{{- if .Multitenant }}
+	OrgId     string
+{{- end }}
 	Status    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -35,13 +38,20 @@ type userDoc struct {
 	Username  string    `bson:"username"`
 	UserRole  string    `bson:"user_role"`
 	UserType  string    `bson:"user_type"`
+{{- if .Multitenant }}
+	OrgId     string    `bson:"org_id,omitempty"`
+{{- end }}
 	Status    string    `bson:"status"`
 	CreatedAt time.Time `bson:"created_at"`
 	UpdatedAt time.Time `bson:"updated_at"`
 }
 
 func (d userDoc) toUser() User {
+{{- if .Multitenant }}
+	return User{UserId: d.UserId, Username: d.Username, UserRole: d.UserRole, UserType: d.UserType, OrgId: d.OrgId, Status: d.Status, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
+{{- else }}
 	return User{UserId: d.UserId, Username: d.Username, UserRole: d.UserRole, UserType: d.UserType, Status: d.Status, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
+{{- end }}
 }
 
 func userCollection() (mongo.Collection, bool) {
@@ -91,8 +101,13 @@ func ListUsers(ctx context.Context) ([]User, error) {
 // CreateUser upserts a core_users record — call this from your own
 // registration/login flow once a user's identity is known (e.g. right
 // after issuing their first JWT); not auto-wired into
+{{- if .Multitenant }}
+// middleware.RequireAuth. Preserves the existing CreatedAt on an update —
+// only Username/UserRole/UserType/OrgId/UpdatedAt change.
+{{- else }}
 // middleware.RequireAuth. Preserves the existing CreatedAt on an update —
 // only Username/UserRole/UserType/UpdatedAt change.
+{{- end }}
 func CreateUser(ctx context.Context, u User) error {
 	coll, ok := userCollection()
 	if !ok {
@@ -107,10 +122,17 @@ func CreateUser(ctx context.Context, u User) error {
 	if existing, err := mongo.GetOne[userDoc](ctx, coll, userDoc{UserId: u.UserId}); err == nil {
 		createdAt = existing.CreatedAt
 	}
+{{- if .Multitenant }}
+	return mongo.Set(ctx, coll, userDoc{UserId: u.UserId}, userDoc{
+		UserId: u.UserId, Username: u.Username, UserRole: u.UserRole, UserType: u.UserType, OrgId: u.OrgId,
+		Status: status, CreatedAt: createdAt, UpdatedAt: now,
+	})
+{{- else }}
 	return mongo.Set(ctx, coll, userDoc{UserId: u.UserId}, userDoc{
 		UserId: u.UserId, Username: u.Username, UserRole: u.UserRole, UserType: u.UserType,
 		Status: status, CreatedAt: createdAt, UpdatedAt: now,
 	})
+{{- end }}
 }
 
 // SetUserStatus updates userID's Status (e.g. "active"/"disabled"). A
@@ -137,6 +159,9 @@ type userRow struct {
 	Username  string    `db:"username"`
 	UserRole  string    `db:"user_role"`
 	UserType  string    `db:"user_type"`
+{{- if .Multitenant }}
+	OrgId     string    `db:"org_id"`
+{{- end }}
 	Status    string    `db:"status"`
 	CreatedAt time.Time `db:"created_at"`
 	UpdatedAt time.Time `db:"updated_at"`
@@ -158,7 +183,11 @@ func GetUser(ctx context.Context, userID string) (User, bool, error) {
 		return User{}, false, nil
 	}
 	r := rows[0]
+{{- if .Multitenant }}
+	return User{UserId: r.UserId, Username: r.Username, UserRole: r.UserRole, UserType: r.UserType, OrgId: r.OrgId, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, true, nil
+{{- else }}
 	return User{UserId: r.UserId, Username: r.Username, UserRole: r.UserRole, UserType: r.UserType, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, true, nil
+{{- end }}
 }
 
 // ListUsers returns every core_users record. No pagination — fine for a
@@ -170,13 +199,21 @@ func ListUsers(ctx context.Context) ([]User, error) {
 	if !ok {
 		return nil, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
 	}
+{{- if .Multitenant }}
+	rows, err := {{ .CoreDB }}.Query[userRow](ctx, conn, "SELECT user_id, username, user_role, user_type, org_id, status, created_at, updated_at FROM core_users")
+{{- else }}
 	rows, err := {{ .CoreDB }}.Query[userRow](ctx, conn, "SELECT user_id, username, user_role, user_type, status, created_at, updated_at FROM core_users")
+{{- end }}
 	if err != nil {
 		return nil, err
 	}
 	out := make([]User, len(rows))
 	for i, r := range rows {
+{{- if .Multitenant }}
+		out[i] = User{UserId: r.UserId, Username: r.Username, UserRole: r.UserRole, UserType: r.UserType, OrgId: r.OrgId, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+{{- else }}
 		out[i] = User{UserId: r.UserId, Username: r.Username, UserRole: r.UserRole, UserType: r.UserType, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+{{- end }}
 	}
 	return out, nil
 }
@@ -184,14 +221,23 @@ func ListUsers(ctx context.Context) ([]User, error) {
 // CreateUser upserts a core_users record, via the core_user_upsert stored
 // procedure (see `nexler init db`) — call this from your own
 // registration/login flow once a user's identity is known; not
+{{- if .Multitenant }}
+// auto-wired into middleware.RequireAuth. The procedure never touches
+// created_at on an update — only username/user_role/user_type/org_id/updated_at.
+{{- else }}
 // auto-wired into middleware.RequireAuth. The procedure never touches
 // created_at on an update — only username/user_role/user_type/updated_at.
+{{- end }}
 func CreateUser(ctx context.Context, u User) error {
 	conn, ok := {{ .CoreDB }}.Conn("core")
 	if !ok {
 		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
 	}
-	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_user_upsert", u.UserId, u.Username, u.UserRole, u.UserType)
+{{- if .Multitenant }}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_user_upsert", u.UserId, u.Username, u.UserRole, u.UserType, u.OrgId)
+{{- else }}
+	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_user_upsert", u.UserId, u.Username, u.UserRole, u.UserType, "")
+{{- end }}
 	return err
 }
 

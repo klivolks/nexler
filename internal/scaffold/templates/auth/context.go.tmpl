@@ -29,6 +29,32 @@ func Subject(r *http.Request) (subject string, ok bool) {
 	subject, ok = r.Context().Value(subjectKey).(string)
 	return subject, ok
 }
+{{- if .Multitenant }}
+
+// orgKeyType is deliberately distinct from subjectKeyType — org is a
+// separate piece of context, not a replacement for subject.
+type orgKeyType struct{}
+
+var orgKey = orgKeyType{}
+
+// ContextWithOrg returns a copy of ctx carrying org as the authenticated
+// subject's tenant organization. Called by middleware.RequireAuth
+// alongside ContextWithSubject — application code normally reads it back
+// via Org instead of calling this directly.
+func ContextWithOrg(ctx context.Context, org string) context.Context {
+	return context.WithValue(ctx, orgKey, org)
+}
+
+// Org returns r's authenticated subject's tenant organization, as
+// attached by middleware.RequireAuth. ok is false for a request that
+// never passed through RequireAuth, or one authenticated via a service
+// key — a service isn't tied to a tenant org, so RequireAuth never
+// attaches one for that credential path.
+func Org(r *http.Request) (org string, ok bool) {
+	org, ok = r.Context().Value(orgKey).(string)
+	return org, ok
+}
+{{- end }}
 {{- if and .HasCoreDB (or (eq .AuthKind "jwt") (eq .AuthKind "both")) }}
 
 // serviceKeyType is deliberately a distinct type from subjectKeyType —
