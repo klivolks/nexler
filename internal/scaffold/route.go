@@ -1902,7 +1902,7 @@ const (
 			// expect callers to build filters (T{Base: common.Base{ID: id}}).
 			nested, err := structToBSON(fv)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			maps.Copy(out, nested)
 			continue
