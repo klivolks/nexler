@@ -218,8 +218,8 @@ type routeMethod struct {
 
 // routeData is what's available to route_templates/*.tmpl placeholders.
 type routeData struct {
-	PkgName           string   // e.g. "verify"
-	Name              string   // e.g. "Verify" — used in identifiers like HandleVerify
+	PkgName string // e.g. "verify"
+	Name    string // e.g. "Verify" — used in identifiers like HandleVerify
 	// RegisterFuncName is the name of this file's mux-wiring function —
 	// "Register" for every package's original/only resource (the default,
 	// rendered identically to before this field existed), or "Register"+Name
@@ -227,7 +227,7 @@ type routeData struct {
 	// addOwnRegisterResource) — Go allows only one func Register per
 	// package, so a second one needs a distinct name, matching the
 	// "RegisterSms" convention a hand-built app already established.
-	RegisterFuncName string
+	RegisterFuncName  string
 	Route             string   // e.g. "/asd" — empty for a standalone service/store, not tied to any route
 	RouteLabel        string   // descriptive text for service.go.tmpl/store.go.tmpl's TODO comments: Route when set, else "this package"
 	Standalone        bool     // true when this service/store was generated via `nexler create service|store` (NewLayer), not as part of a route
@@ -1866,6 +1866,27 @@ const (
 		}
 		out[key] = fv.Interface()
 	}`
+	mongoStructToBSONv2Loop = `	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if f.Anonymous && fv.Kind() == reflect.Struct {
+			if err := addStructFields(fv, out); err != nil {
+				return err
+			}
+			continue
+		}
+		if fv.IsZero() {
+			continue
+		}
+		key := bsonFieldName(f)
+		if key == "-" {
+			continue
+		}
+		out[key] = fv.Interface()
+	}`
 	mongoStructToBSONNewLoop = `	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
@@ -1920,10 +1941,17 @@ func ensureMongoEmbeddedFilterFix(appDir string) (bool, error) {
 	if strings.Contains(content, "maps.Copy(out, nested)") {
 		return false, nil
 	}
-	if !strings.Contains(content, mongoStructToBSONOldLoop) {
+	if strings.Contains(content, mongoStructToBSONNewLoop) {
+		return true, nil
+	}
+	if strings.Contains(content, mongoStructToBSONOldLoop) {
+		content = strings.Replace(content, mongoStructToBSONOldLoop, mongoStructToBSONNewLoop, 1)
+	} else if strings.Contains(content, mongoStructToBSONv2Loop) {
+		content = strings.Replace(content, mongoStructToBSONv2Loop, mongoStructToBSONNewLoop, 1)
+	} else {
 		return false, fmt.Errorf("%s's structToBSON doesn't match what nexler generated (has it been hand-rewritten?) — add the embedded-field-flattening branch by hand (see mongo.go.tmpl's own structToBSON), or restore it from a fresh scaffold and reapply your changes", path)
 	}
-	content = strings.Replace(content, mongoStructToBSONOldLoop, mongoStructToBSONNewLoop, 1)
+
 	if !strings.Contains(content, "\n\t\"maps\"\n") {
 		content = strings.Replace(content, "\t\"fmt\"\n", "\t\"fmt\"\n\t\"maps\"\n", 1)
 	}
@@ -1978,7 +2006,7 @@ const (
 	// signature line (its body isn't fixed — it embeds the app's own name
 	// via openapi.Spec("<AppName>")) — the guard clause is inserted right
 	// after the opening brace, so it never needs to match the body.
-	swaggerHandleOpenAPISig  = "func HandleOpenAPI(w http.ResponseWriter, r *http.Request) {\n"
+	swaggerHandleOpenAPISig   = "func HandleOpenAPI(w http.ResponseWriter, r *http.Request) {\n"
 	swaggerHandleOpenAPIGuard = "\tif !config.C.SwaggerEnabled {\n\t\thttp.NotFound(w, r)\n\t\treturn\n\t}\n"
 	// swaggerHandleSwaggerCode is the new handler ensureSwaggerToggle
 	// inserts right before HandleOpenAPI — GET /swagger's toggle check
