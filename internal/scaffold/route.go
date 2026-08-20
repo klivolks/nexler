@@ -1866,28 +1866,35 @@ const (
 		}
 		out[key] = fv.Interface()
 	}`
+	mongoStructToBSONNewLoop = `    for i := 0; i < t.NumField(); i++ {
+        f := t.Field(i)
+
+        if !f.IsExported() {
+            continue
+        }
+
+        fv := v.Field(i)
+
+        if f.Anonymous && fv.Kind() == reflect.Struct {
+            if err := addStructFields(fv, out); err != nil {
+                return err
+            }
+            continue
+        }
+
+        if fv.IsZero() {
+            continue
+        }
+
+        key := bsonFieldName(f)
+
+        if key == "-" {
+            continue
+        }
+
+        out[key] = fv.Interface()
+    }`
 	mongoStructToBSONv2Loop = `	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		fv := v.Field(i)
-		if f.Anonymous && fv.Kind() == reflect.Struct {
-			if err := addStructFields(fv, out); err != nil {
-				return err
-			}
-			continue
-		}
-		if fv.IsZero() {
-			continue
-		}
-		key := bsonFieldName(f)
-		if key == "-" {
-			continue
-		}
-		out[key] = fv.Interface()
-	}`
-	mongoStructToBSONNewLoop = `	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
 			continue
@@ -1902,7 +1909,7 @@ const (
 			// expect callers to build filters (T{Base: common.Base{ID: id}}).
 			nested, err := structToBSON(fv)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			maps.Copy(out, nested)
 			continue
@@ -1938,9 +1945,6 @@ func ensureMongoEmbeddedFilterFix(appDir string) (bool, error) {
 		return false, err
 	}
 	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	if strings.Contains(content, "maps.Copy(out, nested)") {
-		return false, nil
-	}
 	if strings.Contains(content, mongoStructToBSONNewLoop) {
 		return true, nil
 	}
@@ -1952,9 +1956,6 @@ func ensureMongoEmbeddedFilterFix(appDir string) (bool, error) {
 		return false, fmt.Errorf("%s's structToBSON doesn't match what nexler generated (has it been hand-rewritten?) — add the embedded-field-flattening branch by hand (see mongo.go.tmpl's own structToBSON), or restore it from a fresh scaffold and reapply your changes", path)
 	}
 
-	if !strings.Contains(content, "\n\t\"maps\"\n") {
-		content = strings.Replace(content, "\t\"fmt\"\n", "\t\"fmt\"\n\t\"maps\"\n", 1)
-	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return false, err
 	}

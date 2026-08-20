@@ -342,35 +342,34 @@ func structToBSON(v reflect.Value) (bson.M, error) {
 // nested under its own key.
 func addStructFields(v reflect.Value, out bson.M) error {
 	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		fv := v.Field(i)
-		if f.Anonymous && fv.Kind() == reflect.Struct {
-			// An embedded field (e.g. a shared store/common.Base
-			// contributing _id) is flattened into this same top-level
-			// filter rather than nested under its own key — matching how
-			// the Mongo driver's own default (non-inline) BSON encoding
-			// treats an embedded struct, and how Set/InsertID already
-			// expect callers to build filters (T{Base: common.Base{ID: id}}).
-			nested, err := structToBSON(fv)
-			if err != nil {
-				return nil, err
-			}
-			maps.Copy(out, nested)
-			continue
-		}
-		if fv.IsZero() {
-			continue
-		}
-		key := bsonFieldName(f)
-		if key == "-" {
-			continue
-		}
-		out[key] = fv.Interface()
-	}
+    for i := 0; i < t.NumField(); i++ {
+        f := t.Field(i)
+
+        if !f.IsExported() {
+            continue
+        }
+
+        fv := v.Field(i)
+
+        if f.Anonymous && fv.Kind() == reflect.Struct {
+            if err := addStructFields(fv, out); err != nil {
+                return err
+            }
+            continue
+        }
+
+        if fv.IsZero() {
+            continue
+        }
+
+        key := bsonFieldName(f)
+
+        if key == "-" {
+            continue
+        }
+
+        out[key] = fv.Interface()
+    }
 	return nil
 }
 
