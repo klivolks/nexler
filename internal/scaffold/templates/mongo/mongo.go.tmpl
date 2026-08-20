@@ -211,13 +211,13 @@ func Aggregate[T any](ctx context.Context, coll Collection, pipeline driver.Pipe
 // correlation most records don't have) don't collide with each other as
 // "both null" the way a plain unique index would.
 func EnsureUniqueIndex(ctx context.Context, coll Collection, field string) error {
-	_, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
-		Keys: bson.D{{Key: field, Value: 1}},
-		Options: options.Index().
-			SetUnique(true).
-			SetPartialFilterExpression(bson.M{field: bson.M{"$exists": true}}),
-	})
-	return err
+    _, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
+        Keys: bson.D{`{{"{"}}`Key: field, Value: 1`{{"}"}}`},
+        Options: options.Index().
+            SetUnique(true).
+            SetPartialFilterExpression(bson.M{field: bson.M{`{{"{"}}`$exists: true`{{"}"}}`}}),
+    })
+    return err
 }
 
 type Filter struct {
