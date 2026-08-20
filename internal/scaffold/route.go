@@ -1866,28 +1866,35 @@ const (
 		}
 		out[key] = fv.Interface()
 	}`
+	mongoStructToBSONNewLoop = `    for i := 0; i < t.NumField(); i++ {
+        f := t.Field(i)
+
+        if !f.IsExported() {
+            continue
+        }
+
+        fv := v.Field(i)
+
+        if f.Anonymous && fv.Kind() == reflect.Struct {
+            if err := addStructFields(fv, out); err != nil {
+                return err
+            }
+            continue
+        }
+
+        if fv.IsZero() {
+            continue
+        }
+
+        key := bsonFieldName(f)
+
+        if key == "-" {
+            continue
+        }
+
+        out[key] = fv.Interface()
+    }`
 	mongoStructToBSONv2Loop = `	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		fv := v.Field(i)
-		if f.Anonymous && fv.Kind() == reflect.Struct {
-			if err := addStructFields(fv, out); err != nil {
-				return err
-			}
-			continue
-		}
-		if fv.IsZero() {
-			continue
-		}
-		key := bsonFieldName(f)
-		if key == "-" {
-			continue
-		}
-		out[key] = fv.Interface()
-	}`
-	mongoStructToBSONNewLoop = `	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
 			continue
