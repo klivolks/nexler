@@ -32,14 +32,13 @@ package mongo
 import (
 	"context"
 	"fmt"
-	"maps"
 	"reflect"
 	"strings"
 
-	"{{ .ModulePath }}/db"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	driver "go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"{{ .ModulePath }}/db"
 )
 
 // Conn returns a handle for the named Mongo connection (opened by
@@ -204,29 +203,122 @@ func Aggregate[T any](ctx context.Context, coll Collection, pipeline driver.Pipe
 	return out, nil
 }
 
-// filterToBSON converts filter into a query document: a struct's
-// non-zero fields AND together; a slice of structs ORs each element's
-// AND-group. Anything else is an error.
+// EnsureUniqueIndex creates a unique index on field within coll if an
+// equivalent one doesn't already exist (CreateOne no-ops in that case) —
+// safe to call on every startup. The index is partial, scoped to
+// documents where field actually exists (SetPartialFilterExpression), so
+// documents that never set field (e.g. an optional external-id
+// correlation most records don't have) don't collide with each other as
+// "both null" the way a plain unique index would.
+func EnsureUniqueIndex(ctx context.Context, coll Collection, field string) error {
+	_, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
+		Keys: bson.D{{Key: field, Value: 1}},
+		Options: options.Index().
+			SetUnique(true).
+			SetPartialFilterExpression(bson.M{field: bson.M{"$exists": true}}),
+	})
+	return err
+}
+
+type Filter struct {
+	And []any
+	Or  []any
+}
+
+// filterToBSON converts a filter into a MongoDB query document.
+//
+// A struct's non-zero fields are implicitly ANDed together.
+// A slice ORs each element's filter.
+// Filter provides explicit nested AND/OR expressions.
+// Struct filters and Filter expressions can be nested arbitrarily.
 func filterToBSON(filter any) (bson.M, error) {
+	switch f := filter.(type) {
+	case Filter:
+		return filterExpressionToBSON(f)
+
+	case *Filter:
+		if f == nil {
+			return bson.M{}, nil
+		}
+		return filterExpressionToBSON(*f)
+	}
+
 	v := reflect.ValueOf(filter)
+
+	if !v.IsValid() {
+		return bson.M{}, nil
+	}
+
 	if v.Kind() == reflect.Slice {
 		if v.Len() == 0 {
 			return bson.M{}, nil
 		}
+
 		ors := make([]bson.M, 0, v.Len())
+
 		for i := 0; i < v.Len(); i++ {
-			m, err := structToBSON(v.Index(i))
+			m, err := filterToBSON(v.Index(i).Interface())
 			if err != nil {
 				return nil, err
 			}
+
 			ors = append(ors, m)
 		}
+
 		if len(ors) == 1 {
 			return ors[0], nil
 		}
+
 		return bson.M{"$or": ors}, nil
 	}
+
 	return structToBSON(v)
+}
+
+func filterExpressionToBSON(f Filter) (bson.M, error) {
+	if len(f.And) > 0 && len(f.Or) > 0 {
+		return nil, fmt.Errorf("mongo: Filter cannot contain both And and Or")
+	}
+
+	if len(f.And) > 0 {
+		parts := make([]bson.M, 0, len(f.And))
+
+		for _, item := range f.And {
+			m, err := filterToBSON(item)
+			if err != nil {
+				return nil, err
+			}
+
+			parts = append(parts, m)
+		}
+
+		if len(parts) == 1 {
+			return parts[0], nil
+		}
+
+		return bson.M{"$and": parts}, nil
+	}
+
+	if len(f.Or) > 0 {
+		parts := make([]bson.M, 0, len(f.Or))
+
+		for _, item := range f.Or {
+			m, err := filterToBSON(item)
+			if err != nil {
+				return nil, err
+			}
+
+			parts = append(parts, m)
+		}
+
+		if len(parts) == 1 {
+			return parts[0], nil
+		}
+
+		return bson.M{"$or": parts}, nil
+	}
+
+	return bson.M{}, nil
 }
 
 func structToBSON(v reflect.Value) (bson.M, error) {
@@ -236,8 +328,20 @@ func structToBSON(v reflect.Value) (bson.M, error) {
 	if v.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("mongo: filter must be a struct or slice of structs, got %s", v.Kind())
 	}
-	t := v.Type()
 	out := bson.M{}
+	if err := addStructFields(v, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// addStructFields writes v's exported, non-zero fields into out, keyed by
+// bson tag. An anonymous (embedded) struct field — e.g. a common.Base
+// providing ID — is flattened into out directly, matching the mongo
+// driver's own default encoding behavior for embedded structs, rather than
+// nested under its own key.
+func addStructFields(v reflect.Value, out bson.M) error {
+	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
@@ -267,7 +371,7 @@ func structToBSON(v reflect.Value) (bson.M, error) {
 		}
 		out[key] = fv.Interface()
 	}
-	return out, nil
+	return nil
 }
 
 // bsonFieldName returns a struct field's Mongo document key, from its
