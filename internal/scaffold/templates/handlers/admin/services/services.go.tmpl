@@ -35,14 +35,15 @@ import (
 // except HandleServicesPost, which additionally returns the plaintext
 // key exactly once, on creation.
 type ServiceSummary struct {
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Name       string     `json:"name"`
+	Status     string     `json:"status"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
 }
 
 func toServiceSummary(s core.Service) ServiceSummary {
-	return ServiceSummary{Name: s.Name, Status: s.Status, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+	return ServiceSummary{Name: s.Name, Status: s.Status, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt, LastUsedAt: s.LastUsedAt}
 }
 
 // GetServicesRequest is the (empty — query-parameters-only) request for

@@ -1,0 +1,82 @@
+// Mongo-only for now — see this file's scaffold.go gating comment
+// (core/tokens.go.tmpl) for why there's no SQL-dialect branch here, unlike
+// core/services.go.tmpl.
+package core
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"{{ .ModulePath }}/db"
+	"{{ .ModulePath }}/mongo"
+)
+
+// revokedTokenTTLSeconds is how long a revocation marker sticks around —
+// matching the longest-lived token this app issues (auth.IssueJWT's
+// refresh token, 30 days) so a marker never expires while a token it
+// could still affect might be unexpired.
+const revokedTokenTTLSeconds = 30 * 24 * 60 * 60
+
+// revokedTokenDoc is one subject's logout marker: every token issued for
+// Subject at or before RevokedAt is invalid. One document per subject,
+// upserted on every logout — RevokeAllTokens just extends the cutoff
+// rather than accumulating a row per logout call.
+type revokedTokenDoc struct {
+	Subject   string    `bson:"subject"`
+	RevokedAt time.Time `bson:"revoked_at"`
+}
+
+func revokedTokenCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("core_revoked_tokens"), true
+}
+
+// RevokeAllTokens invalidates every token issued for subject at or before
+// now — meant to back a hand-written POST /auth/logout handler (see
+// auth.IssueJWT/VerifyJWT). Revokes both an access token and any refresh
+// token issued alongside it in one call, since auth.Claims carries no
+// per-token id to revoke just one of them individually.
+func RevokeAllTokens(ctx context.Context, subject string) error {
+	coll, ok := revokedTokenCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc := revokedTokenDoc{Subject: subject, RevokedAt: time.Now().UTC()}
+	return mongo.Set(ctx, coll, revokedTokenDoc{Subject: subject}, doc)
+}
+
+// IsTokenRevoked reports whether a token issued at issuedAt (Unix seconds,
+// i.e. auth.Claims.IssuedAt) for subject has since been revoked by a
+// logout. No revocation record for subject means false, same as
+// GetService/GetUser's not-found-is-false convention. Called by
+// middleware.RequireAuth on every JWT-authenticated request.
+func IsTokenRevoked(ctx context.Context, subject string, issuedAt int64) (bool, error) {
+	coll, ok := revokedTokenCollection()
+	if !ok {
+		return false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc, err := mongo.GetOne[revokedTokenDoc](ctx, coll, revokedTokenDoc{Subject: subject})
+	if err != nil {
+		return false, nil
+	}
+	return issuedAt <= doc.RevokedAt.Unix(), nil
+}
+
+// EnsureTokenIndexes creates the TTL index on core_revoked_tokens if it
+// doesn't already exist — safe to call on every startup. Call once from
+// main.go, after db.Connect().
+func EnsureTokenIndexes(ctx context.Context) error {
+	coll, ok := revokedTokenCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	return mongo.EnsureTTLIndex(ctx, coll, "revoked_at", revokedTokenTTLSeconds)
+}
