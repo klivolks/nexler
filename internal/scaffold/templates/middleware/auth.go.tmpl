@@ -9,7 +9,7 @@ import (
 
 	"{{ .ModulePath }}/auth"
 {{- end }}
-{{- if .MergeServiceAuth }}
+{{- if or .MergeServiceAuth (and (or (eq .AuthKind "jwt") (eq .AuthKind "both")) .HasCoreDB (eq .CoreDBAccessor "Mongo")) }}
 	"{{ .ModulePath }}/core"
 {{- end }}
 )
@@ -64,6 +64,18 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
 			if claims, err := auth.VerifyJWT(token); err == nil {
+{{- if and $.HasCoreDB (eq $.CoreDBAccessor "Mongo") }}
+				if revoked, err := core.IsTokenRevoked(r.Context(), claims.Subject, claims.IssuedAt); err == nil && !revoked {
+{{- if $.Multitenant }}
+					ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
+					ctx = auth.ContextWithOrg(ctx, claims.Org)
+					next(w, r.WithContext(ctx))
+{{- else }}
+					next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+{{- end }}
+					return
+				}
+{{- else }}
 {{- if $.Multitenant }}
 				ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
 				ctx = auth.ContextWithOrg(ctx, claims.Org)
@@ -72,6 +84,7 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
 {{- end }}
 				return
+{{- end }}
 			}
 		}
 		if key := r.Header.Get("X-Api-Secret"); key != "" {
@@ -103,6 +116,12 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "invalid or expired token", http.StatusUnauthorized)
 			return
 		}
+{{- if and $.HasCoreDB (eq $.CoreDBAccessor "Mongo") }}
+		if revoked, err := core.IsTokenRevoked(r.Context(), claims.Subject, claims.IssuedAt); err != nil || revoked {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+{{- end }}
 {{- if $.Multitenant }}
 		ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
 		ctx = auth.ContextWithOrg(ctx, claims.Org)
@@ -165,6 +184,18 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
 			if claims, err := auth.VerifyJWT(token); err == nil {
+{{- if and .HasCoreDB (eq .CoreDBAccessor "Mongo") }}
+				if revoked, err := core.IsTokenRevoked(r.Context(), claims.Subject, claims.IssuedAt); err == nil && !revoked {
+{{- if .Multitenant }}
+					ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
+					ctx = auth.ContextWithOrg(ctx, claims.Org)
+					next(w, r.WithContext(ctx))
+{{- else }}
+					next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+{{- end }}
+					return
+				}
+{{- else }}
 {{- if .Multitenant }}
 				ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
 				ctx = auth.ContextWithOrg(ctx, claims.Org)
@@ -173,6 +204,7 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
 {{- end }}
 				return
+{{- end }}
 			}
 		}
 {{- if .Multitenant }}
@@ -211,6 +243,18 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
 			if claims, err := auth.VerifyJWT(token); err == nil {
+{{- if and .HasCoreDB (eq .CoreDBAccessor "Mongo") }}
+				if revoked, err := core.IsTokenRevoked(r.Context(), claims.Subject, claims.IssuedAt); err == nil && !revoked {
+{{- if .Multitenant }}
+					ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
+					ctx = auth.ContextWithOrg(ctx, claims.Org)
+					next(w, r.WithContext(ctx))
+{{- else }}
+					next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
+{{- end }}
+					return
+				}
+{{- else }}
 {{- if .Multitenant }}
 				ctx := auth.ContextWithSubject(r.Context(), claims.Subject)
 				ctx = auth.ContextWithOrg(ctx, claims.Org)
@@ -219,6 +263,7 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 				next(w, r.WithContext(auth.ContextWithSubject(r.Context(), claims.Subject)))
 {{- end }}
 				return
+{{- end }}
 			}
 		}
 {{- if .Multitenant }}

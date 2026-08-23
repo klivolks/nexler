@@ -383,6 +383,19 @@ func NewApp(cfg NewAppConfig) error {
 			}
 		}
 
+		// core/tokens.go.tmpl (JWT revocation — RevokeAllTokens/
+		// IsTokenRevoked, backing a hand-written POST /auth/logout) has the
+		// same JWT-capable-auth eligibility as core/users.go.tmpl/
+		// core/services.go.tmpl above, PLUS it's Mongo-only for now — the
+		// TTL-index mechanism it relies on (mongo.EnsureTTLIndex) has no
+		// SQL-dialect equivalent yet, unlike core/services.go.tmpl's
+		// stored-procedure-backed SQL branch.
+		if relSlash == "core/tokens.go.tmpl" {
+			if !hasDB || !needsJWT || coreDBAccessor != "Mongo" {
+				return nil
+			}
+		}
+
 		// middleware/service_auth.go.tmpl has that same eligibility, PLUS
 		// it's skipped whenever cfg.MergeServiceAuth is set — merged mode
 		// folds its X-Api-Secret check into middleware/auth.go.tmpl's own

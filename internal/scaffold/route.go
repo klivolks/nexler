@@ -2310,6 +2310,60 @@ func ensureInsertIDHelpers(appDir string) (bool, error) {
 	return changed, nil
 }
 
+// ensureMongoUpdate appends Update (a partial-patch update, unlike
+// Set's full-document replace) to an already-scaffolded app's mongo.go
+// if it exists and doesn't yet define it. Mongo-only: the SQL packages'
+// own Update already existed before this feature, so there's nothing to
+// retrofit on that side. Silently skipped for an app never scaffolded
+// with mongo. Append-only, like ensureInsertIDHelpers above: Update is
+// wholly new code that doesn't touch or replace anything already in
+// mongo.go, so there's nothing to sanity-check before appending.
+func ensureMongoUpdate(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "mongo", "mongo.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	content := string(raw)
+	if strings.Contains(content, "func Update[") {
+		return false, nil
+	}
+	content = strings.TrimRight(content, "\n") + "\n" + mongoUpdateCode
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+const mongoUpdateCode = `
+// Update sets every non-zero field of patch (a partial patch — zero
+// fields are left untouched) on the one document matching filter, via
+// $set. Refuses an empty filter (would match every document) and a
+// patch with no non-zero fields (nothing to set) — same guard rails as
+// the SQL packages' own Update.
+func Update[T any](ctx context.Context, coll Collection, filter any, patch T) error {
+	q, err := filterToBSON(filter)
+	if err != nil {
+		return err
+	}
+	if len(q) == 0 {
+		return fmt.Errorf("mongo: refusing to update without a filter (would match every document)")
+	}
+	set, err := structToBSON(reflect.ValueOf(patch))
+	if err != nil {
+		return err
+	}
+	if len(set) == 0 {
+		return fmt.Errorf("mongo: patch has no non-zero fields to update")
+	}
+	_, err = coll.coll.UpdateOne(ctx, q, bson.M{"$set": set})
+	return err
+}
+`
+
 const mongoInsertIDCode = `
 // InsertID inserts doc as a new document into coll, same as Insert, but
 // also returns the document's _id. doc's _id field is located by its

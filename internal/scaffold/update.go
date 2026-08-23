@@ -55,6 +55,7 @@ var updateChecks = []updateCheck{
 	{"db: InsertID helpers", ensureInsertIDHelpers},
 	{"db: mongo database name from DSN", ensureMongoDatabaseName},
 	{"mongo: embedded-field filter fix", ensureMongoEmbeddedFilterFix},
+	{"mongo: Update (partial patch)", ensureMongoUpdate},
 	{"store: common.Base helper", ensureStoreCommon},
 	{"config: SwaggerEnabled toggle", ensureSwaggerToggle},
 	{"kgate: resume subscriptions on startup (Register)", ensureKgateResumeAll},

@@ -7,23 +7,32 @@
 //	users := mongo.Conn("core").Database("app").Collection("users")
 //	one, err := mongo.GetOne[User](ctx, users, User{ID: id})
 //
-// Get/GetOne/Set/Insert/Delete/Aggregate are free functions taking that
-// handle, not methods on it — Go doesn't allow a method to introduce
+// Get/GetOne/Set/Update/Insert/Delete/Aggregate are free functions taking
+// that handle, not methods on it — Go doesn't allow a method to introduce
 // its own type parameter, so the generic decoding these need (into
 // your own struct type, e.g. Get[User]) can't be a method.
 //
-// Get/GetOne/Set/Delete take filter any — your own struct, not a raw
+// Get/GetOne/Set/Update/Delete take filter any — your own struct, not a raw
 // bson.M: a single struct's non-zero fields AND together
 // (User{Active: true} -> {"active": true}); a []T slice of structs ORs
 // each element's AND-group (two Users, one per role, ORed together ->
 // {"$or": [{"role": "admin"}, {"role": "owner"}]}). Field-to-key mapping
 // uses each field's bson tag, falling back to the lowercased field
-// name. Zero-valued fields are never part of the filter — there's no
-// way to filter for an explicit zero/empty value this way. An anonymously
+// name. Zero-valued fields are never part of a struct filter — there's no
+// way to filter for an explicit zero/empty value that way. An anonymously
 // embedded struct field (e.g. a shared store/common.Base contributing
 // _id) is flattened into the same top-level filter rather than nested
 // under its own key, so User{Base: common.Base{ID: id}} still builds
 // {"_id": id} as expected.
+//
+// Filter{And, Or []any} composes nested AND/OR expressions out of struct
+// filters, slices, and other Filters, e.g. Filter{And: []any{Filter{Or:
+// []any{User{ID: a}, User{ID: b}}}, User{Active: true}}}. Filter also has
+// an Eq map[string]any form — explicit key:value pairs included in the
+// query verbatim, zero values included — for the one case struct filters
+// can't express, e.g. Filter{Eq: map[string]any{"isDeleted": false}}. A
+// single Filter sets exactly one of And, Or, or Eq; nest another Filter
+// inside And/Or to combine forms.
 //
 // Aggregate remains pipeline-based (driver.Pipeline) — it's the escape
 // hatch for anything the struct-filter model can't express.
@@ -69,7 +78,7 @@ type Database struct {
 }
 
 // Collection returns a handle to the named collection within this
-// database — pass it to Get/GetOne/Set/Insert/Delete/Aggregate.
+// database — pass it to Get/GetOne/Set/Update/Insert/Delete/Aggregate.
 func (d Database) Collection(name string) Collection {
 	return Collection{coll: d.db.Collection(name)}
 }
@@ -118,6 +127,30 @@ func Set[T any](ctx context.Context, coll Collection, filter any, doc T) error {
 		return err
 	}
 	_, err = coll.coll.ReplaceOne(ctx, q, doc, options.Replace().SetUpsert(true))
+	return err
+}
+
+// Update sets every non-zero field of patch (a partial patch — zero
+// fields are left untouched) on the one document matching filter, via
+// $set. Refuses an empty filter (would match every document) and a
+// patch with no non-zero fields (nothing to set) — same guard rails as
+// the SQL packages' own Update.
+func Update[T any](ctx context.Context, coll Collection, filter any, patch T) error {
+	q, err := filterToBSON(filter)
+	if err != nil {
+		return err
+	}
+	if len(q) == 0 {
+		return fmt.Errorf("mongo: refusing to update without a filter (would match every document)")
+	}
+	set, err := structToBSON(reflect.ValueOf(patch))
+	if err != nil {
+		return err
+	}
+	if len(set) == 0 {
+		return fmt.Errorf("mongo: patch has no non-zero fields to update")
+	}
+	_, err = coll.coll.UpdateOne(ctx, q, bson.M{"$set": set})
 	return err
 }
 
@@ -212,24 +245,42 @@ func Aggregate[T any](ctx context.Context, coll Collection, pipeline driver.Pipe
 // "both null" the way a plain unique index would.
 func EnsureUniqueIndex(ctx context.Context, coll Collection, field string) error {
     _, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
-        Keys: bson.D{`{{"{"}}`Key: field, Value: 1`{{"}"}}`},
+        Keys: bson.D{{"{"}}{{"{"}}Key: field, Value: 1}},
         Options: options.Index().
             SetUnique(true).
-            SetPartialFilterExpression(bson.M{field: bson.M{`{{"{"}}`$exists: true`{{"}"}}`}}),
+            SetPartialFilterExpression(bson.M{field: bson.M{"$exists": true}}),
     })
     return err
+}
+
+// EnsureTTLIndex creates a TTL index on field within coll if an equivalent
+// one doesn't already exist — field must be a time.Time (or *time.Time)
+// value; Mongo automatically deletes a document once field's stored time
+// plus seconds is in the past. Safe to call on every startup.
+func EnsureTTLIndex(ctx context.Context, coll Collection, field string, seconds int32) error {
+	_, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
+		Keys:    bson.D{{"{"}}{{"{"}}Key: field, Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(seconds),
+	})
+	return err
 }
 
 type Filter struct {
 	And []any
 	Or  []any
+	// Eq is an explicit key:value equality filter, included verbatim
+	// (zero values included) — the escape hatch for matching a value a
+	// struct filter would otherwise silently drop, e.g.
+	// Filter{Eq: map[string]any{"isDeleted": false}}.
+	Eq map[string]any
 }
 
 // filterToBSON converts a filter into a MongoDB query document.
 //
 // A struct's non-zero fields are implicitly ANDed together.
 // A slice ORs each element's filter.
-// Filter provides explicit nested AND/OR expressions.
+// Filter provides explicit nested AND/OR expressions, or an explicit Eq
+// key:value map for matching zero values a struct filter would drop.
 // Struct filters and Filter expressions can be nested arbitrarily.
 func filterToBSON(filter any) (bson.M, error) {
 	switch f := filter.(type) {
@@ -276,8 +327,22 @@ func filterToBSON(filter any) (bson.M, error) {
 }
 
 func filterExpressionToBSON(f Filter) (bson.M, error) {
-	if len(f.And) > 0 && len(f.Or) > 0 {
-		return nil, fmt.Errorf("mongo: Filter cannot contain both And and Or")
+	set := 0
+	if len(f.And) > 0 {
+		set++
+	}
+	if len(f.Or) > 0 {
+		set++
+	}
+	if len(f.Eq) > 0 {
+		set++
+	}
+	if set > 1 {
+		return nil, fmt.Errorf("mongo: Filter must set exactly one of And, Or, Eq")
+	}
+
+	if len(f.Eq) > 0 {
+		return bson.M(f.Eq), nil
 	}
 
 	if len(f.And) > 0 {
@@ -386,3 +451,4 @@ func bsonFieldName(f reflect.StructField) string {
 	}
 	return name
 }
+

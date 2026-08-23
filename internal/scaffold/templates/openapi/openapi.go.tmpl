@@ -34,7 +34,14 @@ type Operation struct {
 	Protected      bool
 	ReqType        any // zero-value of the Request struct, e.g. models.GetPingRequest{}
 	ReqContentType string // e.g. "application/json"; ignored for GET
-	RespType       any // zero-value of the Response struct
+	// QueryType is a zero-value struct whose exported fields are documented
+	// as query parameters, independently of ReqType/ReqContentType. Only
+	// needed for a non-GET method with real query-string fields (e.g.
+	// DELETE /accounts/{id}?hard=true's Hard bool) — a GET's ReqType is
+	// already documented this way automatically (see Spec below), so
+	// QueryType is redundant (and unused) for GET.
+	QueryType any
+	RespType  any // zero-value of the Response struct
 	// RespContentType overrides the response media type documented for
 	// the "200" response. Empty means "application/json", wrapped in the
 	// {"data": ...} envelope response.JSON writes. Routes generated with
@@ -132,6 +139,9 @@ func Spec(title, basePath string) map[string]any {
 					},
 				}
 			}
+		}
+		if op.QueryType != nil {
+			params = append(params, queryParams(op.QueryType, pathParamSet)...)
 		}
 		if len(params) > 0 {
 			operation["parameters"] = params

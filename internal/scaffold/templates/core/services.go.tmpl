@@ -26,6 +26,17 @@ type Service struct {
 	Status    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// LastUsedAt is the service's most recent authenticated use, if any —
+	// see VerifyServiceKey below.
+{{- if eq .CoreDBAccessor "Mongo" }}
+	// Recorded (best-effort, async) on every successful VerifyServiceKey.
+{{- else }}
+	// SQL-backed apps don't record this yet — needs a stored procedure +
+	// schema column, unlike the Mongo branch below. Always nil for now;
+	// the field exists so ServiceSummary's shape is identical across every
+	// -db choice.
+{{- end }}
+	LastUsedAt *time.Time
 }
 
 func hashServiceKey(key string) string {
@@ -45,11 +56,12 @@ func generateServiceKey() (string, error) {
 {{- if eq .CoreDBAccessor "Mongo" }}
 
 type serviceDoc struct {
-	Name      string    `bson:"name"`
-	KeyHash   string    `bson:"key_hash"`
-	Status    string    `bson:"status"`
-	CreatedAt time.Time `bson:"created_at"`
-	UpdatedAt time.Time `bson:"updated_at"`
+	Name       string     `bson:"name"`
+	KeyHash    string     `bson:"key_hash"`
+	Status     string     `bson:"status"`
+	CreatedAt  time.Time  `bson:"created_at"`
+	UpdatedAt  time.Time  `bson:"updated_at"`
+	LastUsedAt *time.Time `bson:"last_used_at,omitempty"`
 }
 
 func serviceCollection() (mongo.Collection, bool) {
@@ -87,7 +99,11 @@ func CreateService(ctx context.Context, name string) (string, error) {
 
 // VerifyServiceKey hashes key and looks it up against core_services,
 // returning the matching service's Name and whether it's active. Used by
-// middleware.RequireServiceAuth.
+// middleware.RequireServiceAuth and middleware.RequireAuth's own
+// X-Api-Secret fallback — the one place both paths funnel through, so a
+// successful, active match here records the touch that backs
+// GET /admin/services' last_used_at, regardless of which middleware
+// verified the request.
 func VerifyServiceKey(ctx context.Context, key string) (string, bool, error) {
 	coll, ok := serviceCollection()
 	if !ok {
@@ -97,7 +113,32 @@ func VerifyServiceKey(ctx context.Context, key string) (string, bool, error) {
 	if err != nil {
 		return "", false, nil
 	}
-	return doc.Name, doc.Status == "active", nil
+	active := doc.Status == "active"
+	if active {
+		go touchServiceLastUsed(doc.Name)
+	}
+	return doc.Name, active, nil
+}
+
+// touchServiceLastUsed best-effort records name's most recent
+// authenticated use, for GET /admin/services' last_used_at staleness
+// signal — never awaited by VerifyServiceKey, so a slow or failed write
+// here never delays or fails the request that triggered it. Uses its own
+// background context since the triggering request's ctx may already be
+// gone by the time this runs.
+func touchServiceLastUsed(name string) {
+	coll, ok := serviceCollection()
+	if !ok {
+		return
+	}
+	ctx := context.Background()
+	doc, err := mongo.GetOne[serviceDoc](ctx, coll, serviceDoc{Name: name})
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	doc.LastUsedAt = &now
+	_ = mongo.Set(ctx, coll, serviceDoc{Name: name}, doc)
 }
 
 // ListServices returns every core_services record's metadata — never
@@ -115,7 +156,7 @@ func ListServices(ctx context.Context) ([]Service, error) {
 	}
 	out := make([]Service, len(docs))
 	for i, d := range docs {
-		out[i] = Service{Name: d.Name, Status: d.Status, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
+		out[i] = Service{Name: d.Name, Status: d.Status, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, LastUsedAt: d.LastUsedAt}
 	}
 	return out, nil
 }
@@ -131,7 +172,7 @@ func GetService(ctx context.Context, name string) (Service, bool, error) {
 	if err != nil {
 		return Service{}, false, nil
 	}
-	return Service{Name: doc.Name, Status: doc.Status, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt}, true, nil
+	return Service{Name: doc.Name, Status: doc.Status, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, LastUsedAt: doc.LastUsedAt}, true, nil
 }
 
 // RevokeService sets a service's Status to "revoked" — VerifyServiceKey
@@ -183,7 +224,8 @@ func CreateService(ctx context.Context, name string) (string, error) {
 // returning the matching service's Name and whether it's active. Used by
 // middleware.RequireServiceAuth. A plain parameterized SELECT — no stored
 // procedure needed for a single-table read (same reasoning GetSetting
-// already uses).
+// already uses). Unlike the Mongo variant of this function, this doesn't
+// record a last-used touch — see Service.LastUsedAt's doc comment.
 func VerifyServiceKey(ctx context.Context, key string) (string, bool, error) {
 	conn, ok := {{ .CoreDB }}.Conn("core")
 	if !ok {
