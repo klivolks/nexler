@@ -7,12 +7,12 @@
 //	users := mongo.Conn("core").Database("app").Collection("users")
 //	one, err := mongo.GetOne[User](ctx, users, User{ID: id})
 //
-// Get/GetOne/Set/Insert/Delete/Aggregate are free functions taking that
-// handle, not methods on it — Go doesn't allow a method to introduce
+// Get/GetOne/Set/Update/Insert/Delete/Aggregate are free functions taking
+// that handle, not methods on it — Go doesn't allow a method to introduce
 // its own type parameter, so the generic decoding these need (into
 // your own struct type, e.g. Get[User]) can't be a method.
 //
-// Get/GetOne/Set/Delete take filter any — your own struct, not a raw
+// Get/GetOne/Set/Update/Delete take filter any — your own struct, not a raw
 // bson.M: a single struct's non-zero fields AND together
 // (User{Active: true} -> {"active": true}); a []T slice of structs ORs
 // each element's AND-group (two Users, one per role, ORed together ->
@@ -78,7 +78,7 @@ type Database struct {
 }
 
 // Collection returns a handle to the named collection within this
-// database — pass it to Get/GetOne/Set/Insert/Delete/Aggregate.
+// database — pass it to Get/GetOne/Set/Update/Insert/Delete/Aggregate.
 func (d Database) Collection(name string) Collection {
 	return Collection{coll: d.db.Collection(name)}
 }
@@ -127,6 +127,30 @@ func Set[T any](ctx context.Context, coll Collection, filter any, doc T) error {
 		return err
 	}
 	_, err = coll.coll.ReplaceOne(ctx, q, doc, options.Replace().SetUpsert(true))
+	return err
+}
+
+// Update sets every non-zero field of patch (a partial patch — zero
+// fields are left untouched) on the one document matching filter, via
+// $set. Refuses an empty filter (would match every document) and a
+// patch with no non-zero fields (nothing to set) — same guard rails as
+// the SQL packages' own Update.
+func Update[T any](ctx context.Context, coll Collection, filter any, patch T) error {
+	q, err := filterToBSON(filter)
+	if err != nil {
+		return err
+	}
+	if len(q) == 0 {
+		return fmt.Errorf("mongo: refusing to update without a filter (would match every document)")
+	}
+	set, err := structToBSON(reflect.ValueOf(patch))
+	if err != nil {
+		return err
+	}
+	if len(set) == 0 {
+		return fmt.Errorf("mongo: patch has no non-zero fields to update")
+	}
+	_, err = coll.coll.UpdateOne(ctx, q, bson.M{"$set": set})
 	return err
 }
 
@@ -427,3 +451,4 @@ func bsonFieldName(f reflect.StructField) string {
 	}
 	return name
 }
+

@@ -758,7 +758,7 @@ hand, same as the existing route-marker precedent.
 (`db.Mongo(name)`) — connection lifecycle, nothing query-shaped. `mongo/mongo.go.tmpl`
 (generated whenever mongo is selected via `-db` — reuses the existing `HasMongo` flag,
 same `fs.SkipDir` skip technique as `auth/`/`db/`) is the layer above that: simplified
-Get/GetOne/Set/Insert/Delete/Aggregate helpers built on top of it.
+Get/GetOne/Set/Update/Insert/Delete/Aggregate helpers built on top of it.
 
 Addressing is a plain method chain, assignable to a variable like any Go value:
 `mongo.Conn(name)` → `.Database(name)` → `.Collection(name)`, matching MongoDB's real
@@ -770,7 +770,7 @@ can, and generic decoding into the caller's own struct type was a deliberate, co
 requirement here (over returning raw `bson.M`). This is the one place the API shape had
 to bend to a hard language constraint rather than pure ergonomics.
 
-`Get`/`GetOne`/`Set`/`Delete` take `filter any` — the caller's own struct, not a raw
+`Get`/`GetOne`/`Set`/`Update`/`Delete` take `filter any` — the caller's own struct, not a raw
 `bson.M` (`filterToBSON`, unexported, does the translation): a single struct's non-zero
 fields AND together; a `[]T` slice of structs ORs each element's AND-group (`$or`).
 Field→key mapping uses each field's `bson` tag, falling back to the lowercased field
@@ -804,6 +804,25 @@ locator's own reflection walk is separate from `structToBSON`'s (below) — one 
 sets an `_id` field for insertion, the other builds a filter — but both now recurse into
 anonymous embedded struct fields, for the same reason: a shared "base" struct (e.g.
 `store/common.Base`, below) every domain type embeds is the expected, common shape.
+
+**`Update[T any](ctx, coll, filter, patch) error`** is an eighth, additive function
+alongside `Set` (never changing `Set`'s own signature, same "no breaking signature
+changes" rule as `InsertID` above) — the partial-patch counterpart `Set`'s full-document
+`ReplaceOne`-with-upsert can't serve: `Update` reuses `structToBSON` (the same
+non-zero-fields, embedded-struct-flattening reflection walk `filterToBSON` already runs
+on the filter side) to build a `$set` document from `patch`'s non-zero fields only, then
+calls `UpdateOne`, mirroring the SQL packages' own `Update` (non-zero-field patch, one
+matching document) rather than exposing a raw `bson.M`/driver-options parameter — every
+other function in this file builds its query/document from a caller struct, and a raw
+update document would have been the first exception to that. `Update` refuses an empty
+filter (would match every document) and a patch with no non-zero fields (nothing to
+set), same guard rails as SQL's `Update`. Doesn't cover Mongo-native update operators
+(`$inc`, `$push`, etc.) — a caller needing those still drops to `db.Mongo(name)`
+directly. Apps scaffolded before `Update` existed pick it up via `nexler update`
+(`ensureMongoUpdate` in `route.go`) — append-only, same precedent as `InsertID`'s own
+`ensureInsertIDHelpers`: wholly new code that doesn't touch anything already in
+`mongo.go`, so nothing to sanity-check before appending; a silent no-op if the app
+wasn't scaffolded with mongo at all.
 
 **`store/common/common.go.tmpl`** (generated whenever mongo is selected via `-db`, same
 `HasMongo` gate as `mongo/` itself) provides exactly that shared base:
