@@ -199,6 +199,379 @@ func ensureKgateOpenAPIAndTestSubscribe(appDir string) (bool, error) {
 	return true, nil
 }
 
+// kgateSubscriptionOriginal is kgate.go.tmpl's var block + Subscribe/
+// Unsubscribe/ResumeAll/startSubscription/subscribeLoop/subscribeOnce
+// exactly as they read before every Subscribe call dialed its own
+// per-channel WebSocket connection — the literal anchor
+// ensureKgateSharedConnection matches against for its surgical patch.
+// Register, HandleWebhook, Publish, and handleEvent are untouched by this
+// block and never referenced here.
+const kgateSubscriptionOriginal = `var (
+	activeMu   sync.Mutex
+	activeSubs = map[string]context.CancelFunc{}
+)
+
+// Subscribe records channel in the core kgate-channel registry (via
+// core.AddKgateChannel, so it survives restarts) and starts a background
+// goroutine maintaining a live WebSocket subscription for it — see the
+// package doc comment. A second Subscribe call for a channel already
+// being listened to is a no-op beyond re-recording it (harmless).
+func Subscribe(ctx context.Context, channel string) error {
+	if err := core.AddKgateChannel(ctx, channel); err != nil {
+		return fmt.Errorf("kgate: recording channel %q: %w", channel, err)
+	}
+	startSubscription(channel)
+	return nil
+}
+
+// Unsubscribe stops channel's background subscription goroutine (if
+// running) and removes it from the registry.
+func Unsubscribe(ctx context.Context, channel string) error {
+	activeMu.Lock()
+	if cancel, running := activeSubs[channel]; running {
+		cancel()
+		delete(activeSubs, channel)
+	}
+	activeMu.Unlock()
+	return core.RemoveKgateChannel(ctx, channel)
+}
+
+// ResumeAll re-subscribes (each in its own background goroutine) to every
+// channel already recorded in the registry, so subscriptions persist
+// across restarts. Called automatically by Register (in a background
+// goroutine, best-effort) — there's normally no need to call this
+// directly yourself.
+func ResumeAll(ctx context.Context) error {
+	channels, err := core.ListKgateChannels(ctx)
+	if err != nil {
+		return fmt.Errorf("kgate: listing channels: %w", err)
+	}
+	for _, ch := range channels {
+		startSubscription(ch)
+	}
+	return nil
+}
+
+// startSubscription starts channel's background reconnect-loop goroutine,
+// unless one is already running for it.
+func startSubscription(channel string) {
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	if _, running := activeSubs[channel]; running {
+		return
+	}
+	subCtx, cancel := context.WithCancel(context.Background())
+	activeSubs[channel] = cancel
+	go subscribeLoop(subCtx, channel)
+}
+
+// subscribeLoop keeps a live WebSocket subscription to channel for as
+// long as ctx isn't canceled (by Unsubscribe), retrying with capped
+// exponential backoff on any connection error instead of giving up after
+// one failure.
+func subscribeLoop(ctx context.Context, channel string) {
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+
+	for ctx.Err() == nil {
+		connected := subscribeOnce(ctx, channel)
+		if ctx.Err() != nil {
+			return
+		}
+		if connected {
+			backoff = time.Second
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// subscribeOnce dials KGATE_WS_SERVER, subscribes to channel, and reads
+// events (dispatching each to handleEvent, then acking it on success)
+// until the connection drops or ctx is canceled. connected reports
+// whether the dial itself succeeded, so subscribeLoop only resets its
+// backoff after an actual successful connection, not a failed dial.
+func subscribeOnce(ctx context.Context, channel string) (connected bool) {
+	wsURL := os.Getenv("KGATE_WS_SERVER")
+	if wsURL == "" {
+		return false
+	}
+	header := http.Header{}
+	header.Set("X-Client-Id", os.Getenv("KGATE_CLIENT_ID"))
+	header.Set("Origin", os.Getenv("KGATE_ORIGIN"))
+
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	// ReadJSON below blocks with no ctx awareness of its own — closing
+	// the connection is what unblocks it once Unsubscribe cancels ctx.
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
+
+	if err := conn.WriteJSON(subscribeFrame{Type: "subscribe", Channel: channel}); err != nil {
+		return true
+	}
+
+	for {
+		var frame inboundFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			return true
+		}
+		if frame.Type != "event" {
+			continue
+		}
+		if err := handleEvent(ctx, frame.Channel, frame.Payload); err != nil {
+			continue // don't ack — leave it for kgate to redeliver
+		}
+		_ = conn.WriteJSON(ackFrame{Type: "ack", Channel: frame.Channel, MessageID: frame.MessageID})
+	}
+}`
+
+// kgateSubscriptionPatched is what ensureKgateSharedConnection replaces
+// kgateSubscriptionOriginal with — same as the current kgate.go.tmpl.
+// Multiplexes every subscribed channel over a single shared WebSocket
+// connection instead of dialing one connection per channel: kgate's
+// gateway allows only one live connection per X-Client-Id, so the
+// original per-channel design caused each new Subscribe to evict the
+// previous connection, an endless reconnect churn.
+const kgateSubscriptionPatched = `var (
+	// subMu guards channels, the set of channels this app should be
+	// subscribed to (mirrors the core_kgate_channels registry).
+	subMu    sync.Mutex
+	channels = map[string]struct{}{}
+	started  bool
+
+	// connMu guards active (the live shared connection, nil when
+	// disconnected) and serializes every write to it — gorilla/websocket
+	// permits only one concurrent writer per connection.
+	connMu sync.Mutex
+	active *websocket.Conn
+)
+
+// Subscribe records channel in the core kgate-channel registry (via
+// core.AddKgateChannel, so it survives restarts) and adds it to the
+// shared WebSocket connection — see the package doc comment. A second
+// Subscribe call for a channel already being listened to is a no-op
+// beyond re-recording it (harmless).
+func Subscribe(ctx context.Context, channel string) error {
+	if err := core.AddKgateChannel(ctx, channel); err != nil {
+		return fmt.Errorf("kgate: recording channel %q: %w", channel, err)
+	}
+
+	subMu.Lock()
+	_, already := channels[channel]
+	channels[channel] = struct{}{}
+	subMu.Unlock()
+
+	if !already {
+		sendSubscribe(channel)
+	}
+	ensureLoopStarted()
+	return nil
+}
+
+// Unsubscribe removes channel from the registry and from the set of
+// channels this app subscribes to on (re)connect. It does not tear down
+// the shared connection — other channels may still be using it — so any
+// event kgate delivers for channel between this call and its next
+// reconnect is still read off the wire, just not dispatched to
+// Subscribe's caller again (kgate has no per-channel unsubscribe frame to
+// send it instead).
+func Unsubscribe(ctx context.Context, channel string) error {
+	subMu.Lock()
+	delete(channels, channel)
+	subMu.Unlock()
+	return core.RemoveKgateChannel(ctx, channel)
+}
+
+// ResumeAll seeds the shared subscription set with every channel already
+// recorded in the registry and starts the shared connection loop, so
+// subscriptions persist across restarts. Called automatically by Register
+// (in a background goroutine, best-effort) — there's normally no need to
+// call this directly yourself.
+func ResumeAll(ctx context.Context) error {
+	recorded, err := core.ListKgateChannels(ctx)
+	if err != nil {
+		return fmt.Errorf("kgate: listing channels: %w", err)
+	}
+	if len(recorded) == 0 {
+		return nil
+	}
+	subMu.Lock()
+	for _, ch := range recorded {
+		channels[ch] = struct{}{}
+	}
+	subMu.Unlock()
+	ensureLoopStarted()
+	return nil
+}
+
+// ensureLoopStarted starts the single shared reconnect-loop goroutine,
+// unless it's already running.
+func ensureLoopStarted() {
+	subMu.Lock()
+	defer subMu.Unlock()
+	if started {
+		return
+	}
+	started = true
+	go subscribeLoop()
+}
+
+// sendSubscribe writes a subscribe frame for channel over the shared
+// connection if one is currently up. If not, it's a no-op: subscribeOnce
+// sends a subscribe frame for every recorded channel as soon as it
+// (re)connects, so channel is picked up on the next connect regardless.
+func sendSubscribe(channel string) {
+	connMu.Lock()
+	defer connMu.Unlock()
+	if active == nil {
+		return
+	}
+	if err := active.WriteJSON(subscribeFrame{Type: "subscribe", Channel: channel}); err != nil {
+		log.Printf("kgate: %v", err)
+	}
+}
+
+// subscribeLoop keeps the single shared WebSocket connection up for the
+// life of the process, retrying with capped exponential backoff on any
+// connection error instead of giving up after one failure.
+func subscribeLoop() {
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+
+	for {
+		connected := subscribeOnce()
+		if connected {
+			backoff = time.Second
+		}
+
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// subscribeOnce dials KGATE_WS_SERVER, subscribes to every channel
+// currently in the shared set, and reads events (dispatching each to
+// handleEvent, then acking it on success) until the connection drops.
+// connected reports whether the dial itself succeeded, so subscribeLoop
+// only resets its backoff after an actual successful connection, not a
+// failed dial.
+func subscribeOnce() (connected bool) {
+	wsURL := os.Getenv("KGATE_WS_SERVER")
+	if wsURL == "" {
+		return false
+	}
+	header := http.Header{}
+	header.Set("X-Client-Id", os.Getenv("KGATE_CLIENT_ID"))
+	header.Set("Origin", os.Getenv("KGATE_ORIGIN"))
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		log.Printf("kgate: %v", err)
+		return false
+	}
+	defer conn.Close()
+
+	subMu.Lock()
+	subs := make([]string, 0, len(channels))
+	for ch := range channels {
+		subs = append(subs, ch)
+	}
+	subMu.Unlock()
+
+	connMu.Lock()
+	active = conn
+	for _, ch := range subs {
+		if err := conn.WriteJSON(subscribeFrame{Type: "subscribe", Channel: ch}); err != nil {
+			connMu.Unlock()
+			log.Printf("kgate: %v", err)
+			return true
+		}
+	}
+	connMu.Unlock()
+	defer func() {
+		connMu.Lock()
+		if active == conn {
+			active = nil
+		}
+		connMu.Unlock()
+	}()
+
+	for {
+		var frame inboundFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			return true
+		}
+		if frame.Type != "event" {
+			continue
+		}
+		if err := handleEvent(context.Background(), frame.Channel, frame.Payload); err != nil {
+			continue // don't ack — leave it for kgate to redeliver
+		}
+		connMu.Lock()
+		_ = conn.WriteJSON(ackFrame{Type: "ack", Channel: frame.Channel, MessageID: frame.MessageID})
+		connMu.Unlock()
+	}
+}`
+
+// ensureKgateSharedConnection brings an app scaffolded before Subscribe
+// multiplexed every channel over one shared WebSocket connection up to
+// date. Before this fix, every Subscribe call dialed its own connection —
+// harmless with one channel, but kgate's gateway allows only one live
+// connection per X-Client-Id, so a second concurrently-subscribed channel
+// evicted the first, an endless reconnect churn. A missing kgate/kgate.go
+// is a silent no-op, same precedent as every other kgate retrofit here.
+//
+// Scoped to the var block + Subscribe/Unsubscribe/ResumeAll/
+// startSubscription/subscribeLoop/subscribeOnce only — Register,
+// HandleWebhook, Publish, and handleEvent (the documented hand-edit
+// point) are never touched, so this is safe to run regardless of whether
+// handleEvent has been customized. Same "sanity-check the anchor, error
+// out instead of guessing" precedent as every other kgate/mongo patch in
+// this repo: a block that doesn't match the known original fails loud,
+// naming the file and the exact snippet to add by hand, rather than being
+// silently overwritten.
+func ensureKgateSharedConnection(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "kgate", "kgate.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if strings.Contains(content, "ensureLoopStarted") {
+		return false, nil
+	}
+	if !strings.Contains(content, kgateSubscriptionOriginal) {
+		return false, fmt.Errorf("%s: Subscribe/Unsubscribe/ResumeAll don't match the known original (has it been hand-rewritten?) — add the following manually:\n%s", path, kgateSubscriptionPatched)
+	}
+	content = strings.Replace(content, kgateSubscriptionOriginal, kgateSubscriptionPatched, 1)
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ensureKgateResumeAll brings an app scaffolded before Register started
 // auto-resuming recorded channels up to date. A missing kgate/kgate.go
 // (the app never ran `init kgate`) is a silent no-op, same precedent as

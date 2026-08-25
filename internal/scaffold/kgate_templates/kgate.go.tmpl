@@ -4,14 +4,21 @@
 //
 // Channel subscriptions are deliberately not static/env-driven: Subscribe
 // records the channel in the core database (so it survives restarts) and
-// starts a background goroutine maintaining a live WebSocket connection
-// for it, returning immediately — safe to call from inside a request
-// handler or any in-flight workflow (e.g. an order-creation flow starting
-// to listen for order.* events partway through a run), not just at
-// startup. This needs the core kgate-channel registry, so the target app
-// must have a core database connection (-db at `nexler create app` time)
-// and `nexler init db` must have been (re-)run to provision
+// adds it to a single shared WebSocket connection multiplexing every
+// subscribed channel, returning immediately — safe to call from inside a
+// request handler or any in-flight workflow (e.g. an order-creation flow
+// starting to listen for order.* events partway through a run), not just
+// at startup. This needs the core kgate-channel registry, so the target
+// app must have a core database connection (-db at `nexler create app`
+// time) and `nexler init db` must have been (re-)run to provision
 // core_kgate_channels.
+//
+// All subscribed channels share one connection (rather than one
+// connection per channel) because kgate's gateway allows only one live
+// connection per X-Client-Id — opening several concurrently under the
+// same client ID causes each new one to evict another, an endless
+// reconnect churn visible as clustered connect/disconnect bursts in
+// kgate's own connection log.
 //
 // Every delivered event, however it arrives — a live Subscribe connection
 // or the /webhooks/kgate fallback wired automatically by Register — is
@@ -100,86 +107,118 @@ func Publish(ctx context.Context, channel string, payload any) error {
 }
 
 var (
-	activeMu   sync.Mutex
-	activeSubs = map[string]context.CancelFunc{}
+	// subMu guards channels, the set of channels this app should be
+	// subscribed to (mirrors the core_kgate_channels registry).
+	subMu    sync.Mutex
+	channels = map[string]struct{}{}
+	started  bool
+
+	// connMu guards active (the live shared connection, nil when
+	// disconnected) and serializes every write to it — gorilla/websocket
+	// permits only one concurrent writer per connection.
+	connMu sync.Mutex
+	active *websocket.Conn
 )
 
 // Subscribe records channel in the core kgate-channel registry (via
-// core.AddKgateChannel, so it survives restarts) and starts a background
-// goroutine maintaining a live WebSocket subscription for it — see the
-// package doc comment. A second Subscribe call for a channel already
-// being listened to is a no-op beyond re-recording it (harmless).
+// core.AddKgateChannel, so it survives restarts) and adds it to the
+// shared WebSocket connection — see the package doc comment. A second
+// Subscribe call for a channel already being listened to is a no-op
+// beyond re-recording it (harmless).
 func Subscribe(ctx context.Context, channel string) error {
 	if err := core.AddKgateChannel(ctx, channel); err != nil {
 		return fmt.Errorf("kgate: recording channel %q: %w", channel, err)
 	}
-	startSubscription(channel)
+
+	subMu.Lock()
+	_, already := channels[channel]
+	channels[channel] = struct{}{}
+	subMu.Unlock()
+
+	if !already {
+		sendSubscribe(channel)
+	}
+	ensureLoopStarted()
 	return nil
 }
 
-// Unsubscribe stops channel's background subscription goroutine (if
-// running) and removes it from the registry.
+// Unsubscribe removes channel from the registry and from the set of
+// channels this app subscribes to on (re)connect. It does not tear down
+// the shared connection — other channels may still be using it — so any
+// event kgate delivers for channel between this call and its next
+// reconnect is still read off the wire, just not dispatched to
+// Subscribe's caller again (kgate has no per-channel unsubscribe frame to
+// send it instead).
 func Unsubscribe(ctx context.Context, channel string) error {
-	activeMu.Lock()
-	if cancel, running := activeSubs[channel]; running {
-		cancel()
-		delete(activeSubs, channel)
-	}
-	activeMu.Unlock()
+	subMu.Lock()
+	delete(channels, channel)
+	subMu.Unlock()
 	return core.RemoveKgateChannel(ctx, channel)
 }
 
-// ResumeAll re-subscribes (each in its own background goroutine) to every
-// channel already recorded in the registry, so subscriptions persist
-// across restarts. Called automatically by Register (in a background
-// goroutine, best-effort) — there's normally no need to call this
-// directly yourself.
+// ResumeAll seeds the shared subscription set with every channel already
+// recorded in the registry and starts the shared connection loop, so
+// subscriptions persist across restarts. Called automatically by Register
+// (in a background goroutine, best-effort) — there's normally no need to
+// call this directly yourself.
 func ResumeAll(ctx context.Context) error {
-	channels, err := core.ListKgateChannels(ctx)
+	recorded, err := core.ListKgateChannels(ctx)
 	if err != nil {
 		return fmt.Errorf("kgate: listing channels: %w", err)
 	}
-	for _, ch := range channels {
-		startSubscription(ch)
+	if len(recorded) == 0 {
+		return nil
 	}
+	subMu.Lock()
+	for _, ch := range recorded {
+		channels[ch] = struct{}{}
+	}
+	subMu.Unlock()
+	ensureLoopStarted()
 	return nil
 }
 
-// startSubscription starts channel's background reconnect-loop goroutine,
-// unless one is already running for it.
-func startSubscription(channel string) {
-	activeMu.Lock()
-	defer activeMu.Unlock()
-	if _, running := activeSubs[channel]; running {
+// ensureLoopStarted starts the single shared reconnect-loop goroutine,
+// unless it's already running.
+func ensureLoopStarted() {
+	subMu.Lock()
+	defer subMu.Unlock()
+	if started {
 		return
 	}
-	subCtx, cancel := context.WithCancel(context.Background())
-	activeSubs[channel] = cancel
-	go subscribeLoop(subCtx, channel)
+	started = true
+	go subscribeLoop()
 }
 
-// subscribeLoop keeps a live WebSocket subscription to channel for as
-// long as ctx isn't canceled (by Unsubscribe), retrying with capped
-// exponential backoff on any connection error instead of giving up after
-// one failure.
-func subscribeLoop(ctx context.Context, channel string) {
+// sendSubscribe writes a subscribe frame for channel over the shared
+// connection if one is currently up. If not, it's a no-op: subscribeOnce
+// sends a subscribe frame for every recorded channel as soon as it
+// (re)connects, so channel is picked up on the next connect regardless.
+func sendSubscribe(channel string) {
+	connMu.Lock()
+	defer connMu.Unlock()
+	if active == nil {
+		return
+	}
+	if err := active.WriteJSON(subscribeFrame{Type: "subscribe", Channel: channel}); err != nil {
+		log.Printf("kgate: %v", err)
+	}
+}
+
+// subscribeLoop keeps the single shared WebSocket connection up for the
+// life of the process, retrying with capped exponential backoff on any
+// connection error instead of giving up after one failure.
+func subscribeLoop() {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 
-	for ctx.Err() == nil {
-		connected := subscribeOnce(ctx, channel)
-		if ctx.Err() != nil {
-			return
-		}
+	for {
+		connected := subscribeOnce()
 		if connected {
 			backoff = time.Second
 		}
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
+		time.Sleep(backoff)
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
@@ -187,12 +226,13 @@ func subscribeLoop(ctx context.Context, channel string) {
 	}
 }
 
-// subscribeOnce dials KGATE_WS_SERVER, subscribes to channel, and reads
-// events (dispatching each to handleEvent, then acking it on success)
-// until the connection drops or ctx is canceled. connected reports
-// whether the dial itself succeeded, so subscribeLoop only resets its
-// backoff after an actual successful connection, not a failed dial.
-func subscribeOnce(ctx context.Context, channel string) (connected bool) {
+// subscribeOnce dials KGATE_WS_SERVER, subscribes to every channel
+// currently in the shared set, and reads events (dispatching each to
+// handleEvent, then acking it on success) until the connection drops.
+// connected reports whether the dial itself succeeded, so subscribeLoop
+// only resets its backoff after an actual successful connection, not a
+// failed dial.
+func subscribeOnce() (connected bool) {
 	wsURL := os.Getenv("KGATE_WS_SERVER")
 	if wsURL == "" {
 		return false
@@ -201,22 +241,37 @@ func subscribeOnce(ctx context.Context, channel string) (connected bool) {
 	header.Set("X-Client-Id", os.Getenv("KGATE_CLIENT_ID"))
 	header.Set("Origin", os.Getenv("KGATE_ORIGIN"))
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
+		log.Printf("kgate: %v", err)
 		return false
 	}
 	defer conn.Close()
 
-	// ReadJSON below blocks with no ctx awareness of its own — closing
-	// the connection is what unblocks it once Unsubscribe cancels ctx.
-	go func() {
-		<-ctx.Done()
-		conn.Close()
-	}()
-
-	if err := conn.WriteJSON(subscribeFrame{Type: "subscribe", Channel: channel}); err != nil {
-		return true
+	subMu.Lock()
+	subs := make([]string, 0, len(channels))
+	for ch := range channels {
+		subs = append(subs, ch)
 	}
+	subMu.Unlock()
+
+	connMu.Lock()
+	active = conn
+	for _, ch := range subs {
+		if err := conn.WriteJSON(subscribeFrame{Type: "subscribe", Channel: ch}); err != nil {
+			connMu.Unlock()
+			log.Printf("kgate: %v", err)
+			return true
+		}
+	}
+	connMu.Unlock()
+	defer func() {
+		connMu.Lock()
+		if active == conn {
+			active = nil
+		}
+		connMu.Unlock()
+	}()
 
 	for {
 		var frame inboundFrame
@@ -226,10 +281,12 @@ func subscribeOnce(ctx context.Context, channel string) (connected bool) {
 		if frame.Type != "event" {
 			continue
 		}
-		if err := handleEvent(ctx, frame.Channel, frame.Payload); err != nil {
+		if err := handleEvent(context.Background(), frame.Channel, frame.Payload); err != nil {
 			continue // don't ack — leave it for kgate to redeliver
 		}
+		connMu.Lock()
 		_ = conn.WriteJSON(ackFrame{Type: "ack", Channel: frame.Channel, MessageID: frame.MessageID})
+		connMu.Unlock()
 	}
 }
 

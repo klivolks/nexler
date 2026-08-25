@@ -17,9 +17,12 @@
 // ensureMongoEmbeddedFilterFix (route.go) fixes structToBSON silently
 // dropping an anonymously embedded filter field (e.g. store/common.Base's
 // ID) instead of flattening it to _id, ensureStoreCommon (route.go) adds
-// store/common.Base itself if missing, and ensureKgateResumeAll (kgate.go)
+// store/common.Base itself if missing, ensureKgateResumeAll (kgate.go)
 // patches kgate/kgate.go's Register to auto-resume recorded channels on
-// startup. Update just runs these functions directly, unconditionally,
+// startup, and ensureKgateSharedConnection (kgate.go) patches Subscribe/
+// Unsubscribe/ResumeAll to multiplex every channel over a single shared
+// WebSocket connection instead of dialing one per channel. Update just
+// runs these functions directly, unconditionally,
 // and reports what happened. Deliberately never touches anything a
 // developer is expected to hand-edit — handlers/services/store/models,
 // main.go, .env, templates/html/*, kgate.go's handleEvent — only ever the
@@ -60,6 +63,7 @@ var updateChecks = []updateCheck{
 	{"config: SwaggerEnabled toggle", ensureSwaggerToggle},
 	{"kgate: resume subscriptions on startup (Register)", ensureKgateResumeAll},
 	{"kgate: webhook OpenAPI docs + startup test subscribe", ensureKgateOpenAPIAndTestSubscribe},
+	{"kgate: single shared WebSocket connection (was one per channel)", ensureKgateSharedConnection},
 	{"auth: API-key (service-to-service) auth", ensureServiceAuth},
 	{"auth: admin API for core_users/core_services", ensureAdminRoutes},
 	{"config: API base path (openapi servers)", ensureAPIBasePath},

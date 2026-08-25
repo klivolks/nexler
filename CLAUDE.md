@@ -1083,10 +1083,19 @@ a workflow (e.g. order creation) needs to start listening on a new channel *whil
 is already running*, not just at startup from a fixed config. Instead, `Subscribe(ctx,
 channel) error` records channel in the **core kgate-channel registry**
 (`core/kgate_channels.go.tmpl` — see "The `core` package" above; `core.AddKgateChannel`)
-and starts a background goroutine maintaining a live WebSocket connection for it, returning
-immediately — safe to call from inside a request handler or any in-flight workflow.
-`Unsubscribe(ctx, channel) error` cancels that goroutine and removes the channel from the
-registry. `ResumeAll(ctx) error` re-subscribes to every channel already recorded. Unlike the
+and adds it to a single shared WebSocket connection multiplexing every subscribed channel,
+returning immediately — safe to call from inside a request handler or any in-flight
+workflow. All subscribed channels share one connection (rather than the one-connection-
+per-channel design this feature originally shipped with) because kgate's gateway allows
+only one live connection per `X-Client-Id` — opening several concurrently under the same
+client ID caused each new one to evict another, an endless reconnect churn (confirmed by a
+real client hitting exactly this in production before the fix).
+`Unsubscribe(ctx, channel) error` removes channel from the shared subscription set and the
+registry; it does **not** tear down the shared connection itself — other channels may
+still be using it, and kgate has no per-channel unsubscribe frame to send instead, so an
+event for that channel between this call and the next reconnect is simply not dispatched
+again. `ResumeAll(ctx) error` seeds the shared subscription set with every channel already
+recorded. Unlike the
 earlier "primitives only" precedent set by `kpass`'s missing `/login` route, `ResumeAll` **is**
 wired automatically — but not via `main.go` (which stays untouched: it's scaffolded once by
 `create app` and never edited again by any later command, `init kgate` included). Instead,
@@ -1096,12 +1105,26 @@ also kicks off `ResumeAll(context.Background())` in a background goroutine the m
 logging (never failing `Register`) if it errors. This makes resuming a fully zero-config,
 "just works" property of every kgate-enabled app: a fresh process with channels already on
 record resumes listening to them with no manual wiring at all; a process with none recorded yet
-starts nothing and stays idle until `Subscribe` records a real one. An in-memory `activeSubs
-map[string]context.CancelFunc` behind a `sync.Mutex` (same shape `auth/session.go.tmpl`'s
-session map already established) tracks running subscription goroutines for `Unsubscribe`, to
-make a repeat `Subscribe` on an already-listening channel a no-op, and — as a side effect —
-to make a hypothetical repeat `ResumeAll` call harmless too (channels already being listened to
-are simply skipped).
+starts nothing and stays idle until `Subscribe` records a real one. A package-level `channels
+map[string]struct{}` behind a `sync.Mutex` (`subMu`) tracks the shared subscription set, and a
+second `sync.Mutex` (`connMu`) guards the single live `*websocket.Conn` (`active`, nil when
+disconnected) and serializes every write to it — gorilla/websocket permits only one concurrent
+writer per connection. A `started` bool (also behind `subMu`) makes `ensureLoopStarted` a
+one-time gate: the single reconnect-loop goroutine (`subscribeLoop`/`subscribeOnce`) starts at
+most once per process, on the first `Subscribe` or `ResumeAll` call, and re-sends a subscribe
+frame for every channel in the shared set on every (re)connect — so a repeat `Subscribe` on an
+already-listening channel, and a repeat `ResumeAll`, are both harmless no-ops.
+
+An app that ran `init kgate` before channels were multiplexed over one shared connection picks
+it up via `nexler update` (`ensureKgateSharedConnection` in `internal/scaffold/kgate.go`,
+registered in `update.go`'s `updateChecks`) — a narrow, anchor-based patch of the exact original
+`Subscribe`/`Unsubscribe`/`ResumeAll`/`startSubscription`/`subscribeLoop`/`subscribeOnce` block
+(same "narrow, anchor-based patch of a known-exact body" precedent `ensureKgateResumeAll`
+already established), leaving `handleEvent`, `HandleWebhook`, `Register`, and `Publish`
+completely untouched — safe to run regardless of whether `handleEvent` has been hand-customized.
+Same "has it been hand-rewritten?" guard as every other anchor-based kgate retrofit: a block
+that doesn't match the known original errors out instead of being overwritten, naming the file
+and the exact snippet to add by hand.
 
 An app that ran `init kgate` before this behavior existed picks it up via `nexler update`
 (`ensureKgateResumeAll` in `internal/scaffold/kgate.go`, registered in `update.go`'s

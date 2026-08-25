@@ -13,7 +13,7 @@
     <a class="button" href="/swagger" id="api-docs-link">View API Docs</a>
   </div>
   <script>
-    fetch('/openapi.json').then(function (r) {
+    fetch('openapi.json').then(function (r) {
       if (!r.ok) { document.getElementById('api-docs-link').style.display = 'none'; }
     }).catch(function () {
       document.getElementById('api-docs-link').style.display = 'none';
