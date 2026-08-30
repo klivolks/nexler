@@ -244,13 +244,13 @@ func Aggregate[T any](ctx context.Context, coll Collection, pipeline driver.Pipe
 // correlation most records don't have) don't collide with each other as
 // "both null" the way a plain unique index would.
 func EnsureUniqueIndex(ctx context.Context, coll Collection, field string) error {
-    _, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
-        Keys: bson.D{{"{"}}{{"{"}}Key: field, Value: 1}},
-        Options: options.Index().
-            SetUnique(true).
-            SetPartialFilterExpression(bson.M{field: bson.M{"$exists": true}}),
-    })
-    return err
+	_, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
+		Keys: bson.D{{"{"}}{{"{"}}Key: field, Value: 1}},
+		Options: options.Index().
+			SetUnique(true).
+			SetPartialFilterExpression(bson.M{field: bson.M{"$exists": true}}),
+	})
+	return err
 }
 
 // EnsureTTLIndex creates a TTL index on field within coll if an equivalent
@@ -407,34 +407,27 @@ func structToBSON(v reflect.Value) (bson.M, error) {
 // nested under its own key.
 func addStructFields(v reflect.Value, out bson.M) error {
 	t := v.Type()
-    for i := 0; i < t.NumField(); i++ {
-        f := t.Field(i)
-
-        if !f.IsExported() {
-            continue
-        }
-
-        fv := v.Field(i)
-
-        if f.Anonymous && fv.Kind() == reflect.Struct {
-            if err := addStructFields(fv, out); err != nil {
-                return err
-            }
-            continue
-        }
-
-        if fv.IsZero() {
-            continue
-        }
-
-        key := bsonFieldName(f)
-
-        if key == "-" {
-            continue
-        }
-
-        out[key] = fv.Interface()
-    }
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if f.Anonymous && fv.Kind() == reflect.Struct {
+			if err := addStructFields(fv, out); err != nil {
+				return err
+			}
+			continue
+		}
+		if fv.IsZero() {
+			continue
+		}
+		key := bsonFieldName(f)
+		if key == "-" {
+			continue
+		}
+		out[key] = fv.Interface()
+	}
 	return nil
 }
 

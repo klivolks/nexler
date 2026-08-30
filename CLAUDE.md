@@ -824,6 +824,52 @@ directly. Apps scaffolded before `Update` existed pick it up via `nexler update`
 `mongo.go`, so nothing to sanity-check before appending; a silent no-op if the app
 wasn't scaffolded with mongo at all.
 
+**`Filter{And, Or []any; Eq map[string]any}`** composes nested AND/OR expressions out of
+struct filters, slices, and other `Filter`s (e.g. `Filter{And: []any{Filter{Or:
+[]any{User{ID: a}, User{ID: b}}}, User{Active: true}}}`), plus an `Eq` escape hatch —
+explicit `key:value` pairs included verbatim, zero values included — for the one case a
+struct filter can't express at all: matching an explicit zero/empty value. A single
+`Filter` sets exactly one of `And`, `Or`, or `Eq`; nest another `Filter` inside `And`/`Or`
+to combine forms. `filterToBSON` (the same dispatch point every CRUD helper already
+calls) type-switches on `Filter`/`*Filter` first, falling through to the struct/slice
+path otherwise — so `Filter` is a drop-in alternative to a plain struct/slice `filter
+any` argument, no separate function needed. `EnsureUniqueIndex(ctx, coll, field)` and
+`EnsureTTLIndex(ctx, coll, field, seconds)` are two more additive helpers (safe to call
+on every startup, `CreateOne` no-ops if an equivalent index already exists) —
+`EnsureUniqueIndex`'s index is partial (`SetPartialFilterExpression`), scoped to
+documents where `field` actually exists, so records that never set an optional field
+don't collide with each other as "both null" the way a plain unique index would.
+
+Two independent apps hand-built their own version of `Filter{And, Or}` before nexler's
+own landed — the same "two apps independently converged on the same shape" signal that
+already justified `store/common.Base` below, though the reverse order this time (nexler
+already has the canonical version; a pre-existing app's own hand-built one is never
+auto-upgraded — see below). Apps scaffolded before `Filter`/`EnsureUniqueIndex`/
+`EnsureTTLIndex` existed pick them up via `nexler update` (`ensureMongoFilterExpression`
+in `route.go`) — a literal anchor-replacement of `filterToBSON`'s exact pre-`Filter` body
+(recovered from nexler's own git history) with the current template's version, plus the
+new type/functions; a silent no-op if the app already has *any* `Filter` type (nexler's
+own or hand-built) — never overwritten either way, same "never clobber a possible
+hand-edit" precedent as every other anchor-based check.
+
+`ensureMongoEmbeddedFilterFix`'s own anchor text used to be written with non-`gofmt`
+whitespace (4-space indentation, blank lines between statements) — different from
+`mongo.go.tmpl`'s equivalent bug it was meant to detect. Since nexler never runs `gofmt`
+on generated output, and any real app's `mongo/mongo.go` gets reformatted by ordinary Go
+tooling sooner or later (editor format-on-save, `gofmt`, CI), this meant an
+already-current, merely-reformatted file was wrongly reported as "hand-rewritten" —
+fixed by recognizing both the `gofmt`-style and the original malformed-whitespace text as
+"already current," and by fixing `mongo.go.tmpl`'s own baked-in formatting so a freshly
+scaffolded app never ships the malformed shape in the first place. This also surfaced
+`Update()`'s own fail-fast design (`internal/scaffold/update.go`) as a real problem: one
+check unable to positively identify a file used to abort every check after it in the
+registry, discarding the results of every check before it too. `Update()` is now
+best-effort — every check runs regardless of earlier failures, reported via a new
+`UpdateResult.Failed []FailedCheck` — since the checks are independent (each anchors on
+its own known text, never panics or shares state); the one place a real ordering
+dependency exists (the kgate retrofit chain) degrades safely on its own missing anchor
+rather than corrupting anything.
+
 **`store/common/common.go.tmpl`** (generated whenever mongo is selected via `-db`, same
 `HasMongo` gate as `mongo/` itself) provides exactly that shared base:
 a `Base` struct holding just an `ID bson.ObjectID` field tagged `bson:"_id,omitempty"`,
