@@ -353,22 +353,21 @@ nexler add @popperjs/core</pre></div>
         <h3><code>nexler init kpass</code></h3>
         <span class="badge badge-local">local only</span>
         <div class="cmd-line">nexler init kpass [-dir &lt;app-dir&gt;]</div>
-        <p>Adds a client for KPass (Klivolks' permission-check service) to an existing app: <code>kpass/kpass.go</code> (<code>Check</code>/<code>Allowed</code>/<code>Authorise</code>, plus <code>UserIDFromRequest</code> when the app has <code>-auth jwt|session|both</code>) and <code>KPASS_URL</code>/<code>KPASS_CLIENT_ID</code>/<code>KPASS_API_SECRET</code> added to <code>.env</code> (blank, for you to fill in) if not already present.</p>
+        <p>Adds a client for KPass (Klivolks' permission-check service) to an existing app: <code>kpass/kpass.go</code> (<code>Check</code>/<code>Allowed</code>/<code>Authorise</code>, plus <code>UserIDFromRequest</code> when the app has <code>-auth jwt|session|both</code>), a one-time-written wrapper at <code>services/kpass/kpass.go</code> (<code>CheckAccess(ctx, userID, resource, extra) (bool, error)</code> — call this from your handlers/services instead of <code>kpass.Check</code> directly, so every authorization decision funnels through one place you can extend later), and <code>KPASS_URL</code>/<code>KPASS_CLIENT_ID</code>/<code>KPASS_API_SECRET</code> added to <code>.env</code> (blank, for you to fill in) if not already present.</p>
         <p><code>Check(ctx, userID, resource, extra)</code> posts to <code>{KPASS_URL}/permission/check/</code> and returns KPass's full response (status, message, access, user role, user type) — kept separate from <code>Allowed</code> (a plain yes/no helper) so callers needing more, e.g. restricting data by role, call <code>Check</code> directly. <code>Authorise(ctx, code)</code> is a separate capability: it GETs <code>{KPASS_URL}/api/v1/authorise?code=...&amp;client_id=...</code> (query params, not headers — <code>api_secret</code> only sent if set) to resolve a one-time login/auth code from the frontend into the user's identity, returning a flat <code>AuthoriseResult{UserId, UserType, UserName, UserRole, OrgId}</code>. Unlike <code>init db</code>, this needs no network access — pure local file scaffolding, safe to re-run.</p>
         <div class="code-block"><pre>nexler init kpass -dir ./myapp</pre></div>
-        <p>Usage — call this from any handler you want permission-gated, typically right after (or instead of) <code>middleware.RequireAuth</code>:</p>
+        <p>Usage — call <code>services/kpass</code>'s <code>CheckAccess</code> from any handler you want permission-gated, typically right after (or instead of) <code>middleware.RequireAuth</code>. Need <code>UserRole</code>/<code>UserType</code> for finer-grained checks instead of a plain bool? Call <code>kpass.Check</code> directly (or add another function to <code>services/kpass</code> that does):</p>
         <div class="code-block"><pre>func HandleUsersCreate(w http.ResponseWriter, r *http.Request) {
 	userID, ok := kpass.UserIDFromRequest(r)  <span class="cmt">// thin wrapper over auth.Subject(r)</span>
 	if !ok {
 		response.Error(w, r, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	result, err := kpass.Check(r.Context(), userID, "myapp.users.create", nil)
-	if err != nil || !kpass.Allowed(result) {
+	allowed, err := kpasssvc.CheckAccess(r.Context(), userID, "myapp.users.create", nil)
+	if err != nil || !allowed {
 		response.Error(w, r, http.StatusForbidden, "not allowed")
 		return
 	}
-	<span class="cmt">// result.UserRole / result.UserType are also available for finer-grained checks</span>
 	<span class="cmt">// ... proceed with the real handler logic</span>
 }</pre></div>
         <p>A login-style handler that trades a frontend-supplied code for the user's identity:</p>
@@ -393,11 +392,11 @@ nexler add @popperjs/core</pre></div>
         <h3><code>nexler init kgate</code></h3>
         <span class="badge badge-local">local only</span>
         <div class="cmd-line">nexler init kgate [-dir &lt;app-dir&gt;]</div>
-        <p>Adds a client for KGate (Klivolks' message broker): <code>kgate/kgate.go</code> (<code>Subscribe</code>/<code>Unsubscribe</code>/<code>ResumeAll</code>/<code>Publish</code>/<code>HandleWebhook</code>/<code>Register</code>) and five blank env vars — <code>KGATE_CLIENT_ID</code>, <code>KGATE_WS_SERVER</code>, <code>KGATE_HTTP_SERVER</code>, <code>KGATE_ORIGIN</code>, <code>KGATE_WEBHOOK_SECRET</code>. Also auto-wires a <code>POST /webhooks/kgate</code> fallback route into <code>routes/public/public.go</code>.</p>
-        <p>Requires the app to already have a core database connection (<code>-db</code> at <code>create app</code> time) — channel subscriptions aren't static/env-driven: <code>Subscribe(ctx, channel)</code> records the channel and adds it to a single shared WebSocket connection multiplexing every subscribed channel, durable across restarts via <code>ResumeAll(ctx)</code>, which is already wired automatically (<code>Register</code> kicks it off in the background the moment it runs, and <code>Register(mux)</code> is called from <code>main.go</code>'s own <code>routes.Register(mux)</code> — no manual wiring needed). All subscribed channels share one connection, rather than one per channel, because kgate's gateway allows only one live connection per <code>X-Client-Id</code> — opening several concurrently under the same client ID causes each new one to evict another, an endless reconnect churn. Every event, live or via the HMAC-verified webhook fallback, dispatches to a single generated <code>handleEvent</code> function. Needs <code>go mod tidy</code> once and <code>nexler init db</code> before subscriptions will work.</p>
-        <p><code>Register</code> also documents <code>POST /webhooks/kgate</code> in <code>/openapi.json</code>/Swagger UI (previously invisible there, unlike every route <code>nexler create &lt;route&gt;</code> generates), and subscribes to a channel literally named <code>"test"</code> alongside <code>ResumeAll</code> on startup — a built-in smoke test that the whole pipeline (core DB registry + WebSocket connectivity) works end to end. Safe to leave in (<code>Subscribe</code> is idempotent for an already-subscribed channel) or remove once you've confirmed kgate is wired correctly.</p>
+        <p>Adds a client for KGate (Klivolks' message broker): <code>kgate/kgate.go</code> (<code>Subscribe</code>/<code>Unsubscribe</code>/<code>ResumeAll</code>/<code>Publish</code>/<code>HandleWebhook</code>/<code>Register</code> — pure infrastructure, never hand-edited), a one-time-written companion at <code>services/kgate/kgate.go</code> (<code>Init</code>/<code>HandleEvent</code> — this is where your own logic goes), and five blank env vars — <code>KGATE_CLIENT_ID</code>, <code>KGATE_WS_SERVER</code>, <code>KGATE_HTTP_SERVER</code>, <code>KGATE_ORIGIN</code>, <code>KGATE_WEBHOOK_SECRET</code>. Also auto-wires a <code>POST /webhooks/kgate</code> fallback route, plus a blank <code>services/kgate</code> import, into <code>routes/public/public.go</code>.</p>
+        <p>Requires the app to already have a core database connection (<code>-db</code> at <code>create app</code> time) — channel subscriptions aren't static/env-driven: <code>Subscribe(ctx, channel)</code> records the channel and adds it to a single shared WebSocket connection multiplexing every subscribed channel (with dial-timeout and ping/pong keepalive), durable across restarts via <code>ResumeAll(ctx)</code>, which is already wired automatically (<code>Register</code> kicks it off in the background the moment it runs, followed by <code>OnStartup</code> — <code>services/kgate</code>'s <code>Init</code>, once you've run <code>init kgate</code> — and <code>Register(mux)</code> is called from <code>main.go</code>'s own <code>routes.Register(mux)</code> — no manual wiring needed). All subscribed channels share one connection, rather than one per channel, because kgate's gateway allows only one live connection per <code>X-Client-Id</code> — opening several concurrently under the same client ID causes each new one to evict another, an endless reconnect churn. Every event, live or via the HMAC-verified webhook fallback, is dispatched (panic-safely, via <code>dispatchEvent</code>) to <code>services/kgate</code>'s <code>HandleEvent</code> — a payload that will never decode should return a permanent error (see <code>kgate.go</code>'s own <code>permanentf</code>) so it's acked once and logged rather than redelivered forever. Structured connection-lifecycle logging (<code>log/slog</code>, JSON, never including payload data) goes to stdout tagged <code>component=kgate</code>. Needs <code>go mod tidy</code> once and <code>nexler init db</code> before subscriptions will work.</p>
+        <p><code>Register</code> also documents <code>POST /webhooks/kgate</code> in <code>/openapi.json</code>/Swagger UI (previously invisible there, unlike every route <code>nexler create &lt;route&gt;</code> generates), and calls <code>OnStartup</code> — <code>services/kgate</code>'s <code>Init</code>, by default a <code>Subscribe</code> to a channel literally named <code>"test"</code> — alongside <code>ResumeAll</code> on startup, a built-in smoke test that the whole pipeline (core DB registry + WebSocket connectivity) works end to end. Safe to leave in (<code>Subscribe</code> is idempotent for an already-subscribed channel) or edit <code>services/kgate/kgate.go</code>'s <code>Init</code> to your app's real startup channels once you've confirmed kgate is wired correctly.</p>
         <div class="code-block"><pre>nexler init kgate -dir ./myapp</pre></div>
-        <p>Usage — subscribe from anywhere (a handler, a startup routine, mid-workflow), publish from anywhere, and process every delivered event (live or via the webhook fallback) in one place:</p>
+        <p>Usage — subscribe from anywhere (a handler, a startup routine, mid-workflow), publish from anywhere, and process every delivered event (live or via the webhook fallback) in <code>services/kgate/kgate.go</code>'s <code>HandleEvent</code> — never in <code>kgate/kgate.go</code> itself, which stays nexler-owned infrastructure:</p>
         <div class="code-block"><pre><span class="cmt">// start listening for a channel, e.g. when an order is created</span>
 if err := kgate.Subscribe(ctx, "orders.created"); err != nil {
 	log.Printf("kgate: subscribing: %v", err)
@@ -408,8 +407,8 @@ if err := kgate.Publish(ctx, "orders.created", map[string]any{"order_id": id}); 
 	log.Printf("kgate: publishing: %v", err)
 }
 
-<span class="cmt">// kgate/kgate.go — edit handleEvent for your own processing logic</span>
-func handleEvent(ctx context.Context, channel string, payload json.RawMessage) error {
+<span class="cmt">// services/kgate/kgate.go — edit HandleEvent for your own processing logic</span>
+func HandleEvent(ctx context.Context, channel string, payload json.RawMessage) error {
 	switch channel {
 	case "orders.created":
 		<span class="cmt">// ... handle it</span>
@@ -496,8 +495,10 @@ config/      <span class="c">loads {APPNAME}_-prefixed env vars once, at startup
 <span class="d">auth/</span>        <span class="c">only with -auth jwt|session|both</span>
 <span class="d">db/</span>          <span class="c">only with -db mongo|mysql|postgres|mssql</span>
 <span class="d">core/</span>        <span class="c">only when -db is set — app-wide system data</span>
-<span class="d">kpass/</span>       <span class="c">only after `nexler init kpass`</span>
-<span class="d">kgate/</span>       <span class="c">only after `nexler init kgate` (needs -db)</span></pre></div>
+<span class="d">kpass/</span>       <span class="c">only after `nexler init kpass` — infrastructure, never hand-edited</span>
+<span class="d">kgate/</span>       <span class="c">only after `nexler init kgate` (needs -db) — infrastructure, never hand-edited</span>
+<span class="d">services/kpass/</span>  <span class="c">only after `nexler init kpass` — your CheckAccess wrapper</span>
+<span class="d">services/kgate/</span>  <span class="c">only after `nexler init kgate` — your Init/HandleEvent</span></pre></div>
     </section>
 
     <section class="doc-section" id="arch-request-response">
@@ -612,7 +613,7 @@ org, ok := auth.Org(r)  <span class="cmt">// scope your own store/service querie
             <tr><td class="flag-name">DELETE /admin/services/{name}</td><td class="flag-desc"><code>core.DeleteService</code> — hard delete, unlike revoke above</td></tr>
           </tbody>
         </table>
-        <div class="callout warn">Every route wraps only in <code>middleware.RequireAuth</code> — that confirms the caller is <em>authenticated</em>, not that they're <em>allowed</em> to manage other users/services. Add your own authorization check (e.g. <code>kpass.Check</code>, once <code>nexler init kpass</code> has been run) before relying on this in production — deliberately left as a TODO in the generated code rather than assumed by nexler.</div>
+        <div class="callout warn">Every route wraps only in <code>middleware.RequireAuth</code> — that confirms the caller is <em>authenticated</em>, not that they're <em>allowed</em> to manage other users/services. Add your own authorization check (e.g. <code>services/kpass</code>'s <code>CheckAccess</code>, once <code>nexler init kpass</code> has been run) before relying on this in production — deliberately left as a TODO in the generated code rather than assumed by nexler.</div>
         <div class="code-block"><pre>curl -X POST /admin/services -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"billing-svc"}'
 <span class="cmt">// {"name":"billing-svc","key":"a1b2c3..."}  -- key shown exactly once</span></pre></div>
@@ -671,6 +672,14 @@ err = resp.JSON(&amp;out)</pre></div>
       <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
 
       <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-30</div>
+          <h4>kgate: resilient delivery, plus business logic moved into <code>services/kgate</code>/<code>services/kpass</code></h4>
+          <p><strong>New</strong>: <code>kgate/kgate.go</code>'s WebSocket loop gained structured <code>log/slog</code> logging (JSON, tagged <code>component=kgate</code>, never including an event's payload), a bounded 15s dial timeout, WebSocket ping/pong keepalive (5s/15s — tuned against a real kgate deployment's own idle-disconnect behavior), panic-safe dispatch (<code>runSubscribeOnce</code>/<code>dispatchEvent</code>), and permanent-vs-transient error handling (<code>permanentError</code>/<code>permanentf</code>/<code>isPermanent</code> — a payload that will never decode is acked once and logged loudly instead of resurfacing on every future reconnect). <code>Publish</code>'s payload is now JSON-encoded on the wire (undone on receipt by the new <code>unwrapPayload</code>) and sends an <code>Origin</code> header alongside <code>X-Client-Id</code>. Existing apps pick all of this up via three new <code>nexler update</code> checks (<code>ensureKgatePublishEncoding</code>/<code>ensureKgateResilientDelivery</code>/<code>ensureKgateWebhookDispatch</code>), same anchor-based-patch-with-hand-rewrite-guard precedent as every earlier kgate retrofit.</p>
+          <p><strong>Structural change</strong>: <code>handleEvent</code>'s real implementation and <code>Register</code>'s hardcoded startup <code>Subscribe(ctx, "test")</code> call — both business decisions that used to live inside <code>kgate/kgate.go</code>, a file <code>nexler update</code> patches over time — are now package-variable hooks (<code>EventHandler</code>/<code>OnStartup</code>) that a new one-time-written package, <code>services/kgate/kgate.go</code>, overrides via its own <code>init()</code>. <code>kgate/kgate.go</code> is now pure, permanently-stable infrastructure with nothing left to protect from a future patch — matching <code>kpass/kpass.go</code>'s already-safe status. <code>kpass</code> gets the same treatment for consistency: <code>nexler init kpass</code> now also writes <code>services/kpass/kpass.go</code> (<code>CheckAccess</code>, wrapping <code>kpass.Check</code>/<code>Allowed</code>) — call that instead of <code>kpass.Check</code> directly from your handlers. A new <code>ensureKgateServiceExtraction</code> retrofit migrates an existing app automatically <em>only if <code>handleEvent</code> is still untouched</em>; a hand-customized <code>handleEvent</code> makes it error out instead, naming the exact manual migration steps — it never silently relocates real business logic. <code>ensureKpassService</code> backfills <code>services/kpass</code> for an app that ran <code>init kpass</code> before this existed.</p>
+          <div class="change-tags"><span class="change-tag">kgate</span><span class="change-tag">kpass</span><span class="change-tag">scaffolding</span></div>
+        </div>
+
         <div class="change-entry">
           <div class="change-date">2026-08-25</div>
           <h4>kgate: one shared WebSocket connection instead of one per channel</h4>

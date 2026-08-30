@@ -11,11 +11,11 @@
 // confirms the caller is *authenticated*, not that they're *authorized*
 // to create or revoke service accounts, which is a meaningfully
 // higher-privilege action than most routes. Add your own authorization
-// check (e.g. kpass.Check(ctx, callerID, "admin.services.write", nil),
-// once you've run `nexler init kpass`) before relying on this in
-// production. Deliberately left as a TODO rather than hardcoded:
-// permission enforcement is expected to be layered on separately, per
-// app, not assumed by nexler.
+// check (e.g. kpasssvc.CheckAccess(ctx, callerID, "admin.services.write",
+// nil) from services/kpass, once you've run `nexler init kpass`) before
+// relying on this in production. Deliberately left as a TODO rather than
+// hardcoded: permission enforcement is expected to be layered on
+// separately, per app, not assumed by nexler.
 package services
 
 import (

@@ -71,7 +71,65 @@ func NewKpass(cfg KpassConfig) error {
 		return fmt.Errorf("generated %s, but could not update .env: %w", destFile, err)
 	}
 
+	if err := writeKpassService(appDir, modulePath); err != nil {
+		return fmt.Errorf("generated %s, but could not generate services/kpass/kpass.go: %w", destFile, err)
+	}
+
 	return nil
+}
+
+// writeKpassService renders services/kpass/kpass.go — a one-time,
+// hand-editable wrapper around the kpass client (kpass/kpass.go) for the
+// app's own authorization calls, so callers reach for CheckAccess instead
+// of calling kpassclient.Check directly. Unlike kpass/kpass.go itself,
+// this file is never touched again by `nexler update` once it exists.
+// Errors if it already exists, same collision guard as kpass/kpass.go
+// above.
+func writeKpassService(appDir, modulePath string) error {
+	destFile := filepath.Join(appDir, "services", "kpass", "kpass.go")
+	if _, err := os.Stat(destFile); err == nil {
+		return fmt.Errorf("%s already exists — edit it directly, or remove it first to regenerate", destFile)
+	}
+
+	data := kpassData{ModulePath: modulePath}
+
+	raw, err := kpassTemplateFS.ReadFile(kpassServiceTmpl)
+	if err != nil {
+		return fmt.Errorf("reading embedded template %s: %w", kpassServiceTmpl, err)
+	}
+	content, err := processFile(kpassServiceTmpl, raw, data)
+	if err != nil {
+		return fmt.Errorf("rendering %s: %w", kpassServiceTmpl, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destFile), 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(destFile), err)
+	}
+	return os.WriteFile(destFile, content, 0o644)
+}
+
+// ensureKpassService brings an app that ran `nexler init kpass` before
+// services/kpass existed up to date — writes services/kpass/kpass.go only
+// if kpass/kpass.go exists (this app is eligible) and services/kpass/
+// kpass.go doesn't already exist. Purely additive: never overwrites an
+// existing services/kpass/kpass.go (which may already have been hand-
+// edited), same "write only if missing" precedent as ensureStoreCommon.
+// A silent no-op for an app that never ran `init kpass` at all.
+func ensureKpassService(appDir string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(appDir, "kpass", "kpass.go")); err != nil {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(appDir, "services", "kpass", "kpass.go")); err == nil {
+		return false, nil
+	}
+
+	modulePath, err := readModulePath(appDir)
+	if err != nil {
+		return false, err
+	}
+	if err := writeKpassService(appDir, modulePath); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // detectAuthFiles reports whether appDir's auth/jwt.go and/or

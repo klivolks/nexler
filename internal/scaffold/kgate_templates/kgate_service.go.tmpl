@@ -1,0 +1,61 @@
+// Package kgate holds this app's own kgate business logic — which
+// channels to subscribe to at startup, and how to process each delivered
+// event. Generated once by `nexler init kgate` and never touched again by
+// `nexler update` (unlike ../kgate/kgate.go, which is nexler-owned
+// infrastructure) — edit Init/HandleEvent freely.
+//
+// init() wires this package's Init/HandleEvent into ../kgate's
+// EventHandler/OnStartup hooks. This package imports the kgate client
+// package, not the other way around, so kgate never has to import this
+// package back — the ../kgate client stays free to be regenerated/patched
+// by `nexler update` indefinitely without ever risking your business
+// logic here.
+package kgate
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+
+	kgateclient "{{ .ModulePath }}/kgate"
+)
+
+func init() {
+	kgateclient.EventHandler = HandleEvent
+	kgateclient.OnStartup = Init
+}
+
+// Init subscribes to whatever channels this app cares about at startup,
+// called once from kgate.Register's background goroutine (after
+// ResumeAll). kgateclient.Subscribe is idempotent, so the "test"
+// smoke-test channel kept below is harmless to leave in; replace it with
+// your app's real channels once you've confirmed kgate is wired
+// correctly, or add more Subscribe calls alongside it.
+func Init(ctx context.Context) {
+	if err := kgateclient.Subscribe(ctx, "test"); err != nil {
+		log.Printf("kgate: subscribing to test channel: %v", err)
+	}
+}
+
+// HandleEvent processes every event delivered to this app, however it
+// arrived — a live Subscribe connection or the /webhooks/kgate fallback.
+// Switch on channel for per-channel behavior. Returning a non-nil error
+// from a live subscription prevents the event from being acked (so kgate
+// may redeliver it) unless the error is permanent — wrap a payload decode
+// error with kgateclient's own permanent-error convention (see
+// ../kgate/kgate.go's permanentf) if you need that from here too; from
+// the webhook path a permanent error results in a 400 response, any
+// other error in a 500.
+func HandleEvent(ctx context.Context, channel string, payload json.RawMessage) error {
+	// TODO: process the event. Example shape for a channel with a typed
+	// payload:
+	//
+	//   case "some.channel":
+	//       var e someEventType
+	//       if err := json.Unmarshal(payload, &e); err != nil {
+	//           return fmt.Errorf("decoding some.channel payload: %w", err)
+	//       }
+	//       return doSomethingWith(ctx, e)
+	_ = payload
+	return nil
+}

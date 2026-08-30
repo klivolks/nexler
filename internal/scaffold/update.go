@@ -19,18 +19,26 @@
 // ID) instead of flattening it to _id, ensureStoreCommon (route.go) adds
 // store/common.Base itself if missing, ensureKgateResumeAll (kgate.go)
 // patches kgate/kgate.go's Register to auto-resume recorded channels on
-// startup, and ensureKgateSharedConnection (kgate.go) patches Subscribe/
+// startup, ensureKgateSharedConnection (kgate.go) patches Subscribe/
 // Unsubscribe/ResumeAll to multiplex every channel over a single shared
-// WebSocket connection instead of dialing one per channel. Update just
-// runs these functions directly, unconditionally,
+// WebSocket connection instead of dialing one per channel,
+// ensureKgatePublishEncoding/ensureKgateResilientDelivery/
+// ensureKgateWebhookDispatch (kgate.go) bring an app up to kgate's
+// structured-logging/keepalive/dispatchEvent revision (see "nexler init
+// kgate" in CLAUDE.md), ensureKgateServiceExtraction (kgate.go) moves
+// handleEvent's real implementation and Register's startup-subscription
+// decision into the one-time-written services/kgate package, and
+// ensureKpassService (kpass.go) writes services/kpass if missing. Update
+// just runs these functions directly, unconditionally,
 // and reports what happened. Deliberately never touches anything a
 // developer is expected to hand-edit — handlers/services/store/models,
-// main.go, .env, templates/html/*, kgate.go's handleEvent — only ever the
-// same narrow set of files/regions those functions already know how to
-// safely upgrade (full regeneration for pure generated infra like
-// openapi.go, middleware/auth.go, and auth/jwt.go; append-only or
-// surgical-anchor patching for files that are realistically hand-extended,
-// like response.go, mongo.go, and kgate.go).
+// main.go, .env, templates/html/*, kgate.go's handleEvent,
+// services/kgate/*, services/kpass/* — only ever the same narrow set of
+// files/regions those functions already know how to safely upgrade (full
+// regeneration for pure generated infra like openapi.go,
+// middleware/auth.go, and auth/jwt.go; append-only or surgical-anchor
+// patching for files that are realistically hand-extended, like
+// response.go, mongo.go, and kgate.go).
 package scaffold
 
 // UpdateResult reports which of Update's checks changed something vs.
@@ -64,6 +72,11 @@ var updateChecks = []updateCheck{
 	{"kgate: resume subscriptions on startup (Register)", ensureKgateResumeAll},
 	{"kgate: webhook OpenAPI docs + startup test subscribe", ensureKgateOpenAPIAndTestSubscribe},
 	{"kgate: single shared WebSocket connection (was one per channel)", ensureKgateSharedConnection},
+	{"kgate: publish payload JSON-encoding + Origin header", ensureKgatePublishEncoding},
+	{"kgate: resilient delivery (structured logging, keepalive, dispatchEvent)", ensureKgateResilientDelivery},
+	{"kgate: webhook dispatch via dispatchEvent", ensureKgateWebhookDispatch},
+	{"kgate: extract event handling into services/kgate", ensureKgateServiceExtraction},
+	{"kpass: generate services/kpass wrapper if missing", ensureKpassService},
 	{"auth: API-key (service-to-service) auth", ensureServiceAuth},
 	{"auth: admin API for core_users/core_services", ensureAdminRoutes},
 	{"config: API base path (openapi servers)", ensureAPIBasePath},

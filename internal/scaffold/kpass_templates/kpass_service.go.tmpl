@@ -1,0 +1,26 @@
+// Package kpass is this app's own wrapper around the kpass client
+// (../kpass) — call CheckAccess from your handlers/services instead of
+// calling kpassclient.Check directly, so every authorization decision in
+// this app funnels through one place you can extend later (logging,
+// caching, role-based overrides) without touching every call site.
+// Generated once by `nexler init kpass` and never touched again by
+// `nexler update` (unlike ../kpass/kpass.go, which is nexler-owned
+// infrastructure) — edit CheckAccess freely, or add more functions here.
+package kpass
+
+import (
+	"context"
+
+	kpassclient "{{ .ModulePath }}/kpass"
+)
+
+// CheckAccess reports whether userID may access resource (e.g.
+// "myapp.users.create"). See kpassclient.Check if you need kpass's full
+// Result (UserRole/UserType) instead of a plain bool.
+func CheckAccess(ctx context.Context, userID, resource string, extra map[string]any) (bool, error) {
+	result, err := kpassclient.Check(ctx, userID, resource, extra)
+	if err != nil {
+		return false, err
+	}
+	return kpassclient.Allowed(result), nil
+}

@@ -2736,6 +2736,35 @@ func wireAggregator(appDir, group, importPath, alias string) error {
 	return os.WriteFile(aggPath, []byte(content), 0o644)
 }
 
+// wireBlankImport adds a blank (`_`) side-effect import for importPath to
+// routes/<group>/<group>.go — for a package like services/kgate whose
+// whole job is running its own init() (to register itself with another
+// package's hook variables) rather than exposing a Register(mux) func.
+// Unlike wireAggregator, it never adds a "<alias>.Register(mux)" call
+// (which would be invalid Go for a blank alias) and never errors when
+// importPath is already present — that's the expected outcome on a
+// repeat `nexler init kgate`/`nexler update` run, not a hand-edit signal.
+func wireBlankImport(appDir, group, importPath string) error {
+	aggPath := filepath.Join(appDir, "routes", group, group+".go")
+
+	raw, err := os.ReadFile(aggPath)
+	if err != nil {
+		return fmt.Errorf("reading %s (are you in a nexler app directory?): %w", aggPath, err)
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+
+	if strings.Contains(content, `"`+importPath+`"`) {
+		return nil
+	}
+
+	content, err = insertImport(content, "_", importPath)
+	if err != nil {
+		return fmt.Errorf("%s: %w (has it been hand-edited?)", aggPath, err)
+	}
+
+	return os.WriteFile(aggPath, []byte(content), 0o644)
+}
+
 // wireAggregatorAdditionalCall is wireAggregator's tolerant sibling, for a
 // second (third, ...) independent resource sharing an already-wired
 // package (see RouteConfig.OwnRegister / addOwnRegisterResource). Unlike

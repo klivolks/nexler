@@ -10,10 +10,11 @@
 // Every handler below wraps only in middleware.RequireAuth — that
 // confirms the caller is *authenticated*, not that they're *authorized*
 // to manage other users. Add your own authorization check (e.g.
-// kpass.Check(ctx, callerID, "admin.users.write", nil), once you've run
-// `nexler init kpass`) before relying on this in production. Deliberately
-// left as a TODO rather than hardcoded: permission enforcement is
-// expected to be layered on separately, per app, not assumed by nexler.
+// kpasssvc.CheckAccess(ctx, callerID, "admin.users.write", nil) from
+// services/kpass, once you've run `nexler init kpass`) before relying on
+// this in production. Deliberately left as a TODO rather than hardcoded:
+// permission enforcement is expected to be layered on separately, per
+// app, not assumed by nexler.
 package users
 
 import (

@@ -1065,6 +1065,20 @@ automatically — a handler/service calls them explicitly, typically as `userID,
 kpass.UserIDFromRequest(r)` followed by `kpass.Check(ctx, userID, "myapp.users.create",
 nil)`.
 
+`NewKpass` also writes `services/kpass/kpass.go` (from a second embedded template,
+`kpass_templates/kpass_service.go.tmpl` → `kpassServiceTmpl`) — a one-time,
+hand-editable wrapper (`CheckAccess(ctx, userID, resource, extra) (bool, error)`, calling
+`kpassclient.Check`/`Allowed` internally) that a handler/service is meant to call instead
+of reaching into `kpass.Check` directly. `kpass/kpass.go` itself was already never
+touched by `nexler update` (no retrofit function exists for it), so this isn't fixing a
+correctness risk the way the same split does for kgate below — it's purely for
+convention consistency between the two integrations, and so an app's own authorization
+logic (caching, role-based overrides, logging) has one obvious place to live rather than
+being duplicated at every `kpass.Check` call site. Same collision guard as `kpass/kpass.go`
+(errors if it already exists). An app that ran `init kpass` before this file existed picks
+it up via `nexler update` (`ensureKpassService` in `kpass.go`) — writes it only if
+missing, a silent no-op otherwise or for an app that never ran `init kpass` at all.
+
 #### `nexler init kgate`: kgate message-broker integration
 
 `nexler init kgate [-dir <app-dir>]` (`cmd/nexler/initkgate.go` → `scaffold.NewKgate` in
@@ -1201,6 +1215,88 @@ convention as `KPASS_*` — shared vendor credentials, not per-app.
 per-dialect style — `core_kgate_channel_add`/`_remove` stored procedures for SQL backends,
 a unique index on `channel` for Mongo) — needed before `Subscribe`/`Unsubscribe`/
 `ResumeAll` will actually work against a real database.
+
+##### Resilient delivery: structured logging, keepalive, permanent-vs-transient errors
+
+`kgate.go.tmpl`'s WebSocket loop was revised again after the shared-connection fix above,
+adding: a package-level `logger` (`log/slog`, JSON to stdout, tagged `component=kgate`) used
+throughout instead of `log.Printf`, so connection-lifecycle events (dial, connect, subscribe,
+receive, process, ack, disconnect) are structured and — deliberately — never include an
+event's payload, only its channel and message_id; a bounded 15s dial timeout
+(`context.WithTimeout` + `DialContext`, separate from gorilla's own `HandshakeTimeout`) so a
+hung DNS lookup or half-dead proxy can never stall the reconnect loop indefinitely; WebSocket
+ping/pong keepalive (5s ping period, 15s read deadline — measured against a live kgate
+deployment showing sockets dying after ~10s of silence, well before a more conventional
+20s/60s cadence would ever get a chance to send anything); `runSubscribeOnce`, a `recover()`
+wrapper around `subscribeOnce` so a panic anywhere in connection setup or the read loop (not
+just inside `handleEvent`, which `dispatchEvent` already guards) is logged and treated as an
+ordinary disconnect rather than killing the goroutine `subscribeLoop` depends on;
+`dispatchEvent`, which recovers a panic from `handleEvent` itself for the same reason;
+`permanentError`/`permanentf`/`isPermanent`, marking an event-processing failure as one no
+amount of redelivery can fix (e.g. a payload that will never successfully decode) — acked
+anyway despite the error (so it doesn't resurface as a "processing failed" log line on every
+future reconnect for the rest of the process's life) but still logged loudly, versus a
+transient failure (a downstream dependency that might succeed on retry), which is left
+unacked so kgate may redeliver it; and `unwrapPayload`, undoing kgate's JSON string-encoding
+of every delivered payload (the wire format double-encodes: `payload` is itself a JSON-encoded
+string, not the object/array directly) before `handleEvent` ever sees it. `HandleWebhook`
+dispatches through `dispatchEvent` too, mapping a permanent error to a 400 response and any
+other error to a 500 (previously a flat 500 for everything). `Publish`'s `publishBody.Payload`
+is now always a JSON-encoded string on the wire (matching what subscribers actually receive,
+undone on the way in by `unwrapPayload`), and it sends an `Origin` header alongside
+`X-Client-Id` — both dial and publish requests need it, or kgate's gateway rejects the
+request.
+
+Four `nexler update` checks bring an app scaffolded before this revision up to date, in this
+order (each anchors on the previous one's output, same "must run after" dependency chain as
+`ensureKgateResumeAll` → `ensureKgateOpenAPIAndTestSubscribe`): `ensureKgatePublishEncoding`
+(the `publishBody`/`Publish` change), `ensureKgateResilientDelivery` (the whole
+logger/keepalive/dispatchEvent/permanentError/unwrapPayload block — anchored on
+`ensureKgateSharedConnection`'s own output, `kgateSubscriptionPatched`), and
+`ensureKgateWebhookDispatch` (`HandleWebhook`'s call site). All three are scoped well away from
+`handleEvent` itself, same "never touch the documented hand-edit point" precedent as every
+earlier kgate retrofit.
+
+##### Extracting business logic into `services/kgate`
+
+Two things about `kgate.go.tmpl` were still business logic sitting inside a file `nexler
+update` patches via literal anchor-text matching: `handleEvent`'s real implementation, and
+`Register`'s hardcoded startup `Subscribe(ctx, "test")` smoke-test call — every anchor-based
+retrofit above has to either carve `handleEvent` out as a no-touch zone, or (for `Register`)
+risk a hand-edited startup-subscription list going out of sync with a future patch. Fixed by
+turning both into package-level function-variable hooks: `EventHandler` (defaults to
+`defaultEventHandler`, a no-op) is what `handleEvent` now delegates to; `OnStartup` (defaults
+to `defaultOnStartup`, the original `Subscribe(ctx, "test")` smoke test) is what `Register`'s
+background goroutine now calls instead of embedding the `Subscribe` call directly. Neither
+hook is ever touched again by any anchor-based patch — `kgate/kgate.go` becomes pure,
+permanently-stable infrastructure, matching `kpass/kpass.go`'s already-safe status (see above).
+
+A new one-time-written package, `services/kgate/kgate.go` (from a second embedded template,
+`kgate_templates/kgate_service.go.tmpl` → `kgateServiceTmpl`), holds the actual business logic:
+`Init(ctx)` (startup subscriptions — starts as the same `"test"` smoke-test Subscribe, meant to
+be edited) and `HandleEvent(ctx, channel, payload) error` (the real per-channel event
+processing). Its `init()` sets `kgateclient.EventHandler = HandleEvent` and
+`kgateclient.OnStartup = Init` — dependency injection specifically to avoid an import cycle:
+`services/kgate` imports the `kgate` client package (to call `Subscribe`/`Publish`), so `kgate`
+itself must never import `services/kgate` back, which a direct "handleEvent calls into
+services/kgate" design would have required. `NewKgate` writes this file (same collision guard
+as `kgate/kgate.go` — errors if it already exists) and wires a blank side-effect import,
+`import _ "{modulePath}/services/kgate"`, into `routes/public/public.go` via a new
+`wireBlankImport` (`route.go`, `wireAggregator`'s sibling for a package whose only job is
+running its own `init()` rather than exposing a `Register(mux)` — `wireAggregator` itself can't
+be reused here since it always pairs an import with a `<alias>.Register(mux)` call, invalid Go
+for a blank alias) — this is what actually makes `services/kgate`'s `init()` run, since nothing
+else in the generated app imports it.
+
+An app that ran `init kgate` before this split existed picks it up via `nexler update`
+(`ensureKgateServiceExtraction`, registered last among the kgate checks — its anchors assume
+every check above has already applied). `handleEvent` must match one of two known pristine
+shapes **exactly** — the current stub (calls `unwrapPayload`) or the older pre-resilient-delivery
+one (a bare `// TODO: process the event`), covering an app that jumps straight from very old to
+current in one `nexler update` run — or the retrofit errors out naming the manual migration
+steps, rather than guessing how to relocate hand-written business logic. This is a deliberate,
+narrower safety bar than every other kgate retrofit's "does the known block match:" check, since
+getting this one wrong would mean silently discarding a developer's real event-processing code.
 
 #### `nexler init kube`: Kubernetes manifest
 
