@@ -1849,7 +1849,16 @@ func ensureMongoDatabaseName(appDir string) (bool, error) {
 // replacement (rather than a full-file regeneration) both safe and
 // precise, the same "narrow, anchor-based patch of an exact known body"
 // precedent ensureKgateResumeAll already established for kgate.go's
-// Register.
+// Register. mongoStructToBSONNewLoopLegacyFormat is the same "new" shape
+// but with the malformed (non-gofmt) whitespace nexler itself used to
+// write — 4-space indentation and blank lines between statements, unlike
+// this file's other two loop constants, which are real tab-indented
+// gofmt output. Any app whose mongo/mongo.go has since been run through
+// gofmt/goimports (virtually guaranteed — editor format-on-save, `go fmt
+// ./...`, CI) no longer contains that exact malformed text, even though
+// the code is semantically identical to mongoStructToBSONNewLoop; both
+// are recognized as "already current" so a merely-reformatted file is
+// never mistaken for a hand-rewritten one (see ensureMongoEmbeddedFilterFix).
 const (
 	mongoStructToBSONOldLoop = `	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
@@ -1866,7 +1875,28 @@ const (
 		}
 		out[key] = fv.Interface()
 	}`
-	mongoStructToBSONNewLoop = `    for i := 0; i < t.NumField(); i++ {
+	mongoStructToBSONNewLoop = `	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if f.Anonymous && fv.Kind() == reflect.Struct {
+			if err := addStructFields(fv, out); err != nil {
+				return err
+			}
+			continue
+		}
+		if fv.IsZero() {
+			continue
+		}
+		key := bsonFieldName(f)
+		if key == "-" {
+			continue
+		}
+		out[key] = fv.Interface()
+	}`
+	mongoStructToBSONNewLoopLegacyFormat = `    for i := 0; i < t.NumField(); i++ {
         f := t.Field(i)
 
         if !f.IsExported() {
@@ -1945,8 +1975,8 @@ func ensureMongoEmbeddedFilterFix(appDir string) (bool, error) {
 		return false, err
 	}
 	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	if strings.Contains(content, mongoStructToBSONNewLoop) {
-		return true, nil
+	if strings.Contains(content, mongoStructToBSONNewLoop) || strings.Contains(content, mongoStructToBSONNewLoopLegacyFormat) {
+		return false, nil
 	}
 	if strings.Contains(content, mongoStructToBSONOldLoop) {
 		content = strings.Replace(content, mongoStructToBSONOldLoop, mongoStructToBSONNewLoop, 1)
@@ -1955,6 +1985,229 @@ func ensureMongoEmbeddedFilterFix(appDir string) (bool, error) {
 	} else {
 		return false, fmt.Errorf("%s's structToBSON doesn't match what nexler generated (has it been hand-rewritten?) — add the embedded-field-flattening branch by hand (see mongo.go.tmpl's own structToBSON), or restore it from a fresh scaffold and reapply your changes", path)
 	}
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// mongoPreFilterToBSON is the exact byte-for-byte text (doc comment plus
+// body) of filterToBSON in mongo/mongo.go before Filter{And, Or, Eq}
+// existed — recovered from nexler's own git history (the parent of
+// commit 99fb2d8, "mongo flat issue solved", which introduced Filter).
+// mongoFilterExpressionBlock is what replaces it: EnsureUniqueIndex,
+// EnsureTTLIndex, Filter, the current filterToBSON (with its
+// Filter/*Filter type-switch at the top), and filterExpressionToBSON —
+// verbatim from mongo.go.tmpl. Used by ensureMongoFilterExpression, same
+// "narrow, anchor-based patch of an exact known body" precedent as
+// mongoStructToBSONOldLoop above — a single literal replacement rather
+// than a separate insertion point, since the old and new filterToBSON
+// can't coexist (same function name).
+const mongoPreFilterToBSON = `// filterToBSON converts filter into a query document: a struct's
+// non-zero fields AND together; a slice of structs ORs each element's
+// AND-group. Anything else is an error.
+func filterToBSON(filter any) (bson.M, error) {
+	v := reflect.ValueOf(filter)
+	if v.Kind() == reflect.Slice {
+		if v.Len() == 0 {
+			return bson.M{}, nil
+		}
+		ors := make([]bson.M, 0, v.Len())
+		for i := 0; i < v.Len(); i++ {
+			m, err := structToBSON(v.Index(i))
+			if err != nil {
+				return nil, err
+			}
+			ors = append(ors, m)
+		}
+		if len(ors) == 1 {
+			return ors[0], nil
+		}
+		return bson.M{"$or": ors}, nil
+	}
+	return structToBSON(v)
+}`
+
+const mongoFilterExpressionBlock = `// EnsureUniqueIndex creates a unique index on field within coll if an
+// equivalent one doesn't already exist (CreateOne no-ops in that case) —
+// safe to call on every startup. The index is partial, scoped to
+// documents where field actually exists (SetPartialFilterExpression), so
+// documents that never set field (e.g. an optional external-id
+// correlation most records don't have) don't collide with each other as
+// "both null" the way a plain unique index would.
+func EnsureUniqueIndex(ctx context.Context, coll Collection, field string) error {
+	_, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
+		Keys: bson.D{{Key: field, Value: 1}},
+		Options: options.Index().
+			SetUnique(true).
+			SetPartialFilterExpression(bson.M{field: bson.M{"$exists": true}}),
+	})
+	return err
+}
+
+// EnsureTTLIndex creates a TTL index on field within coll if an equivalent
+// one doesn't already exist — field must be a time.Time (or *time.Time)
+// value; Mongo automatically deletes a document once field's stored time
+// plus seconds is in the past. Safe to call on every startup.
+func EnsureTTLIndex(ctx context.Context, coll Collection, field string, seconds int32) error {
+	_, err := coll.coll.Indexes().CreateOne(ctx, driver.IndexModel{
+		Keys:    bson.D{{Key: field, Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(seconds),
+	})
+	return err
+}
+
+type Filter struct {
+	And []any
+	Or  []any
+	// Eq is an explicit key:value equality filter, included verbatim
+	// (zero values included) — the escape hatch for matching a value a
+	// struct filter would otherwise silently drop, e.g.
+	// Filter{Eq: map[string]any{"isDeleted": false}}.
+	Eq map[string]any
+}
+
+// filterToBSON converts a filter into a MongoDB query document.
+//
+// A struct's non-zero fields are implicitly ANDed together.
+// A slice ORs each element's filter.
+// Filter provides explicit nested AND/OR expressions, or an explicit Eq
+// key:value map for matching zero values a struct filter would drop.
+// Struct filters and Filter expressions can be nested arbitrarily.
+func filterToBSON(filter any) (bson.M, error) {
+	switch f := filter.(type) {
+	case Filter:
+		return filterExpressionToBSON(f)
+
+	case *Filter:
+		if f == nil {
+			return bson.M{}, nil
+		}
+		return filterExpressionToBSON(*f)
+	}
+
+	v := reflect.ValueOf(filter)
+
+	if !v.IsValid() {
+		return bson.M{}, nil
+	}
+
+	if v.Kind() == reflect.Slice {
+		if v.Len() == 0 {
+			return bson.M{}, nil
+		}
+
+		ors := make([]bson.M, 0, v.Len())
+
+		for i := 0; i < v.Len(); i++ {
+			m, err := filterToBSON(v.Index(i).Interface())
+			if err != nil {
+				return nil, err
+			}
+
+			ors = append(ors, m)
+		}
+
+		if len(ors) == 1 {
+			return ors[0], nil
+		}
+
+		return bson.M{"$or": ors}, nil
+	}
+
+	return structToBSON(v)
+}
+
+func filterExpressionToBSON(f Filter) (bson.M, error) {
+	set := 0
+	if len(f.And) > 0 {
+		set++
+	}
+	if len(f.Or) > 0 {
+		set++
+	}
+	if len(f.Eq) > 0 {
+		set++
+	}
+	if set > 1 {
+		return nil, fmt.Errorf("mongo: Filter must set exactly one of And, Or, Eq")
+	}
+
+	if len(f.Eq) > 0 {
+		return bson.M(f.Eq), nil
+	}
+
+	if len(f.And) > 0 {
+		parts := make([]bson.M, 0, len(f.And))
+
+		for _, item := range f.And {
+			m, err := filterToBSON(item)
+			if err != nil {
+				return nil, err
+			}
+
+			parts = append(parts, m)
+		}
+
+		if len(parts) == 1 {
+			return parts[0], nil
+		}
+
+		return bson.M{"$and": parts}, nil
+	}
+
+	if len(f.Or) > 0 {
+		parts := make([]bson.M, 0, len(f.Or))
+
+		for _, item := range f.Or {
+			m, err := filterToBSON(item)
+			if err != nil {
+				return nil, err
+			}
+
+			parts = append(parts, m)
+		}
+
+		if len(parts) == 1 {
+			return parts[0], nil
+		}
+
+		return bson.M{"$or": parts}, nil
+	}
+
+	return bson.M{}, nil
+}`
+
+// ensureMongoFilterExpression brings an app scaffolded before
+// Filter{And, Or, Eq} existed up to date: backfills the composable
+// AND/OR/Eq filter-expression type, EnsureUniqueIndex, and
+// EnsureTTLIndex into mongo/mongo.go. A silent no-op if mongo/mongo.go
+// doesn't exist (app wasn't scaffolded with -db mongo) or already
+// contains a Filter type — nexler's own or an independently hand-built
+// one (e.g. an app that built its own And/Or before nexler's version
+// existed) is never overwritten either way, same "never clobber a
+// possible hand-edit" precedent every other anchor-based check already
+// follows. Errors, naming the file, if filterToBSON doesn't match the
+// exact pre-Filter text this checks for — i.e. it's been hand-rewritten
+// — rather than guessing.
+func ensureMongoFilterExpression(appDir string) (bool, error) {
+	path := filepath.Join(appDir, "mongo", "mongo.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if strings.Contains(content, "type Filter struct") {
+		return false, nil
+	}
+	if !strings.Contains(content, mongoPreFilterToBSON) {
+		return false, fmt.Errorf("%s's filterToBSON doesn't match what nexler generated (has it been hand-rewritten?) — add Filter{And, Or, Eq}/EnsureUniqueIndex/EnsureTTLIndex by hand (see mongo.go.tmpl), or restore it from a fresh scaffold and reapply your changes", path)
+	}
+	content = strings.Replace(content, mongoPreFilterToBSON, mongoFilterExpressionBlock, 1)
 
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return false, err

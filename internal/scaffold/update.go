@@ -16,7 +16,10 @@
 // sidebar/footer partials and Subject/Path on the page template data,
 // ensureMongoEmbeddedFilterFix (route.go) fixes structToBSON silently
 // dropping an anonymously embedded filter field (e.g. store/common.Base's
-// ID) instead of flattening it to _id, ensureStoreCommon (route.go) adds
+// ID) instead of flattening it to _id, ensureMongoFilterExpression
+// (route.go) backfills mongo.go's Filter{And, Or, Eq} composable filter
+// expressions and EnsureUniqueIndex/EnsureTTLIndex for an app scaffolded
+// before they existed, ensureStoreCommon (route.go) adds
 // store/common.Base itself if missing, ensureKgateResumeAll (kgate.go)
 // patches kgate/kgate.go's Register to auto-resume recorded channels on
 // startup, ensureKgateSharedConnection (kgate.go) patches Subscribe/
@@ -29,8 +32,9 @@
 // handleEvent's real implementation and Register's startup-subscription
 // decision into the one-time-written services/kgate package, and
 // ensureKpassService (kpass.go) writes services/kpass if missing. Update
-// just runs these functions directly, unconditionally,
-// and reports what happened. Deliberately never touches anything a
+// runs these functions directly, unconditionally, best-effort (a failing
+// check doesn't stop the rest — see Update's own doc comment), and
+// reports what happened. Deliberately never touches anything a
 // developer is expected to hand-edit — handlers/services/store/models,
 // main.go, .env, templates/html/*, kgate.go's handleEvent,
 // services/kgate/*, services/kpass/* — only ever the same narrow set of
@@ -41,11 +45,20 @@
 // response.go, mongo.go, and kgate.go).
 package scaffold
 
-// UpdateResult reports which of Update's checks changed something vs.
-// were already current.
+// UpdateResult reports which of Update's checks changed something, were
+// already current, or failed outright.
 type UpdateResult struct {
 	Applied []string
 	Current []string
+	Failed  []FailedCheck
+}
+
+// FailedCheck names one updateCheck that returned an error, and that
+// error — e.g. an anchor-based check refusing to touch a file it can't
+// positively identify as either its known-old or known-current shape.
+type FailedCheck struct {
+	Name string
+	Err  error
 }
 
 // updateCheck is one named retrofit — apply reports whether it changed
@@ -66,6 +79,7 @@ var updateChecks = []updateCheck{
 	{"db: InsertID helpers", ensureInsertIDHelpers},
 	{"db: mongo database name from DSN", ensureMongoDatabaseName},
 	{"mongo: embedded-field filter fix", ensureMongoEmbeddedFilterFix},
+	{"mongo: Filter{And, Or, Eq} + EnsureUniqueIndex/EnsureTTLIndex", ensureMongoFilterExpression},
 	{"mongo: Update (partial patch)", ensureMongoUpdate},
 	{"store: common.Base helper", ensureStoreCommon},
 	{"config: SwaggerEnabled toggle", ensureSwaggerToggle},
@@ -82,14 +96,30 @@ var updateChecks = []updateCheck{
 	{"config: API base path (openapi servers)", ensureAPIBasePath},
 }
 
-// Update runs every registered check against appDir in order, stopping at
-// the first error (matching NewRoute's own fail-fast style rather than
-// best-effort-continue). Unlike NewRoute's narrow gating — which only
-// touches response.go when the route being created actually uses
-// -response raw — Update runs every check unconditionally: its whole job
-// is making every nexler-owned primitive current, the same "every app
-// gets it, no flag gating" precedent JSONRaw's own generation-time
-// behavior already set.
+// Update runs every registered check against appDir, best-effort: a check
+// that returns an error (e.g. an anchor-based check refusing to touch a
+// file it can't positively identify — see ensureMongoEmbeddedFilterFix)
+// is recorded in result.Failed and the loop continues, rather than
+// aborting the rest of the registry. This is deliberate, not
+// NewRoute's own fail-fast style: the checks are independent (each
+// anchors on its own known text and returns a plain error, never panics
+// or shares mutable state), so one check being unable to recognize a
+// hand-edited or hand-rewritten file must never block every other,
+// unrelated check from applying. The one place a real ordering
+// dependency exists — the kgate retrofit chain, where a later check
+// anchors on an earlier one's own patched output — degrades safely on
+// its own: if an earlier link didn't apply, the later one just can't
+// find its anchor either and fails with its own clear error, it doesn't
+// corrupt anything. Unlike NewRoute's narrow gating — which only touches
+// response.go when the route being created actually uses -response raw —
+// Update runs every check unconditionally: its whole job is making every
+// nexler-owned primitive current, the same "every app gets it, no flag
+// gating" precedent JSONRaw's own generation-time behavior already set.
+//
+// The returned error is non-nil only when Update couldn't even start
+// (e.g. appDir isn't a valid app directory at all) — per-check failures
+// never surface as a top-level error, only via result.Failed, since a
+// partial-success result is the whole point of best-effort-continue.
 func Update(appDir string) (UpdateResult, error) {
 	if appDir == "" {
 		appDir = "."
@@ -103,7 +133,8 @@ func Update(appDir string) (UpdateResult, error) {
 	for _, check := range updateChecks {
 		changed, err := check.apply(appDir)
 		if err != nil {
-			return result, err
+			result.Failed = append(result.Failed, FailedCheck{Name: check.name, Err: err})
+			continue
 		}
 		if changed {
 			result.Applied = append(result.Applied, check.name)

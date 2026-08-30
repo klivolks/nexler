@@ -31,6 +31,9 @@ func runUpdate(args []string) {
 	for _, name := range result.Current {
 		fmt.Printf("%s: already up to date\n", name)
 	}
+	for _, f := range result.Failed {
+		fmt.Fprintf(os.Stderr, "%s: failed — %v\n", f.Name, f.Err)
+	}
 
 	if *mergeServiceAuth {
 		changed, err := scaffold.MergeServiceAuth(*dir)
@@ -56,5 +59,9 @@ func runUpdate(args []string) {
 		} else {
 			fmt.Println("auth: multi-tenant Org propagation: already up to date (or not eligible — needs -auth jwt, session, or both)")
 		}
+	}
+
+	if len(result.Failed) > 0 {
+		os.Exit(1)
 	}
 }
