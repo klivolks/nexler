@@ -4,27 +4,60 @@
 //
 // Channel subscriptions are deliberately not static/env-driven: Subscribe
 // records the channel in the core database (so it survives restarts) and
-// starts a background goroutine maintaining a live WebSocket connection
-// for it, returning immediately — safe to call from inside a request
-// handler or any in-flight workflow (e.g. an order-creation flow starting
-// to listen for order.* events partway through a run), not just at
-// startup. This needs the core kgate-channel registry, so the target app
-// must have a core database connection (-db at `nexler create app` time)
-// and `nexler init db` must have been (re-)run to provision
+// adds it to a single shared WebSocket connection multiplexing every
+// subscribed channel, returning immediately — safe to call from inside a
+// request handler or any in-flight workflow (e.g. an order-creation flow
+// starting to listen for order.* events partway through a run), not just
+// at startup. This needs the core kgate-channel registry, so the target
+// app must have a core database connection (-db at `nexler create app`
+// time) and `nexler init db` must have been (re-)run to provision
 // core_kgate_channels.
+//
+// All subscribed channels share one connection (rather than one
+// connection per channel) because kgate's gateway allows only one live
+// connection per X-Client-Id — opening several concurrently under the
+// same client ID causes each new one to evict another, an endless
+// reconnect churn visible as clustered connect/disconnect bursts in
+// kgate's own connection log. If you ever find yourself tempted to give
+// each channel its own Subscribe-time WebSocket connection instead of
+// adding it to this shared one, don't — that's exactly this failure mode.
 //
 // Every delivered event, however it arrives — a live Subscribe connection
 // or the /webhooks/kgate fallback wired automatically by Register — is
-// dispatched to the single handleEvent function below; edit that for your
-// event-processing logic.
+// dispatched to EventHandler through dispatchEvent, which recovers any
+// panic EventHandler raises so one bad event can never take the whole
+// process down. EventHandler (like OnStartup below) is a package
+// variable, not a fixed function: `nexler init kgate` also generates
+// services/kgate, whose init() overrides both with your app's real
+// event-processing logic and startup subscriptions — edit those, not this
+// file, which stays pure infrastructure forever. Wrap a payload decode
+// error in permanentf (see permanentError below) rather than a plain
+// fmt.Errorf: kgate has no durable per-client offset, so it may redeliver
+// the same event on every future reconnect for as long as it stays
+// unacked — fine for a downstream dependency that might succeed on retry,
+// but a payload that fails to decode once will fail identically forever,
+// so it's acked anyway (and logged loudly) rather than left to recur on
+// every reconnect for the rest of the process's life.
 //
 // Register also resumes every channel already recorded in the registry
-// (ResumeAll) in the background the moment it's called — which happens
-// automatically at every app startup, since `nexler init kgate` wires
-// Register(mux) into routes/public/public.go, called from main.go's own
-// routes.Register(mux). So a fresh process with channels already on
-// record resumes listening to them with no manual wiring; a process with
-// none recorded yet does nothing until Subscribe records a real one.
+// (ResumeAll) in the background the moment it's called, then calls
+// OnStartup — which happens automatically at every app startup, since
+// `nexler init kgate` wires Register(mux) into routes/public/public.go,
+// called from main.go's own routes.Register(mux). So a fresh process with
+// channels already on record resumes listening to them with no manual
+// wiring; a process with none recorded yet does nothing until Subscribe
+// records a real one or OnStartup does.
+//
+// # Logging
+//
+// Connection-lifecycle events (dial, connect, subscribe, receive,
+// process, ack, disconnect) are structured (log/slog, JSON) and never
+// include an event's payload — only its channel and message_id, plus an
+// error when one occurred. Keep it that way in your own handleEvent code
+// too: payloads carry user/tenant data, and kgate can redeliver the same
+// event many times over, so logging full payloads both risks leaking
+// sensitive data into log storage and multiplies log volume on every
+// reconnect.
 //
 // Go's stdlib has no WebSocket client, so this package needs
 // github.com/gorilla/websocket — run `go mod tidy` once before your first
@@ -37,11 +70,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +88,12 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// logger is this package's structured logger for connection-lifecycle
+// events (see the package doc's Logging section). It writes JSON lines to
+// stdout tagged component=kgate — whatever log stack collects this
+// process's stdout picks these up with no extra wiring.
+var logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("component", "kgate")
 
 type subscribeFrame struct {
 	Type    string `json:"type"`
@@ -73,7 +115,14 @@ type ackFrame struct {
 
 type publishBody struct {
 	Channel string `json:"channel"`
-	Payload any    `json:"payload"`
+	// Payload is always a JSON-encoded string, per kgate's wire contract:
+	// kgate passes it through byte-for-byte to subscribers, which is
+	// exactly why unwrapPayload below has to undo this same encoding on
+	// the receive side. Passing an unencoded value here instead — a raw
+	// struct/map rather than the string form of its JSON encoding — will
+	// get rejected by kgate's publish endpoint, not silently accepted in
+	// a different shape.
+	Payload string `json:"payload"`
 }
 
 type webhookEvent struct {
@@ -81,15 +130,25 @@ type webhookEvent struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// Publish posts payload to channel via HTTP.
+// Publish posts payload to channel via HTTP. Like the WebSocket dial in
+// subscribeOnce below, this requires an Origin header alongside
+// X-Client-Id or kgate's gateway rejects the request.
 func Publish(ctx context.Context, channel string, payload any) error {
 	base := os.Getenv("KGATE_HTTP_SERVER")
 	if base == "" {
 		return fmt.Errorf("kgate: KGATE_HTTP_SERVER is not set")
 	}
-	headers := map[string]string{"X-Client-Id": os.Getenv("KGATE_CLIENT_ID")}
+	headers := map[string]string{
+		"X-Client-Id": os.Getenv("KGATE_CLIENT_ID"),
+		"Origin":      os.Getenv("KGATE_ORIGIN"),
+	}
 
-	resp, err := apiclient.Post(ctx, strings.TrimRight(base, "/")+"/messenger/publish", headers, publishBody{Channel: channel, Payload: payload})
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("kgate: encoding payload for %s: %w", channel, err)
+	}
+
+	resp, err := apiclient.Post(ctx, strings.TrimRight(base, "/")+"/messenger/publish", headers, publishBody{Channel: channel, Payload: string(encoded)})
 	if err != nil {
 		return fmt.Errorf("kgate: publishing to %s: %w", channel, err)
 	}
@@ -100,86 +159,125 @@ func Publish(ctx context.Context, channel string, payload any) error {
 }
 
 var (
-	activeMu   sync.Mutex
-	activeSubs = map[string]context.CancelFunc{}
+	// subMu guards channels, the set of channels this app should be
+	// subscribed to (mirrors the core_kgate_channels registry).
+	subMu    sync.Mutex
+	channels = map[string]struct{}{}
+	started  bool
+
+	// connMu guards active (the live shared connection, nil when
+	// disconnected) and serializes every write to it — gorilla/websocket
+	// permits only one concurrent writer per connection.
+	connMu sync.Mutex
+	active *websocket.Conn
 )
 
 // Subscribe records channel in the core kgate-channel registry (via
-// core.AddKgateChannel, so it survives restarts) and starts a background
-// goroutine maintaining a live WebSocket subscription for it — see the
-// package doc comment. A second Subscribe call for a channel already
-// being listened to is a no-op beyond re-recording it (harmless).
+// core.AddKgateChannel, so it survives restarts) and adds it to the
+// shared WebSocket connection — see the package doc comment. A second
+// Subscribe call for a channel already being listened to is a no-op
+// beyond re-recording it (harmless).
 func Subscribe(ctx context.Context, channel string) error {
 	if err := core.AddKgateChannel(ctx, channel); err != nil {
 		return fmt.Errorf("kgate: recording channel %q: %w", channel, err)
 	}
-	startSubscription(channel)
+
+	subMu.Lock()
+	_, already := channels[channel]
+	channels[channel] = struct{}{}
+	subMu.Unlock()
+
+	if !already {
+		sendSubscribe(channel)
+	}
+	ensureLoopStarted()
 	return nil
 }
 
-// Unsubscribe stops channel's background subscription goroutine (if
-// running) and removes it from the registry.
+// Unsubscribe removes channel from the registry and from the set of
+// channels this app subscribes to on (re)connect. It does not tear down
+// the shared connection — other channels may still be using it — so any
+// event kgate delivers for channel between this call and its next
+// reconnect is still read off the wire, just not dispatched to
+// Subscribe's caller again (kgate has no per-channel unsubscribe frame to
+// send it instead).
 func Unsubscribe(ctx context.Context, channel string) error {
-	activeMu.Lock()
-	if cancel, running := activeSubs[channel]; running {
-		cancel()
-		delete(activeSubs, channel)
-	}
-	activeMu.Unlock()
+	subMu.Lock()
+	delete(channels, channel)
+	subMu.Unlock()
 	return core.RemoveKgateChannel(ctx, channel)
 }
 
-// ResumeAll re-subscribes (each in its own background goroutine) to every
-// channel already recorded in the registry, so subscriptions persist
-// across restarts. Called automatically by Register (in a background
-// goroutine, best-effort) — there's normally no need to call this
-// directly yourself.
+// ResumeAll seeds the shared subscription set with every channel already
+// recorded in the registry and starts the shared connection loop, so
+// subscriptions persist across restarts. Called automatically by Register
+// (in a background goroutine, best-effort) — there's normally no need to
+// call this directly yourself.
 func ResumeAll(ctx context.Context) error {
-	channels, err := core.ListKgateChannels(ctx)
+	recorded, err := core.ListKgateChannels(ctx)
 	if err != nil {
 		return fmt.Errorf("kgate: listing channels: %w", err)
 	}
-	for _, ch := range channels {
-		startSubscription(ch)
+	if len(recorded) == 0 {
+		return nil
 	}
+	subMu.Lock()
+	for _, ch := range recorded {
+		channels[ch] = struct{}{}
+	}
+	subMu.Unlock()
+	ensureLoopStarted()
 	return nil
 }
 
-// startSubscription starts channel's background reconnect-loop goroutine,
-// unless one is already running for it.
-func startSubscription(channel string) {
-	activeMu.Lock()
-	defer activeMu.Unlock()
-	if _, running := activeSubs[channel]; running {
+// ensureLoopStarted starts the single shared reconnect-loop goroutine,
+// unless it's already running.
+func ensureLoopStarted() {
+	subMu.Lock()
+	defer subMu.Unlock()
+	if started {
 		return
 	}
-	subCtx, cancel := context.WithCancel(context.Background())
-	activeSubs[channel] = cancel
-	go subscribeLoop(subCtx, channel)
+	started = true
+	go subscribeLoop()
 }
 
-// subscribeLoop keeps a live WebSocket subscription to channel for as
-// long as ctx isn't canceled (by Unsubscribe), retrying with capped
-// exponential backoff on any connection error instead of giving up after
-// one failure.
-func subscribeLoop(ctx context.Context, channel string) {
+// sendSubscribe writes a subscribe frame for channel over the shared
+// connection if one is currently up. If not, it's a no-op: subscribeOnce
+// sends a subscribe frame for every recorded channel as soon as it
+// (re)connects, so channel is picked up on the next connect regardless.
+func sendSubscribe(channel string) {
+	connMu.Lock()
+	defer connMu.Unlock()
+	if active == nil {
+		return
+	}
+	if err := active.WriteJSON(subscribeFrame{Type: "subscribe", Channel: channel}); err != nil {
+		logger.Warn("subscribe frame write failed", "channel", channel, "error", err.Error())
+	}
+}
+
+// subscribeLoop keeps the single shared WebSocket connection up for the
+// life of the process. It reconnects unconditionally on every exit from
+// runSubscribeOnce — a clean disconnect, an abnormal one, a dial failure,
+// or (via the recover below) even a panic somewhere in that call the rest
+// of this package didn't anticipate — with capped exponential backoff so
+// it never gives up. This loop itself must never return: it's the only
+// thing standing between one bad connection attempt and this app going
+// permanently silent with nothing in the log to explain why.
+func subscribeLoop() {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 
-	for ctx.Err() == nil {
-		connected := subscribeOnce(ctx, channel)
-		if ctx.Err() != nil {
-			return
-		}
+	for {
+		connected := runSubscribeOnce()
 		if connected {
 			backoff = time.Second
+		} else {
+			logger.Info("reconnecting", "stage", "backoff", "delay", backoff.String())
 		}
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
+		time.Sleep(backoff)
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
@@ -187,12 +285,28 @@ func subscribeLoop(ctx context.Context, channel string) {
 	}
 }
 
-// subscribeOnce dials KGATE_WS_SERVER, subscribes to channel, and reads
-// events (dispatching each to handleEvent, then acking it on success)
-// until the connection drops or ctx is canceled. connected reports
-// whether the dial itself succeeded, so subscribeLoop only resets its
-// backoff after an actual successful connection, not a failed dial.
-func subscribeOnce(ctx context.Context, channel string) (connected bool) {
+// runSubscribeOnce calls subscribeOnce with a recover() around it, so a
+// panic anywhere in connection setup or the read loop — not just inside
+// handleEvent, which dispatchEvent already guards — logs and is treated
+// as an ordinary disconnect (return false, triggering backoff and retry)
+// rather than taking down the goroutine subscribeLoop depends on.
+func runSubscribeOnce() (connected bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("subscribeOnce panicked", "stage", "connect", "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
+			connected = false
+		}
+	}()
+	return subscribeOnce()
+}
+
+// subscribeOnce dials KGATE_WS_SERVER, subscribes to every channel
+// currently in the shared set, and reads events (dispatching each to
+// handleEvent via dispatchEvent, then acking it on success) until the
+// connection drops. connected reports whether the dial itself succeeded,
+// so subscribeLoop only resets its backoff after an actual successful
+// connection, not a failed dial.
+func subscribeOnce() (connected bool) {
 	wsURL := os.Getenv("KGATE_WS_SERVER")
 	if wsURL == "" {
 		return false
@@ -201,55 +315,277 @@ func subscribeOnce(ctx context.Context, channel string) (connected bool) {
 	header.Set("X-Client-Id", os.Getenv("KGATE_CLIENT_ID"))
 	header.Set("Origin", os.Getenv("KGATE_ORIGIN"))
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	// A bounded dial timeout, separate from gorilla's own
+	// HandshakeTimeout, guarantees this call returns within 15s even if
+	// something in between (DNS, a half-dead proxy) hangs rather than
+	// erroring — so subscribeLoop's reconnect loop can never stall
+	// indefinitely on a single dial attempt.
+	dialCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.DefaultDialer.DialContext(dialCtx, wsURL, header)
 	if err != nil {
+		logger.Warn("dial failed", "stage", "dial", "error", err.Error())
 		return false
 	}
 	defer conn.Close()
 
-	// ReadJSON below blocks with no ctx awareness of its own — closing
-	// the connection is what unblocks it once Unsubscribe cancels ctx.
+	logger.Info("connected", "stage", "connect")
+
+	// Keep the connection alive. A 5s ping cadence with a 15s read
+	// deadline, not the more conventional 20s/60s: measured behavior
+	// against a live kgate deployment showed a socket dying after just
+	// ~10s of silence following a burst of deliveries — well before a
+	// slower cadence would ever get a chance to send anything. Something
+	// in the path (a proxy/LB idle timeout, or kgate's own server
+	// closing subscribers with nothing pending) times out an idle
+	// connection faster than you'd expect. If your deployment's actual
+	// idle-timeout value turns out to be different, tune these to match
+	// it — this is a safe default, not a guarantee.
+	const (
+		pingPeriod = 5 * time.Second
+		pongWait   = 15 * time.Second
+	)
+
+	// Any pong from the server extends the read deadline.
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	// Send WebSocket ping frames periodically.
+	done := make(chan struct{})
+	defer close(done)
+
 	go func() {
-		<-ctx.Done()
-		conn.Close()
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				connMu.Lock()
+				err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
+				connMu.Unlock()
+
+				if err != nil {
+					logger.Warn("ping failed", "stage", "ping", "error", err.Error())
+					// A ping failure means the write side is already
+					// broken, but the read loop below may still be
+					// blocked waiting up to pongWait for data that will
+					// never come (a write-only failure doesn't always
+					// surface as a read error). Force-closing here wakes
+					// ReadJSON immediately with an error instead of
+					// leaving the connection in a known-dead state for
+					// up to pongWait longer than necessary.
+					conn.Close()
+					return
+				}
+
+			case <-done:
+				return
+			}
+		}
 	}()
 
-	if err := conn.WriteJSON(subscribeFrame{Type: "subscribe", Channel: channel}); err != nil {
-		return true
+	subMu.Lock()
+	subs := make([]string, 0, len(channels))
+	for ch := range channels {
+		subs = append(subs, ch)
 	}
+	subMu.Unlock()
+
+	connMu.Lock()
+	active = conn
+	for _, ch := range subs {
+		if err := conn.WriteJSON(subscribeFrame{Type: "subscribe", Channel: ch}); err != nil {
+			connMu.Unlock()
+			logger.Warn("subscribe frame write failed", "stage", "subscribe", "channel", ch, "error", err.Error())
+			return true
+		}
+	}
+	connMu.Unlock()
+	logger.Info("subscribed", "stage", "subscribe", "channels", subs)
+
+	defer func() {
+		connMu.Lock()
+		if active == conn {
+			active = nil
+		}
+		connMu.Unlock()
+	}()
 
 	for {
 		var frame inboundFrame
 		if err := conn.ReadJSON(&frame); err != nil {
+			logDisconnect(err)
 			return true
 		}
 		if frame.Type != "event" {
 			continue
 		}
-		if err := handleEvent(ctx, frame.Channel, frame.Payload); err != nil {
-			continue // don't ack — leave it for kgate to redeliver
+
+		logger.Info("event received", "stage", "receive", "channel", frame.Channel, "message_id", frame.MessageID)
+
+		procErr := dispatchEvent(context.Background(), frame.Channel, frame.MessageID, frame.Payload)
+		switch {
+		case procErr != nil && isPermanent(procErr):
+			// Acked anyway, deliberately: see permanentError's doc
+			// comment. Still logged at ERROR so it isn't silently
+			// dropped.
+			logger.Error("event undecodable, acking to stop redelivery", "stage", "process", "channel", frame.Channel, "message_id", frame.MessageID, "error", procErr.Error())
+		case procErr != nil:
+			// Not acked: leaving it unacked means kgate may redeliver
+			// it, giving a transient failure a chance to succeed on retry.
+			logger.Error("event processing failed", "stage", "process", "channel", frame.Channel, "message_id", frame.MessageID, "error", procErr.Error())
+			continue
+		default:
+			logger.Info("event processed", "stage", "process", "channel", frame.Channel, "message_id", frame.MessageID)
 		}
-		_ = conn.WriteJSON(ackFrame{Type: "ack", Channel: frame.Channel, MessageID: frame.MessageID})
+
+		connMu.Lock()
+		ackErr := conn.WriteJSON(ackFrame{Type: "ack", Channel: frame.Channel, MessageID: frame.MessageID})
+		connMu.Unlock()
+
+		if ackErr != nil {
+			logger.Error("ack write failed", "stage", "ack", "channel", frame.Channel, "message_id", frame.MessageID, "error", ackErr.Error())
+		} else {
+			logger.Info("ack sent", "stage", "ack", "channel", frame.Channel, "message_id", frame.MessageID)
+		}
 	}
 }
 
-// handleEvent is called for every event, however it arrived — a live
-// Subscribe connection or the /webhooks/kgate fallback below. Implement
-// your event-processing logic here, switching on channel for per-channel
-// behavior. Returning a non-nil error from a live subscription prevents
-// the event from being acked (so kgate may redeliver it); from the
-// webhook path it results in a 500 response.
-func handleEvent(ctx context.Context, channel string, payload json.RawMessage) error {
-	// TODO: process the event
+// logDisconnect logs a ReadJSON failure, distinguishing a clean WebSocket
+// close (with its code and reason) from an abnormal one (code 1006 — no
+// close frame at all, meaning the TCP connection was cut from underneath
+// this process rather than closed by kgate itself) so it's possible to
+// tell "kgate closed us deliberately" from "the network/a proxy killed
+// the connection" straight from the log.
+func logDisconnect(err error) {
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		logger.Warn("disconnected", "stage", "disconnect", "close_code", closeErr.Code, "close_text", closeErr.Text)
+		return
+	}
+	logger.Warn("disconnected", "stage", "disconnect", "error", err.Error())
+}
+
+// permanentError marks an event-processing failure as one no amount of
+// redelivery can fix — a malformed payload that will never successfully
+// decode, for instance, as opposed to a downstream dependency (a database
+// call, an external API) that might succeed if retried a moment later.
+// The distinction matters specifically because of how kgate redelivers:
+// an unacked event may come back on every future reconnect, so leaving a
+// permanently-undecodable event unacked means that exact event resurfaces
+// as a fresh "processing failed" log line on literally every reconnect
+// for the rest of the process's life. Wrap a decode error in handleEvent
+// with permanentf rather than fmt.Errorf so it gets acked once and logged
+// loudly, instead of recurring forever.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// permanentf wraps a formatted error as permanent — see permanentError.
+func permanentf(format string, args ...any) error {
+	return &permanentError{fmt.Errorf(format, args...)}
+}
+
+// isPermanent reports whether err (or anything it wraps) was marked
+// permanent by permanentf.
+func isPermanent(err error) bool {
+	var p *permanentError
+	return errors.As(err, &p)
+}
+
+// dispatchEvent calls handleEvent, recovering any panic it raises so a
+// single malformed or unexpected event can never take down this
+// goroutine — and, since this goroutine backs the process's only
+// WebSocket connection with no other supervisor watching it, can never
+// take down the whole process either.
+func dispatchEvent(ctx context.Context, channel, messageID string, payload json.RawMessage) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+			logger.Error("event handler panicked",
+				"stage", "process",
+				"channel", channel,
+				"message_id", messageID,
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	return handleEvent(ctx, channel, payload)
+}
+
+// unwrapPayload undoes kgate's JSON string-encoding of every delivered
+// payload — the wire format is `{"channel": "...", "payload":
+// "<JSON-encoded string>"}`, and kgate passes a publisher's payload
+// through byte-for-byte, so every event arrives here as a JSON string
+// whose *content* is the real object/array, not the object/array itself.
+// Call this on payload before decoding it in handleEvent — every
+// json.Unmarshal(payload, ...) will otherwise fail with "cannot unmarshal
+// string into Go value of type ...". Unwrapped structurally (does it
+// parse as a JSON string?) rather than assumed, so a frame that ever
+// arrives already-unwrapped still decodes instead of erroring. Recurses
+// in case of more than one encoding layer; stops and returns raw as soon
+// as it no longer decodes as a JSON string.
+func unwrapPayload(raw json.RawMessage) json.RawMessage {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return raw
+	}
+	return unwrapPayload(json.RawMessage(s))
+}
+
+// EventHandler processes every event, however it arrived — a live
+// Subscribe connection (via dispatchEvent, which recovers a panic here)
+// or the /webhooks/kgate fallback below. It's a package variable, not a
+// fixed function, so services/kgate (generated by `nexler init kgate`)
+// can inject your app's real event-processing logic via its own init()
+// without this file ever needing to change again. Switch on channel for
+// per-channel behavior; payload has already been unwrapped (see
+// unwrapPayload's doc comment) by the time handleEvent calls this.
+// Returning a non-nil error from a live subscription prevents the event
+// from being acked (so kgate may redeliver it) unless the error is
+// permanent (see permanentError), in which case it's acked anyway; from
+// the webhook path a permanent error results in a 400 response, any
+// other error in a 500. Defaults to a no-op that drops every event.
+var EventHandler func(ctx context.Context, channel string, payload json.RawMessage) error = defaultEventHandler
+
+func defaultEventHandler(ctx context.Context, channel string, payload json.RawMessage) error {
 	return nil
+}
+
+func handleEvent(ctx context.Context, channel string, payload json.RawMessage) error {
+	return EventHandler(ctx, channel, unwrapPayload(payload))
+}
+
+// OnStartup runs once, from Register's background goroutine (right after
+// ResumeAll), to subscribe to whatever channels this app cares about at
+// startup. services/kgate's init() overrides this with your app's real
+// startup subscriptions — same injection mechanism as EventHandler above.
+// Defaults to the "test" smoke-test subscribe kept from before this
+// indirection existed: verifies the whole pipeline (core DB registry +
+// WebSocket connectivity) works end to end on a fresh app. Subscribe is
+// idempotent for an already-subscribed channel, so leaving this default in
+// place is harmless even once services/kgate's own Init has run.
+var OnStartup func(ctx context.Context) = defaultOnStartup
+
+func defaultOnStartup(ctx context.Context) {
+	if err := Subscribe(ctx, "test"); err != nil {
+		log.Printf("kgate: subscribing to test channel: %v", err)
+	}
 }
 
 // HandleWebhook is the fallback delivery path for events missed while
 // this app's WebSocket connection was down: verifies X-Signature
 // (HMAC-SHA256 of the raw body, keyed by KGATE_WEBHOOK_SECRET) before
-// decoding and dispatching to handleEvent. Wired automatically at
-// POST /webhooks/kgate by Register (called from routes/public/public.go —
-// done automatically by `nexler init kgate`).
+// decoding and dispatching to handleEvent via dispatchEvent. Wired
+// automatically at POST /webhooks/kgate by Register (called from
+// routes/public/public.go — done automatically by `nexler init kgate`).
 //
 // Registering this app's public /webhooks/kgate URL *with* kgate's server
 // as this client's fallback endpoint is a separate, manual step — no such
@@ -276,7 +612,11 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := handleEvent(r.Context(), event.Channel, event.Payload); err != nil {
+	if err := dispatchEvent(r.Context(), event.Channel, "", event.Payload); err != nil {
+		if isPermanent(err) {
+			http.Error(w, "undecodable payload", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -309,14 +649,6 @@ func Register(mux *http.ServeMux) {
 		if err := ResumeAll(context.Background()); err != nil {
 			log.Printf("kgate: resuming channels: %v", err)
 		}
-		// Subscribes to a channel named "test" as a built-in smoke test —
-		// verifies the whole pipeline (core DB registry + WebSocket
-		// connectivity) works end to end on a fresh app. Subscribe is
-		// idempotent for an already-subscribed channel, so this is safe to
-		// leave in; remove it once you've confirmed kgate is wired
-		// correctly, or if a permanent "test" channel isn't wanted.
-		if err := Subscribe(context.Background(), "test"); err != nil {
-			log.Printf("kgate: subscribing to test channel: %v", err)
-		}
+		OnStartup(context.Background())
 	}()
 }

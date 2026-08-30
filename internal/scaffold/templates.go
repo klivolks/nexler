@@ -39,6 +39,12 @@ var kpassTemplateFS embed.FS
 
 const kpassTmpl = "kpass_templates/kpass.go.tmpl"
 
+// kpassServiceTmpl renders services/kpass/kpass.go — a one-time-written
+// wrapper around the kpass client for the app's own authorization calls,
+// generated alongside kpassTmpl but never touched again by `nexler
+// update` (see kpass.go's NewKpass and ensureKpassService).
+const kpassServiceTmpl = "kpass_templates/kpass_service.go.tmpl"
+
 // kgateTemplateFS embeds the kgate integration template used by
 // `nexler init kgate`, same dependency-free principle as templateFS.
 //
@@ -46,6 +52,12 @@ const kpassTmpl = "kpass_templates/kpass.go.tmpl"
 var kgateTemplateFS embed.FS
 
 const kgateTmpl = "kgate_templates/kgate.go.tmpl"
+
+// kgateServiceTmpl renders services/kgate/kgate.go — a one-time-written
+// home for the app's own event-processing/startup-subscription logic,
+// generated alongside kgateTmpl but never touched again by `nexler
+// update` (see kgate.go's NewKgate and ensureKgateServiceExtraction).
+const kgateServiceTmpl = "kgate_templates/kgate_service.go.tmpl"
 
 // ciTemplateFS embeds the release-workflow templates used by `nexler init
 // ci`, same dependency-free principle as templateFS. Both are fully

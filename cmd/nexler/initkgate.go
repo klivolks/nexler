@@ -25,12 +25,14 @@ func runInitKgate(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Added kgate/kgate.go, wired its /webhooks/kgate fallback route into routes/public/public.go, and added")
+	fmt.Println("Added kgate/kgate.go and services/kgate/kgate.go, wired both into routes/public/public.go, and added")
 	fmt.Println("KGATE_CLIENT_ID/KGATE_WS_SERVER/KGATE_HTTP_SERVER/KGATE_ORIGIN/KGATE_WEBHOOK_SECRET to .env.")
 	fmt.Println("Next steps:")
 	fmt.Println("  1. Fill in .env's KGATE_* values.")
 	fmt.Println("  2. Run \"go mod tidy\" — this pulls in github.com/gorilla/websocket, which needs network access once.")
 	fmt.Println("  3. Run (or re-run) \"nexler init db\" to provision core_kgate_channels on your core database.")
-	fmt.Println("  4. Call kgate.Subscribe(ctx, channel) / kgate.Publish(ctx, channel, payload) from your own code, and edit kgate.handleEvent.")
-	fmt.Println("     (kgate.Register already resumes any previously recorded channel automatically on startup — no manual wiring needed.)")
+	fmt.Println("  4. Edit services/kgate/kgate.go's Init/HandleEvent for your app's real startup subscriptions and event-processing logic.")
+	fmt.Println("     Call kgate.Publish(ctx, channel, payload) from your own code to publish events; kgate.Subscribe/Unsubscribe from")
+	fmt.Println("     wherever a workflow needs to start/stop listening to a channel dynamically.")
+	fmt.Println("     (kgate/kgate.go itself is nexler-owned infrastructure — never edit it; services/kgate/kgate.go is yours.)")
 }

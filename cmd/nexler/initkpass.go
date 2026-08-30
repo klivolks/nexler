@@ -22,6 +22,7 @@ func runInitKpass(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Added kpass/kpass.go and KPASS_URL/KPASS_CLIENT_ID/KPASS_API_SECRET to .env.")
-	fmt.Println("Fill in .env's KPASS_* values, then call kpass.Check(ctx, userID, resource, nil) from your handlers/services.")
+	fmt.Println("Added kpass/kpass.go, services/kpass/kpass.go, and KPASS_URL/KPASS_CLIENT_ID/KPASS_API_SECRET to .env.")
+	fmt.Println("Fill in .env's KPASS_* values, then call services/kpass's CheckAccess(ctx, userID, resource, nil) from your handlers/services")
+	fmt.Println("(rather than calling kpass.Check directly), so every authorization decision funnels through one place you can extend later.")
 }

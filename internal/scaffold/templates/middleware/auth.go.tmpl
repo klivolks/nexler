@@ -57,9 +57,9 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 // service key sets auth.ContextWithService to the calling service's
 // core_services name, AND auth.ContextWithSubject to that same name — not
 // because a service should pass user-level authorization, but so
-// subject-reading code (e.g. a kpass.Check-style permission gate, if one
-// is added later) has something to evaluate instead of unconditionally
-// denying "no subject."
+// subject-reading code (e.g. a services/kpass.CheckAccess-style
+// permission gate, if one is added later) has something to evaluate
+// instead of unconditionally denying "no subject."
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
@@ -177,9 +177,9 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 // service key sets auth.ContextWithService to the calling service's
 // core_services name, AND auth.ContextWithSubject to that same name — not
 // because a service should pass user-level authorization, but so
-// subject-reading code (e.g. a kpass.Check-style permission gate, if one
-// is added later) has something to evaluate instead of unconditionally
-// denying "no subject."
+// subject-reading code (e.g. a services/kpass.CheckAccess-style
+// permission gate, if one is added later) has something to evaluate
+// instead of unconditionally denying "no subject."
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && token != "" {
