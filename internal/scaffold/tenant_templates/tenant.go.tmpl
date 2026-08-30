@@ -1,0 +1,154 @@
+// Package tenant is an independent, opt-in store for tenant
+// organizations — deliberately NOT part of core (see internal/scaffold's
+// own "nexler init tenant" doc comment): whether an app has a
+// multi-tenant model at all is a provider/business-specific decision, not
+// something every -db app needs, unlike core_config/core_error_log.
+//
+// A TenantOrg's Settings is a free-form blob of organization-specific
+// configuration — this package makes no assumption about its shape.
+// Scoped to List and Delete only in this release: there's no generated
+// Create/Update path yet, so rows are expected to arrive some other way
+// (an external system, a hand-written endpoint, or a future nexler
+// feature) — ID is a caller-assigned string, not a nexler-generated one.
+//
+// Provisioning (the tenant_orgs table for a SQL core) is done by `nexler
+// init db`, conditional on this package existing on disk — see that
+// command's own doc comment.
+package tenant
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+{{- if eq .CoreDBAccessor "Mongo" }}
+
+	"{{ .ModulePath }}/db"
+	"{{ .ModulePath }}/mongo"
+{{- else }}
+
+	"encoding/json"
+
+	"{{ .ModulePath }}/{{ .CoreDB }}"
+{{- end }}
+)
+
+// TenantOrg is one tenant organization record.
+type TenantOrg struct {
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	Settings  map[string]any `json:"settings,omitempty"`
+	Status    string         `json:"status"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+{{- if eq .CoreDBAccessor "Mongo" }}
+
+type tenantOrgDoc struct {
+	ID        string         `bson:"_id"`
+	Name      string         `bson:"name"`
+	Settings  map[string]any `bson:"settings,omitempty"`
+	Status    string         `bson:"status"`
+	CreatedAt time.Time      `bson:"created_at"`
+	UpdatedAt time.Time      `bson:"updated_at"`
+}
+
+func toTenantOrg(d tenantOrgDoc) TenantOrg {
+	return TenantOrg{ID: d.ID, Name: d.Name, Settings: d.Settings, Status: d.Status, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
+}
+
+func tenantOrgCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("tenant_orgs"), true
+}
+
+// ListTenantOrgs returns every tenant_orgs record. No pagination this
+// release.
+func ListTenantOrgs(ctx context.Context) ([]TenantOrg, error) {
+	coll, ok := tenantOrgCollection()
+	if !ok {
+		return nil, fmt.Errorf("tenant: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	docs, err := mongo.Get[tenantOrgDoc](ctx, coll, tenantOrgDoc{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TenantOrg, len(docs))
+	for i, d := range docs {
+		out[i] = toTenantOrg(d)
+	}
+	return out, nil
+}
+
+// DeleteTenantOrg permanently removes id's tenant_orgs record — a real,
+// hard delete (the row is gone), unlike core.RevokeService's soft
+// status-flip. There is no undo.
+func DeleteTenantOrg(ctx context.Context, id string) error {
+	coll, ok := tenantOrgCollection()
+	if !ok {
+		return fmt.Errorf("tenant: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	return mongo.Delete(ctx, coll, tenantOrgDoc{ID: id})
+}
+{{- else }}
+
+type tenantOrgRow struct {
+	ID           string    `db:"id"`
+	Name         string    `db:"name"`
+	SettingsJSON *string   `db:"settings"`
+	Status       string    `db:"status"`
+	CreatedAt    time.Time `db:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at"`
+}
+
+func toTenantOrg(r tenantOrgRow) (TenantOrg, error) {
+	t := TenantOrg{ID: r.ID, Name: r.Name, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	if r.SettingsJSON != nil && *r.SettingsJSON != "" {
+		if err := json.Unmarshal([]byte(*r.SettingsJSON), &t.Settings); err != nil {
+			return TenantOrg{}, err
+		}
+	}
+	return t, nil
+}
+
+// ListTenantOrgs returns every tenant_orgs record. No pagination this
+// release.
+func ListTenantOrgs(ctx context.Context) ([]TenantOrg, error) {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return nil, fmt.Errorf("tenant: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	rows, err := {{ .CoreDB }}.Get[tenantOrgRow](ctx, conn.Table("tenant_orgs"), tenantOrgRow{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TenantOrg, len(rows))
+	for i, r := range rows {
+		t, err := toTenantOrg(r)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = t
+	}
+	return out, nil
+}
+
+// DeleteTenantOrg permanently removes id's tenant_orgs record — a real,
+// hard delete (the row is gone), unlike core.RevokeService's soft
+// status-flip. There is no undo.
+func DeleteTenantOrg(ctx context.Context, id string) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("tenant: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	return {{ .CoreDB }}.Delete(ctx, conn.Table("tenant_orgs"), tenantOrgRow{ID: id})
+}
+{{- end }}

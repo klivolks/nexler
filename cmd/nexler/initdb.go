@@ -41,7 +41,7 @@ import (
 // runInit dispatches `nexler init ...`.
 func runInit(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "nexler: usage: nexler init db [-dir <app-dir>]\n              nexler init kpass [-dir <app-dir>]\n              nexler init kgate [-dir <app-dir>]\n              nexler init docker [-dir <app-dir>]\n              nexler init ci [-dir <app-dir>] [-registry dockerhub|github]\n              nexler init kube [-dir <app-dir>] [-registry dockerhub|github] [-image <ref>] [-namespace <ns>] [-replicas <n>]")
+		fmt.Fprintln(os.Stderr, "nexler: usage: nexler init db [-dir <app-dir>]\n              nexler init kpass [-dir <app-dir>]\n              nexler init kgate [-dir <app-dir>]\n              nexler init tenant [-dir <app-dir>]\n              nexler init docker [-dir <app-dir>]\n              nexler init ci [-dir <app-dir>] [-registry dockerhub|github]\n              nexler init kube [-dir <app-dir>] [-registry dockerhub|github] [-image <ref>] [-namespace <ns>] [-replicas <n>]")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -51,6 +51,8 @@ func runInit(args []string) {
 		runInitKpass(args[1:])
 	case "kgate":
 		runInitKgate(args[1:])
+	case "tenant":
+		runInitTenant(args[1:])
 	case "docker":
 		runInitDocker(args[1:])
 	case "ci":
@@ -58,7 +60,7 @@ func runInit(args []string) {
 	case "kube":
 		runInitKube(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "nexler: unknown resource %q for init\n\nsupported: db, kpass, kgate, docker, ci, kube\n", args[0])
+		fmt.Fprintf(os.Stderr, "nexler: unknown resource %q for init\n\nsupported: db, kpass, kgate, tenant, docker, ci, kube\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -79,9 +81,9 @@ func runInitDB(args []string) {
 
 	switch dbType {
 	case "mysql", "postgres", "mssql":
-		err = provisionSQL(ctx, dbType, dsn)
+		err = provisionSQL(ctx, dbType, dsn, *dir)
 	case "mongo":
-		err = provisionMongo(ctx, dsn)
+		err = provisionMongo(ctx, dsn, *dir)
 	default:
 		err = fmt.Errorf("unsupported core database type %q", dbType)
 	}
@@ -90,7 +92,16 @@ func runInitDB(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Provisioned core data schema (core_config, core_error_log, core_kgate_channels, core_users, core_services) on the core database.")
+	fmt.Println("Provisioned core data schema (core_config, core_error_log, core_kgate_channels, core_users, core_services, core_tasks, core_audit_log) on the core database.")
+}
+
+// tenantOrgEnabled reports whether appDir ran `nexler init tenant` — the
+// signal to also provision tenant_orgs here, since that command itself
+// never touches a live database connection (see tenant.go's own doc
+// comment) and provisioning stays centralized in this one command.
+func tenantOrgEnabled(appDir string) bool {
+	_, err := os.Stat(filepath.Join(appDir, "tenant", "tenant.go"))
+	return err == nil
 }
 
 // readCoreConnection reads appDir's .env for its core connection's
@@ -142,7 +153,7 @@ func sqlDriverName(dbType string) string {
 	}
 }
 
-func provisionSQL(ctx context.Context, dbType, dsn string) error {
+func provisionSQL(ctx context.Context, dbType, dsn, appDir string) error {
 	conn, err := sql.Open(sqlDriverName(dbType), dsn)
 	if err != nil {
 		return err
@@ -156,6 +167,11 @@ func provisionSQL(ctx context.Context, dbType, dsn string) error {
 	stmts = append(stmts, kgateChannelStatements(dbType)...)
 	stmts = append(stmts, usersStatements(dbType)...)
 	stmts = append(stmts, servicesStatements(dbType)...)
+	stmts = append(stmts, taskStatements(dbType)...)
+	stmts = append(stmts, auditLogStatements(dbType)...)
+	if tenantOrgEnabled(appDir) {
+		stmts = append(stmts, tenantOrgStatements(dbType)...)
+	}
 	for _, stmt := range stmts {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("running provisioning statement: %w\n%s", err, stmt)
@@ -515,7 +531,182 @@ func servicesStatements(dbType string) []string {
 	}
 }
 
-func provisionMongo(ctx context.Context, uri string) error {
+// taskStatements returns core_tasks' provisioning statements for dbType —
+// a table plus a core_task_upsert stored procedure (core.SyncTasks
+// upserts by name on every startup). path_params/req_schema/resp_schema
+// are stored as JSON-encoded TEXT — SQL portability across mysql/
+// postgres/mssql matters more here than native JSON column types.
+func taskStatements(dbType string) []string {
+	switch dbType {
+	case "mysql":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS core_tasks (" +
+				"name VARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"require_auth BOOLEAN NOT NULL DEFAULT FALSE, " +
+				"path_params TEXT, " +
+				"req_schema TEXT, " +
+				"resp_schema TEXT, " +
+				"synced_at DATETIME NOT NULL)",
+			"DROP PROCEDURE IF EXISTS core_task_upsert",
+			"CREATE PROCEDURE core_task_upsert(IN p_name VARCHAR(255), IN p_require_auth BOOLEAN, IN p_path_params TEXT, IN p_req_schema TEXT, IN p_resp_schema TEXT) " +
+				"BEGIN " +
+				"INSERT INTO core_tasks (name, require_auth, path_params, req_schema, resp_schema, synced_at) " +
+				"VALUES (p_name, p_require_auth, p_path_params, p_req_schema, p_resp_schema, NOW()) " +
+				"ON DUPLICATE KEY UPDATE require_auth = p_require_auth, path_params = p_path_params, req_schema = p_req_schema, resp_schema = p_resp_schema, synced_at = NOW(); " +
+				"END",
+		}
+	case "postgres":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS core_tasks (" +
+				"name TEXT PRIMARY KEY, " +
+				"require_auth BOOLEAN NOT NULL DEFAULT FALSE, " +
+				"path_params TEXT, " +
+				"req_schema TEXT, " +
+				"resp_schema TEXT, " +
+				"synced_at TIMESTAMPTZ NOT NULL)",
+			"CREATE OR REPLACE PROCEDURE core_task_upsert(p_name TEXT, p_require_auth BOOLEAN, p_path_params TEXT, p_req_schema TEXT, p_resp_schema TEXT) " +
+				"LANGUAGE plpgsql AS $$ " +
+				"BEGIN " +
+				"INSERT INTO core_tasks (name, require_auth, path_params, req_schema, resp_schema, synced_at) " +
+				"VALUES (p_name, p_require_auth, p_path_params, p_req_schema, p_resp_schema, now()) " +
+				"ON CONFLICT (name) DO UPDATE SET require_auth = p_require_auth, path_params = p_path_params, req_schema = p_req_schema, resp_schema = p_resp_schema, synced_at = now(); " +
+				"END; $$",
+		}
+	case "mssql":
+		return []string{
+			"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'core_tasks') " +
+				"CREATE TABLE core_tasks (" +
+				"[name] NVARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"require_auth BIT NOT NULL DEFAULT 0, " +
+				"path_params NVARCHAR(MAX), " +
+				"req_schema NVARCHAR(MAX), " +
+				"resp_schema NVARCHAR(MAX), " +
+				"synced_at DATETIME2 NOT NULL)",
+			"CREATE OR ALTER PROCEDURE core_task_upsert " +
+				"@p_name NVARCHAR(255), @p_require_auth BIT, @p_path_params NVARCHAR(MAX), @p_req_schema NVARCHAR(MAX), @p_resp_schema NVARCHAR(MAX) AS " +
+				"BEGIN " +
+				"MERGE core_tasks AS target " +
+				"USING (SELECT @p_name AS [name]) AS src " +
+				"ON target.[name] = src.[name] " +
+				"WHEN MATCHED THEN UPDATE SET require_auth = @p_require_auth, path_params = @p_path_params, req_schema = @p_req_schema, resp_schema = @p_resp_schema, synced_at = SYSUTCDATETIME() " +
+				"WHEN NOT MATCHED THEN INSERT ([name], require_auth, path_params, req_schema, resp_schema, synced_at) " +
+				"VALUES (@p_name, @p_require_auth, @p_path_params, @p_req_schema, @p_resp_schema, SYSUTCDATETIME()); " +
+				"END",
+		}
+	default:
+		return nil
+	}
+}
+
+// auditLogStatements returns core_audit_log's provisioning statements for
+// dbType — a table plus a core_audit_log_insert stored procedure
+// (middleware.RegisterTask's auditWrap calls core.LogAudit on every
+// request it wraps). path_params/meta are stored as JSON-encoded TEXT,
+// same portability reasoning as core_tasks above.
+func auditLogStatements(dbType string) []string {
+	switch dbType {
+	case "mysql":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS core_audit_log (" +
+				"id INT AUTO_INCREMENT PRIMARY KEY, " +
+				"occurred_at DATETIME NOT NULL, " +
+				"actor VARCHAR(255) NOT NULL DEFAULT '', " +
+				"actor_type VARCHAR(32) NOT NULL DEFAULT '', " +
+				"action VARCHAR(255) NOT NULL, " +
+				"path_params TEXT, " +
+				"meta TEXT)",
+			"DROP PROCEDURE IF EXISTS core_audit_log_insert",
+			"CREATE PROCEDURE core_audit_log_insert(IN p_actor VARCHAR(255), IN p_actor_type VARCHAR(32), IN p_action VARCHAR(255), IN p_path_params TEXT, IN p_meta TEXT) " +
+				"BEGIN " +
+				"INSERT INTO core_audit_log (occurred_at, actor, actor_type, action, path_params, meta) VALUES (NOW(), p_actor, p_actor_type, p_action, p_path_params, p_meta); " +
+				"END",
+		}
+	case "postgres":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS core_audit_log (" +
+				"id SERIAL PRIMARY KEY, " +
+				"occurred_at TIMESTAMPTZ NOT NULL, " +
+				"actor TEXT NOT NULL DEFAULT '', " +
+				"actor_type TEXT NOT NULL DEFAULT '', " +
+				"action TEXT NOT NULL, " +
+				"path_params TEXT, " +
+				"meta TEXT)",
+			"CREATE OR REPLACE PROCEDURE core_audit_log_insert(p_actor TEXT, p_actor_type TEXT, p_action TEXT, p_path_params TEXT, p_meta TEXT) " +
+				"LANGUAGE plpgsql AS $$ " +
+				"BEGIN " +
+				"INSERT INTO core_audit_log (occurred_at, actor, actor_type, action, path_params, meta) VALUES (now(), p_actor, p_actor_type, p_action, p_path_params, p_meta); " +
+				"END; $$",
+		}
+	case "mssql":
+		return []string{
+			"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'core_audit_log') " +
+				"CREATE TABLE core_audit_log (" +
+				"id INT IDENTITY(1,1) PRIMARY KEY, " +
+				"occurred_at DATETIME2 NOT NULL, " +
+				"actor NVARCHAR(255) NOT NULL DEFAULT '', " +
+				"actor_type NVARCHAR(32) NOT NULL DEFAULT '', " +
+				"action NVARCHAR(255) NOT NULL, " +
+				"path_params NVARCHAR(MAX), " +
+				"meta NVARCHAR(MAX))",
+			"CREATE OR ALTER PROCEDURE core_audit_log_insert " +
+				"@p_actor NVARCHAR(255), @p_actor_type NVARCHAR(32), @p_action NVARCHAR(255), @p_path_params NVARCHAR(MAX), @p_meta NVARCHAR(MAX) AS " +
+				"BEGIN " +
+				"INSERT INTO core_audit_log (occurred_at, actor, actor_type, action, path_params, meta) VALUES (SYSUTCDATETIME(), @p_actor, @p_actor_type, @p_action, @p_path_params, @p_meta); " +
+				"END",
+		}
+	default:
+		return nil
+	}
+}
+
+// tenantOrgStatements returns tenant_orgs' provisioning statements for
+// dbType — a plain table, no stored procedures: List/Delete (the only
+// operations `nexler init tenant` generates in this release) are plain
+// SELECT/DELETE, and there's no upsert/create path in this schema yet to
+// need one. id is a caller-assigned string (a business identifier or
+// external system's own ID), not a nexler-generated auto-increment —
+// tenant_orgs has no generated Create path of its own. settings holds
+// free-form, provider/business-specific organization configuration as
+// JSON-encoded TEXT.
+func tenantOrgStatements(dbType string) []string {
+	switch dbType {
+	case "mysql":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS tenant_orgs (" +
+				"id VARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"name VARCHAR(255) NOT NULL, " +
+				"settings TEXT, " +
+				"status VARCHAR(32) NOT NULL DEFAULT 'active', " +
+				"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+				"updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
+		}
+	case "postgres":
+		return []string{
+			"CREATE TABLE IF NOT EXISTS tenant_orgs (" +
+				"id TEXT PRIMARY KEY, " +
+				"name TEXT NOT NULL, " +
+				"settings TEXT, " +
+				"status TEXT NOT NULL DEFAULT 'active', " +
+				"created_at TIMESTAMPTZ NOT NULL DEFAULT now(), " +
+				"updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+		}
+	case "mssql":
+		return []string{
+			"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'tenant_orgs') " +
+				"CREATE TABLE tenant_orgs (" +
+				"[id] NVARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"name NVARCHAR(255) NOT NULL, " +
+				"settings NVARCHAR(MAX), " +
+				"status NVARCHAR(32) NOT NULL DEFAULT 'active', " +
+				"created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(), " +
+				"updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME())",
+		}
+	default:
+		return nil
+	}
+}
+
+func provisionMongo(ctx context.Context, uri, appDir string) error {
 	dbName, err := mongoDatabaseName(uri)
 	if err != nil {
 		return err
@@ -584,11 +775,38 @@ func provisionMongo(ctx context.Context, uri string) error {
 	}); err != nil {
 		return err
 	}
-	_, err = servicesColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if _, err := servicesColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "key_hash", Value: 1}},
 		Options: options.Index().SetUnique(true),
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+
+	// Unique on name — core.SyncTasks upserts on this field.
+	tasksColl := client.Database(dbName).Collection("core_tasks")
+	if _, err := tasksColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "name", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		return err
+	}
+
+	// Not unique — core_audit_log has no natural key, just a non-unique
+	// index on occurred_at for a future "recent activity" query to
+	// sort/filter on efficiently, same reasoning as core_error_log above.
+	auditLogColl := client.Database(dbName).Collection("core_audit_log")
+	if _, err := auditLogColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "occurred_at", Value: -1}},
+	}); err != nil {
+		return err
+	}
+
+	// tenant_orgs needs no explicit provisioning even when `nexler init
+	// tenant` has generated tenant/tenant.go for this app: List/Delete
+	// only ever address it by Mongo's own default _id index, and Mongo
+	// creates a collection lazily on first insert — nothing to provision
+	// up front, unlike every SQL dialect's own CREATE TABLE below.
+	return nil
 }
 
 // mongoDatabaseName extracts the database name from a Mongo connection

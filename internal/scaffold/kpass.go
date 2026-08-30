@@ -75,7 +75,66 @@ func NewKpass(cfg KpassConfig) error {
 		return fmt.Errorf("generated %s, but could not generate services/kpass/kpass.go: %w", destFile, err)
 	}
 
+	if err := writeKpassPermissionHook(appDir, modulePath); err != nil {
+		return fmt.Errorf("generated %s, but could not wire middleware.PermissionCheck: %w", destFile, err)
+	}
+
 	return nil
+}
+
+// writeKpassPermissionHook writes middleware/permission_kpass.go, wiring
+// middleware.PermissionCheck to services/kpass.CheckAccess — only when
+// this app already has the Task Registry (middleware/task.go); a silent
+// no-op otherwise (an app that predates the Task Registry has no
+// PermissionCheck var to set). Errors if the file already exists, same
+// collision guard as kpass/kpass.go and services/kpass/kpass.go above.
+func writeKpassPermissionHook(appDir, modulePath string) error {
+	if _, err := os.Stat(filepath.Join(appDir, "middleware", "task.go")); err != nil {
+		return nil
+	}
+
+	destFile := filepath.Join(appDir, "middleware", "permission_kpass.go")
+	if _, err := os.Stat(destFile); err == nil {
+		return fmt.Errorf("%s already exists — edit it directly, or remove it first to regenerate", destFile)
+	}
+
+	data := kpassData{ModulePath: modulePath}
+	raw, err := kpassTemplateFS.ReadFile(kpassPermissionTmpl)
+	if err != nil {
+		return fmt.Errorf("reading embedded template %s: %w", kpassPermissionTmpl, err)
+	}
+	content, err := processFile(kpassPermissionTmpl, raw, data)
+	if err != nil {
+		return fmt.Errorf("rendering %s: %w", kpassPermissionTmpl, err)
+	}
+	return os.WriteFile(destFile, content, 0o644)
+}
+
+// ensureKpassPermissionHook brings an app that ran `nexler init kpass`
+// before the Task Registry existed, or ran `nexler update` (adding
+// middleware/task.go) before `nexler init kpass`, up to date: writes
+// middleware/permission_kpass.go if this app has both kpass/kpass.go and
+// middleware/task.go but not yet the hook file. A silent no-op for an app
+// missing either prerequisite.
+func ensureKpassPermissionHook(appDir string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(appDir, "kpass", "kpass.go")); err != nil {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(appDir, "middleware", "task.go")); err != nil {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(appDir, "middleware", "permission_kpass.go")); err == nil {
+		return false, nil
+	}
+
+	modulePath, err := readModulePath(appDir)
+	if err != nil {
+		return false, err
+	}
+	if err := writeKpassPermissionHook(appDir, modulePath); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // writeKpassService renders services/kpass/kpass.go — a one-time,

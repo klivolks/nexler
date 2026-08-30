@@ -113,6 +113,7 @@
         <a href="#cmd-init-db">init db</a>
         <a href="#cmd-init-kpass">init kpass</a>
         <a href="#cmd-init-kgate">init kgate</a>
+        <a href="#cmd-init-tenant">init tenant</a>
         <a href="#cmd-init-docker">init docker</a>
         <a href="#cmd-init-ci">init ci</a>
         <a href="#cmd-init-kube">init kube</a>
@@ -129,6 +130,7 @@
         <h5>Key concepts</h5>
         <a href="#concept-auth">Authentication</a>
         <a href="#concept-service-auth">API-key auth</a>
+        <a href="#concept-task-registry">Task Registry</a>
         <a href="#cmd-admin-api">Admin API</a>
         <a href="#concept-db">Database connections</a>
         <a href="#concept-html">HTML responses</a>
@@ -418,6 +420,18 @@ func HandleEvent(ctx context.Context, channel string, payload json.RawMessage) e
       </div>
     </section>
 
+    <section class="doc-section" id="cmd-init-tenant">
+      <div class="doc-sub">
+        <h3><code>nexler init tenant</code></h3>
+        <span class="badge badge-local">local only</span>
+        <div class="cmd-line">nexler init tenant [-dir &lt;app-dir&gt;]</div>
+        <p>Adds a guarded <code>tenantorg</code> listing/delete admin API to an existing app, for a <code>hub</code> (or similar) app to manage tenants: <code>tenant/tenant.go</code> (<code>TenantOrg{ID, Name, Settings, Status, CreatedAt, UpdatedAt}</code> — <code>Settings</code> is a free-form organization configuration blob; <code>ListTenantOrgs</code>/<code>DeleteTenantOrg</code> only, no generated create/update path yet) and <code>handlers/admin/tenants/tenants.go</code> (<code>GET /admin/tenants</code>, <code>DELETE /admin/tenants/{id}</code>), wired into <code>routes/protected/protected.go</code> automatically. <strong>Not</strong> the same thing as the <code>-multitenant</code> flag (see <a href="#cmd-create-app">create app</a>) — that threads a tenant <code>Org</code> through auth context; this is the actual store of tenant-organization records a hub app manages, and the two are independent.</p>
+        <p>Deliberately <strong>not</strong> part of <code>core/</code> — whether an app has a multi-tenant model at all is provider/business-specific, not something every <code>-db</code> app needs — so this is its own opt-in <code>init</code> command, same shape as <code>init kgate</code>/<code>init kpass</code>. Requires the app to already have a core database connection (<code>-db</code> at <code>create app</code> time) and a JWT-capable <code>-auth</code> choice (<code>jwt</code> or <code>both</code>) — the delete endpoint needs an authenticated caller to gate at all. Both routes go through the <a href="#concept-task-registry">Task Registry</a>'s <code>middleware.RegisterTask</code> — authenticated, not authorized, until <code>nexler init kpass</code> wires a real permission check. <code>DeleteTenantOrg</code> is a real, hard delete — no undo.</p>
+        <div class="code-block"><pre>nexler init tenant -dir ./myapp
+nexler init db -dir ./myapp   <span class="cmt"># provisions tenant_orgs on a SQL core; Mongo needs none</span></pre></div>
+      </div>
+    </section>
+
     <section class="doc-section" id="cmd-init-docker">
       <div class="doc-sub">
         <h3><code>nexler init docker</code></h3>
@@ -577,6 +591,14 @@ userID, ok := auth.Subject(r)</pre></div>
         <p><strong><code>-merge-service-auth</code></strong> is the opt-in alternative: instead of a separate <code>RequireServiceAuth</code>, the <code>X-Api-Secret</code> check is folded into <code>RequireAuth</code> itself, tried after JWT (and session, for <code>-auth both</code>) — so a service/automation caller can hit the exact same <code>-protected</code> routes a human user would, without a route needing a service-only variant of itself. A matching service key still attaches <code>auth.ContextWithService</code>, plus <code>auth.ContextWithSubject</code> set to the service's name, purely so subject-reading code has something to evaluate. Off by default: a pure API service that wants user-only and service-only routes to stay structurally distinct should leave this unset and keep the separate <code>RequireServiceAuth</code>. Retrofit an already-scaffolded app with <code>nexler update -merge-service-auth</code> (a separate, explicit opt-in step, never run automatically by a plain <code>nexler update</code>).</p>
       </div>
 
+      <div class="doc-sub" id="concept-task-registry">
+        <h3>The Task Registry (<code>middleware.RegisterTask</code>)</h3>
+        <p>Every generated route — including the <a href="#cmd-admin-api">Admin API</a> and <a href="#cmd-init-tenant">tenant Admin API</a> — is wired via <code>middleware.RegisterTask(action, requireAuth, reqType, respType, pathParams...)</code> instead of a bare handler or a direct <code>RequireAuth</code> wrap. This is baseline infrastructure generated for every app (<code>task/task.go</code>, <code>middleware/task.go</code>), ported from a proven pattern in one of nexler's own downstream apps.</p>
+        <p><code>task/task.go</code> is an in-process registry describing every route's contract (name, whether it requires auth, path parameters, request/response shapes) — not a job queue; a route's <code>Task</code> never sets an <code>Executor</code>, since it's normally invoked through the API itself, not dispatched in-process. <code>middleware.RegisterTask</code> registers the route, then — when <code>requireAuth</code> is true — runs <code>RequireAuth</code>, then (once set) <code>PermissionCheck</code>, then best-effort audit-logs the call via <code>core.LogAudit</code> (on a core-database app only): actor, correlation ID, session ID, and path parameters.</p>
+        <p><strong><code>middleware.PermissionCheck</code></strong> (<code>func(ctx, subject, action) (bool, error)</code>, nil by default) is the shared guard every protected route now has: <code>RegisterTask</code> calls it, once set, denying with 403 on a false/error result. <code>nexler init kpass</code> wires it automatically to <code>services/kpass.CheckAccess</code> — until then, any authenticated caller may hit any <code>RegisterTask</code>-guarded route.</p>
+        <p>On a core-database app, <code>core.SyncTasks</code> mirrors the registry into <code>core_tasks</code> at startup (best-effort, never fatal) — its request/response JSON schemas reuse the same reflection <code>/openapi.json</code> already does (<code>openapi.JSONSchema</code>) — so provisioning/workflow tooling can read every route's shape straight from the database without the binary running.</p>
+      </div>
+
       <div class="doc-sub" id="concept-multitenant">
         <h3>Multi-tenant Org propagation (<code>-multitenant</code>)</h3>
         <p>Only with <code>-auth jwt|session|both</code> — errors if combined with <code>-auth none</code>, since there's no authenticated subject to attach an Org to. Threads a tenant Org end to end: <code>auth/jwt.go</code>'s <code>Claims.Org</code> field and <code>IssueJWT</code>'s <code>org</code> parameter are already unconditional (present regardless of <code>-multitenant</code>), so a JWT-only app needs no further wiring. <code>-multitenant</code> adds the rest — <code>auth.ContextWithOrg</code>/<code>auth.Org(r)</code> (a context key deliberately distinct from <code>Subject</code>), <code>StartSession</code>/<code>SessionFromRequest</code> gaining an <code>org</code> parameter/return value (only when <code>-auth</code> includes session), and <code>core.User.OrgId</code> (only when a core database connection <em>and</em> a JWT-capable <code>-auth</code> choice are both present — the same eligibility <code>core/users.go</code> itself already has). Whichever credential succeeds, <code>middleware.RequireAuth</code> attaches Org alongside Subject: a JWT's <code>claims.Org</code>, or a session's stored org. A service-key-authenticated request (<code>X-Api-Secret</code>, with <code>-merge-service-auth</code>) never gets an Org attached — a service isn't tied to a tenant org.</p>
@@ -613,7 +635,7 @@ org, ok := auth.Org(r)  <span class="cmt">// scope your own store/service querie
             <tr><td class="flag-name">DELETE /admin/services/{name}</td><td class="flag-desc"><code>core.DeleteService</code> — hard delete, unlike revoke above</td></tr>
           </tbody>
         </table>
-        <div class="callout warn">Every route wraps only in <code>middleware.RequireAuth</code> — that confirms the caller is <em>authenticated</em>, not that they're <em>allowed</em> to manage other users/services. Add your own authorization check (e.g. <code>services/kpass</code>'s <code>CheckAccess</code>, once <code>nexler init kpass</code> has been run) before relying on this in production — deliberately left as a TODO in the generated code rather than assumed by nexler.</div>
+        <div class="callout warn">Every route wraps in <a href="#concept-task-registry"><code>middleware.RegisterTask</code></a> with <code>requireAuth</code> true — that confirms the caller is <em>authenticated</em>, not that they're <em>allowed</em> to manage other users/services. <code>RegisterTask</code>'s <code>PermissionCheck</code> hook is nil until <code>nexler init kpass</code> sets it (to <code>services/kpass</code>'s <code>CheckAccess</code>) — before relying on this in production, run <code>init kpass</code> so it's a real check rather than authentication alone.</div>
         <div class="code-block"><pre>curl -X POST /admin/services -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"billing-svc"}'
 <span class="cmt">// {"name":"billing-svc","key":"a1b2c3..."}  -- key shown exactly once</span></pre></div>
@@ -672,6 +694,14 @@ err = resp.JSON(&amp;out)</pre></div>
       <p class="lead">This page is kept in sync with the CLI by hand, in the same change that alters a command, flag, or documented behavior. Newest first.</p>
 
       <div class="changelog">
+        <div class="change-entry">
+          <div class="change-date">2026-08-31</div>
+          <h4>Task Registry (baseline) + <code>nexler init tenant</code></h4>
+          <p><strong>New, baseline for every app</strong>: every generated route (including the Admin API) is now wired via <code>middleware.RegisterTask(action, requireAuth, reqType, respType, pathParams...)</code> instead of a bare handler or a direct <code>RequireAuth</code> wrap — see <a href="#concept-task-registry">The Task Registry</a>. It registers each route's contract into a new in-process <code>task</code> package, best-effort audit-logs every call via a new <code>core.LogAudit</code> (on a core-database app), and — via a new nil-by-default <code>middleware.PermissionCheck</code> hook — gives every protected route a real, shared authorization gate for the first time: <code>nexler init kpass</code> now wires it automatically to <code>services/kpass.CheckAccess</code>. A core-database app also gets <code>core.SyncTasks</code>, mirroring the registry into a new <code>core_tasks</code> table/collection at startup (reusing <code>/openapi.json</code>'s own reflection via a newly-exported <code>openapi.JSONSchema</code>). <code>nexler update</code> backfills an older app via two new checks, <code>ensureTaskRegistry</code> and <code>ensureKpassPermissionHook</code> — deliberately does not rewrite already-generated routes' wiring, only new ones going forward.</p>
+          <p><strong>New command</strong>: <code>nexler init tenant</code> adds a guarded <code>tenantorg</code> listing/delete admin API (<code>GET /admin/tenants</code>, <code>DELETE /admin/tenants/{id}</code>) for a hub (or similar) app to manage tenants — see <a href="#cmd-init-tenant"><code>nexler init tenant</code></a>. Deliberately independent of <code>core/</code> and of the existing <code>-multitenant</code> flag: a new opt-in <code>tenant/tenant.go</code> package holds free-form per-organization settings, scoped to list/delete only in this release. <code>nexler init db</code> provisions <code>tenant_orgs</code> conditional on that package existing on disk (SQL cores only — Mongo needs no provisioning).</p>
+          <div class="change-tags"><span class="change-tag">auth</span><span class="change-tag">scaffolding</span><span class="change-tag">new command</span></div>
+        </div>
+
         <div class="change-entry">
           <div class="change-date">2026-08-30</div>
           <h4><code>nexler update</code> is now best-effort; <code>mongo/mongo.go</code> anchor and Filter retrofit fixes</h4>

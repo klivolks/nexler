@@ -1,0 +1,90 @@
+{{- if eq .CoreDBAccessor "Mongo" -}}
+package core
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"{{ .ModulePath }}/db"
+	"{{ .ModulePath }}/mongo"
+)
+
+type auditLogDoc struct {
+	OccurredAt time.Time         `bson:"occurred_at"`
+	Actor      string            `bson:"actor"`
+	ActorType  string            `bson:"actor_type"`
+	Action     string            `bson:"action"`
+	PathParams map[string]string `bson:"path_params,omitempty"`
+	Meta       any               `bson:"meta,omitempty"`
+}
+
+func auditLogCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("core_audit_log"), true
+}
+
+// LogAudit records one action to the core_audit_log collection: actor is
+// the calling subject/service, actorType is "user", "service", or
+// "anonymous", pathParams are the route's path parameter values (if any),
+// and meta is any extra JSON-serializable context (e.g. a correlation
+// ID). See middleware.RegisterTask, which calls this automatically for
+// every route it wraps — call it directly yourself for anything else you
+// want in the same log.
+func LogAudit(ctx context.Context, actor, actorType, action string, pathParams map[string]string, meta any) error {
+	coll, ok := auditLogCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	return mongo.Insert(ctx, coll, auditLogDoc{
+		OccurredAt: time.Now().UTC(),
+		Actor:      actor,
+		ActorType:  actorType,
+		Action:     action,
+		PathParams: pathParams,
+		Meta:       meta,
+	})
+}
+{{- else -}}
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"{{ .ModulePath }}/{{ .CoreDB }}"
+)
+
+// LogAudit records one action to the core_audit_log table, via the
+// core_audit_log_insert stored procedure (see `nexler init db`): actor is
+// the calling subject/service, actorType is "user", "service", or
+// "anonymous", pathParams are the route's path parameter values (if any,
+// JSON-encoded), and meta is any extra JSON-serializable context (e.g. a
+// correlation ID). See middleware.RegisterTask, which calls this
+// automatically for every route it wraps — call it directly yourself for
+// anything else you want in the same log.
+func LogAudit(ctx context.Context, actor, actorType, action string, pathParams map[string]string, meta any) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	pathParamsJSON, err := json.Marshal(pathParams)
+	if err != nil {
+		return err
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	_, err = {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_audit_log_insert", actor, actorType, action, string(pathParamsJSON), string(metaJSON))
+	return err
+}
+{{- end }}

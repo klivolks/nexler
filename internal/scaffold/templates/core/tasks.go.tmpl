@@ -1,0 +1,116 @@
+{{- if eq .CoreDBAccessor "Mongo" -}}
+package core
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"{{ .ModulePath }}/db"
+	"{{ .ModulePath }}/mongo"
+	"{{ .ModulePath }}/openapi"
+	"{{ .ModulePath }}/task"
+)
+
+type taskDoc struct {
+	Name        string         `bson:"name"`
+	RequireAuth bool           `bson:"require_auth"`
+	PathParams  []string       `bson:"path_params,omitempty"`
+	ReqSchema   map[string]any `bson:"req_schema,omitempty"`
+	RespSchema  map[string]any `bson:"resp_schema,omitempty"`
+	SyncedAt    time.Time      `bson:"synced_at"`
+}
+
+func taskCollection() (mongo.Collection, bool) {
+	conn, ok := mongo.Conn("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	dbName, ok := db.MongoDatabaseName("core")
+	if !ok {
+		return mongo.Collection{}, false
+	}
+	return conn.Database(dbName).Collection("core_tasks"), true
+}
+
+// SyncTasks mirrors every task.All() entry into the core_tasks
+// collection — each one's API contract (name, whether it requires auth,
+// path parameters, and its request/response JSON schemas, via
+// openapi.JSONSchema) — so provisioning/workflow/permission tooling can
+// read every route's shape straight from the database without the binary
+// running. Called best-effort at startup (see main.go): a failure here
+// never blocks the server from starting.
+func SyncTasks(ctx context.Context) error {
+	coll, ok := taskCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	now := time.Now().UTC()
+	for _, t := range task.All() {
+		doc := taskDoc{
+			Name:        t.Name,
+			RequireAuth: t.RequireAuth,
+			PathParams:  t.PathParams,
+			SyncedAt:    now,
+		}
+		if t.ReqType != nil {
+			doc.ReqSchema = openapi.JSONSchema(t.ReqType)
+		}
+		if t.RespType != nil {
+			doc.RespSchema = openapi.JSONSchema(t.RespType)
+		}
+		if err := mongo.Set(ctx, coll, taskDoc{Name: t.Name}, doc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+{{- else -}}
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"{{ .ModulePath }}/openapi"
+	"{{ .ModulePath }}/{{ .CoreDB }}"
+	"{{ .ModulePath }}/task"
+)
+
+// SyncTasks mirrors every task.All() entry into the core_tasks table, via
+// the core_task_upsert stored procedure (see `nexler init db`) — each
+// one's API contract (name, whether it requires auth, path parameters,
+// and its request/response JSON schemas, via openapi.JSONSchema) so
+// provisioning/workflow/permission tooling can read every route's shape
+// straight from the database without the binary running. Called
+// best-effort at startup (see main.go): a failure here never blocks the
+// server from starting.
+func SyncTasks(ctx context.Context) error {
+	conn, ok := {{ .CoreDB }}.Conn("core")
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	for _, t := range task.All() {
+		pathParamsJSON, err := json.Marshal(t.PathParams)
+		if err != nil {
+			return err
+		}
+		var reqSchema, respSchema []byte
+		if t.ReqType != nil {
+			if reqSchema, err = json.Marshal(openapi.JSONSchema(t.ReqType)); err != nil {
+				return err
+			}
+		}
+		if t.RespType != nil {
+			if respSchema, err = json.Marshal(openapi.JSONSchema(t.RespType)); err != nil {
+				return err
+			}
+		}
+		if _, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_task_upsert", t.Name, t.RequireAuth, string(pathParamsJSON), string(reqSchema), string(respSchema)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+{{- end }}

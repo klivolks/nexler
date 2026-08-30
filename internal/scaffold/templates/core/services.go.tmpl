@@ -117,7 +117,7 @@ func VerifyServiceKey(ctx context.Context, key string) (string, bool, error) {
 	if active {
 		go touchServiceLastUsed(doc.Name)
 	}
-	return doc.Name, active, nil
+	return doc.ID.Hex(), active, nil
 }
 
 // touchServiceLastUsed best-effort records name's most recent
