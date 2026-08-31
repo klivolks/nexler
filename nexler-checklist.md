@@ -338,8 +338,8 @@ the one app that has it finishes it).
   describing each task's API contract to permission-check/audit/workflow/
   provisioning/AI tooling, not enabling non-HTTP execution.
 
-  Two decisions made for when this is actually ported into nexler's own
-  templates (not yet implemented — this is a future task):
+  Two decisions were made for when this was actually ported into nexler's own
+  templates — see `## 0.5.7` item 1 above for exactly how each was resolved:
 
   1. **Baseline, not opt-in** — unlike `init kpass`/`init kgate`, this
      should ship as part of what `nexler create`/`nexler init` generate by
@@ -365,10 +365,6 @@ the one app that has it finishes it).
      not the raw `kpass.Check` client — whenever `nexler init kpass` has
      already been run for that app; `RegisterTask`'s baseline (no kpass yet)
      is just `RequireAuth` + `Audit` + registry capture, no permission gate.
-     Known aside worth reconciling at implementation time: `ctrl-svc`'s own
-     hand-built `middleware/permission.go` currently calls `kpass.Check`
-     directly rather than through `services/kpass.CheckAccess` — itself
-     already a drift from this convention.
 - **Standardized error envelope / pagination conventions.** `ctrl-svc-
   endpoint-contracts.md` proposes a `{error: {code, message, details}}` shape
   and consistent `page`/`pageSize`/`total` pagination across list endpoints —
