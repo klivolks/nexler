@@ -56,6 +56,14 @@ for spec in "16:icon_16x16.png" "32:icon_16x16@2x.png" "32:icon_32x32.png" "64:i
 done
 iconutil -c icns "$ICONSET" -o "$STAGING/share/nexler.icns"
 
+# Defense in depth: postinstall must be executable for pkgbuild's --scripts
+# to produce a runnable script inside the pkg. It's already chmod +x'd in
+# git, but this re-asserts it at build time in case that mode is ever lost
+# again (e.g. from an edit made on a non-macOS machine, which is how this
+# was lost the first time and shipped a pkg that failed on every install
+# with "postinstall ... isn't executable").
+chmod +x "$SCRIPT_DIR/postinstall"
+
 echo "==> pkgbuild"
 pkgbuild \
   --root "$STAGING" \
