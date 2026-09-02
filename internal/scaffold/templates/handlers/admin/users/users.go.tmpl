@@ -7,12 +7,12 @@
 // self-contained file rather than the usual handlers/services/store/
 // models four-layer split.
 //
-// Every handler below wraps only in middleware.RequireAuth — that
-// confirms the caller is *authenticated*, not that they're *authorized*
-// to manage other users. Add your own authorization check (e.g.
-// kpasssvc.CheckAccess(ctx, callerID, "admin.users.write", nil) from
-// services/kpass, once you've run `nexler init kpass`) before relying on
-// this in production. Deliberately left as a TODO rather than hardcoded:
+// Every handler below wraps in middleware.RegisterTask, requireAuth
+// true — that confirms the caller is *authenticated*, not that they're
+// *authorized* to manage other users. RegisterTask's PermissionCheck hook
+// is nil until something sets it, so until then any authenticated caller
+// may hit these routes. Run `nexler init kpass` to have it wired to a
+// real permission check (services/kpass.CheckAccess) automatically —
 // permission enforcement is expected to be layered on separately, per
 // app, not assumed by nexler.
 package users
@@ -182,13 +182,13 @@ func HandleUserStatusPatch(w http.ResponseWriter, r *http.Request) {
 }
 
 // Register wires this package's admin user-management routes onto mux —
-// see the package doc comment re: RequireAuth only confirming
-// authentication, not authorization — and documents them with the
+// see the package doc comment re: RegisterTask's RequireAuth only
+// confirming authentication, not authorization — and documents them with the
 // openapi package so /openapi.json picks them up automatically. Called
 // from routes/protected/protected.go (wired automatically by nexler
 // create app, when -auth is jwt|both and -db is set).
 func Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /admin/users", middleware.RequireAuth(HandleUsersGet))
+	mux.HandleFunc("GET /admin/users", middleware.RegisterTask("admin.users.list", true, GetUsersRequest{}, GetUsersResponse{})(HandleUsersGet))
 	openapi.Register(openapi.Operation{
 		Method:      "GET",
 		Path:        "/admin/users",
@@ -200,7 +200,7 @@ func Register(mux *http.ServeMux) {
 		RespType:    GetUsersResponse{},
 	})
 
-	mux.HandleFunc("POST /admin/users", middleware.RequireAuth(HandleUsersPost))
+	mux.HandleFunc("POST /admin/users", middleware.RegisterTask("admin.users.create", true, PostUsersRequest{}, PostUsersResponse{})(HandleUsersPost))
 	openapi.Register(openapi.Operation{
 		Method:         "POST",
 		Path:           "/admin/users",
@@ -213,7 +213,7 @@ func Register(mux *http.ServeMux) {
 		RespType:       PostUsersResponse{},
 	})
 
-	mux.HandleFunc("GET /admin/users/{id}", middleware.RequireAuth(HandleUserGet))
+	mux.HandleFunc("GET /admin/users/{id}", middleware.RegisterTask("admin.users.get", true, GetUserRequest{}, GetUserResponse{}, "id")(HandleUserGet))
 	openapi.Register(openapi.Operation{
 		Method:      "GET",
 		Path:        "/admin/users/{id}",
@@ -225,7 +225,7 @@ func Register(mux *http.ServeMux) {
 		RespType:    GetUserResponse{},
 	})
 
-	mux.HandleFunc("PATCH /admin/users/{id}/status", middleware.RequireAuth(HandleUserStatusPatch))
+	mux.HandleFunc("PATCH /admin/users/{id}/status", middleware.RegisterTask("admin.users.setstatus", true, PatchUserStatusRequest{}, PatchUserStatusResponse{}, "id")(HandleUserStatusPatch))
 	openapi.Register(openapi.Operation{
 		Method:         "PATCH",
 		Path:           "/admin/users/{id}/status",

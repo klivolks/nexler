@@ -74,6 +74,21 @@ Nexler always installs to `/usr/local/nexler` on macOS. The Windows installer, b
 offer a real folder picker (native to Inno Setup) — an intentional, documented per-platform
 difference, not an oversight.
 
+## Fixed: `postinstall` shipped non-executable
+
+The first real install attempt on a Mac (an Apple Silicon machine) failed outright with
+`PKInstallErrorDomain Code=112` and `./postinstall: arch: ... isn't executable` in the install log —
+exactly the kind of issue the disclaimer above predicted. `installer/macos/postinstall` was tracked
+in git with mode `100644` (no exec bit), since it was authored on a Windows machine, which doesn't
+preserve the Unix exec bit the same way; `build-pkg.sh` handed it straight to `pkgbuild --scripts`
+without ever `chmod +x`-ing it first, so every built `Nexler.pkg` shipped a script the installer
+couldn't run. The "Architecture Translation ... re-executed as Intel" log lines that appeared before
+the failure were a side effect of this, not a separate bug — macOS's `arch` launcher falling back to
+a Rosetta-translation attempt because it couldn't identify how to run a file it couldn't exec at all.
+Fixed by `chmod +x`-ing the tracked file and adding a defensive `chmod +x "$SCRIPT_DIR/postinstall"`
+in `build-pkg.sh` right before the `pkgbuild` step, so a future accidental loss of the exec bit can't
+silently ship a broken package again.
+
 ## Known limitation: unsigned/unnotarized package
 
 No Apple Developer ID exists for this project. Gatekeeper will block `Nexler.pkg` outright

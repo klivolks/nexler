@@ -1,0 +1,144 @@
+package middleware
+
+import (
+	"net/http"
+{{- if ne .AuthKind "none" }}
+	"context"
+{{- end }}
+{{- if .HasCoreDB }}
+	"crypto/rand"
+	"encoding/hex"
+{{- end }}
+
+	"{{ .ModulePath }}/task"
+{{- if ne .AuthKind "none" }}
+	"{{ .ModulePath }}/auth"
+{{- end }}
+{{- if .HasCoreDB }}
+	"{{ .ModulePath }}/core"
+{{- end }}
+)
+
+{{- if ne .AuthKind "none" }}
+
+// PermissionCheck, when non-nil, gates every RegisterTask-wrapped route
+// once RequireAuth has already passed: called with the caller's subject
+// and this route's action name, a false result (or a non-nil error)
+// denies the request with 403. Nil by default — until something sets it,
+// any authenticated caller may hit any RegisterTask route with
+// requireAuth true. Run `nexler init kpass` to have it wired to a real
+// permission check (services/kpass.CheckAccess) automatically.
+var PermissionCheck func(ctx context.Context, subject, action string) (bool, error)
+{{- end }}
+
+// RegisterTask wraps next so mux.HandleFunc's target both records itself
+// in the task package (task.Register — see that package's doc comment)
+// and, when requireAuth is true, goes through RequireAuth (and, once
+// PermissionCheck is set, that too) before running. Every generated route
+// is wrapped this way; called once per method every time a package's
+// Register(mux) runs — safe to call repeatedly, since task.Register just
+// overwrites the entry.
+func RegisterTask(action string, requireAuth bool, reqType, respType any, pathParams ...string) func(http.HandlerFunc) http.HandlerFunc {
+	task.Register(task.Task{
+		Name:        action,
+		RequireAuth: requireAuth,
+		PathParams:  pathParams,
+		ReqType:     reqType,
+		RespType:    respType,
+	})
+
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		handler := auditWrap(action, pathParams, next)
+		if requireAuth {
+{{- if ne .AuthKind "none" }}
+			return RequireAuth(permissionWrap(action, handler))
+{{- else }}
+			return RequireAuth(handler)
+{{- end }}
+		}
+		return handler
+	}
+}
+{{- if ne .AuthKind "none" }}
+
+// permissionWrap applies PermissionCheck, when set — see its doc comment.
+// Only ever called as the innermost wrap RequireAuth calls into, so a
+// subject is already attached to the request context by the time this
+// runs.
+func permissionWrap(action string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if PermissionCheck != nil {
+			subject, _ := callerIdentity(r)
+			if allowed, err := PermissionCheck(r.Context(), subject, action); err != nil || !allowed {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// callerIdentity returns r's authenticated caller and whether it's a user
+// or a service.
+{{- if and .HasCoreDB (or (eq .AuthKind "jwt") (eq .AuthKind "both")) }}
+// A service key (auth.Service) takes precedence over a user subject on
+// the rare route both could theoretically resolve.
+{{- end }}
+func callerIdentity(r *http.Request) (subject, actorType string) {
+{{- if and .HasCoreDB (or (eq .AuthKind "jwt") (eq .AuthKind "both")) }}
+	if svc, ok := auth.Service(r); ok {
+		return svc, "service"
+	}
+{{- end }}
+	subject, _ = auth.Subject(r)
+	return subject, "user"
+}
+{{- end }}
+
+{{- if .HasCoreDB }}
+
+// auditWrap wraps next so every call best-effort records an audit log
+// entry via core.LogAudit — a logging failure here is silently ignored
+// rather than blocking the request, same precedent as Recover's own
+// core.LogError call.
+func auditWrap(action string, pathParams []string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+{{- if ne .AuthKind "none" }}
+		subject, actorType := callerIdentity(r)
+{{- else }}
+		subject, actorType := "", "anonymous"
+{{- end }}
+		correlationID := r.Header.Get("X-Correlation-Id")
+		if correlationID == "" {
+			correlationID = generateCorrelationID()
+		}
+		pathValues := make(map[string]string, len(pathParams))
+		for _, p := range pathParams {
+			pathValues[p] = r.PathValue(p)
+		}
+		defer func() {
+			_ = core.LogAudit(r.Context(), subject, actorType, action, pathValues, map[string]any{
+				"correlation_id": correlationID,
+				"session_id":     r.Header.Get("X-Session-Id"),
+			})
+		}()
+		next(w, r)
+	}
+}
+
+// generateCorrelationID returns a random 16-byte hex string, used when a
+// request arrives with no X-Correlation-Id header of its own.
+func generateCorrelationID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+{{- else }}
+
+// auditWrap is a no-op passthrough — this app has no core database
+// connection for core.LogAudit to write to. Re-scaffold with -db, or add
+// one via `nexler db add`, to enable real audit logging.
+func auditWrap(action string, pathParams []string, next http.HandlerFunc) http.HandlerFunc {
+	return next
+}
+{{- end }}

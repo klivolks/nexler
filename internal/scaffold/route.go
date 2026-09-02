@@ -365,10 +365,14 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 	for _, v := range verbs {
 		vt := verbTitle(v)
 		handlerName := fmt.Sprintf("Handle%s%s", name, vt)
-		registerExpr := handlerName
-		if cfg.Protected {
-			registerExpr = fmt.Sprintf("middleware.RequireAuth(%s)", handlerName)
+		reqTypeName := vt + name + "Request"
+		respTypeName := vt + name + "Response"
+		pathParamArgsSuffix := ""
+		if len(pathParamArgs) > 0 {
+			pathParamArgsSuffix = ", " + strings.Join(pathParamArgs, ", ")
 		}
+		registerExpr := fmt.Sprintf("middleware.RegisterTask(%q, %t, %smodels.%s{}, %smodels.%s{}%s)(%s)",
+			taskActionName(module, name, pkgName, v), cfg.Protected, alias, reqTypeName, alias, respTypeName, pathParamArgsSuffix, handlerName)
 		protected := cfg.Protected
 		reqContentType := ""
 		if v != "GET" {
@@ -391,8 +395,8 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 			Verb:            v,
 			VerbTitle:       vt,
 			HandlerName:     handlerName,
-			ReqTypeName:     vt + name + "Request",
-			RespTypeName:    vt + name + "Response",
+			ReqTypeName:     reqTypeName,
+			RespTypeName:    respTypeName,
 			RegisterExpr:    registerExpr,
 			Protected:       protected,
 			BodyDescription: bodyDescription(v, bodyKind),
@@ -3182,6 +3186,28 @@ func exportedName(s string) string {
 	r := []rune(s)
 	r[0] = unicode.ToUpper(r[0])
 	return string(r)
+}
+
+// taskActionName builds middleware.RegisterTask's registry-key argument:
+// a dotted, lowercase "<module>.<resource>.<verb>" (e.g.
+// "purchase.verify.post", "admin.sms.post"). resource is name (already
+// lowercased by sanitizeIdent, or -name's override when set) rather than
+// pkgName directly — the same "single source of truth for disambiguation"
+// reasoning detectIdentifierCollisions already relies on for every other
+// per-method identifier, so two -own-register resources sharing one
+// package directory never collide here either. The middle segment is
+// dropped when this route has no submodule/-name override at all (name ==
+// pkgName == module), to avoid a redundant "module.module.verb".
+// Mechanical and purely a registry key — nothing else depends on its
+// exact text, so it's safe to hand-edit task.Task.Name after the fact for
+// a more descriptive action name.
+func taskActionName(module, name, pkgName, v string) string {
+	resource := strings.ToLower(name)
+	verb := strings.ToLower(v)
+	if resource == pkgName && pkgName == module {
+		return module + "." + verb
+	}
+	return module + "." + resource + "." + verb
 }
 
 // pathParamNameRe validates a "{name}" path-parameter segment's name —

@@ -274,6 +274,14 @@ func schemaName(v any) string {
 	return t.Name()
 }
 
+// JSONSchema builds a JSON-schema object from v's exported fields — the
+// same reflection Spec uses to document a route's Request/Response
+// structs, exported so other packages (e.g. core.SyncTasks) can reuse it
+// instead of re-deriving their own.
+func JSONSchema(v any) map[string]any {
+	return jsonSchema(v)
+}
+
 // jsonSchema builds a JSON-schema object from a struct's exported
 // fields.
 func jsonSchema(v any) map[string]any {

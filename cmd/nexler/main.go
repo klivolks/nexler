@@ -886,6 +886,36 @@ Usage:
 
       Example: nexler init kgate -dir ./myapp
 
+  nexler init tenant [-dir <app-dir>]
+      Adds a guarded tenantorg listing/delete admin API to an existing
+      generated app, for a hub (or similar) app to manage tenants:
+      tenant/tenant.go (TenantOrg{ID, Name, Settings, Status, CreatedAt,
+      UpdatedAt} — Settings is a free-form organization configuration
+      blob; ListTenantOrgs/DeleteTenantOrg only, no generated create/
+      update path yet) and handlers/admin/tenants/tenants.go (GET
+      /admin/tenants, DELETE /admin/tenants/{id}), wired into
+      routes/protected/protected.go automatically. Not the same thing as
+      "-multitenant" (see "nexler create app" above) — that threads a
+      tenant Org through auth context; this is the actual store of
+      tenant-organization records a hub app manages, independent of it.
+
+      Deliberately not part of core/ — whether an app has a multi-tenant
+      model at all is provider/business-specific, not something every
+      -db app needs — so this is its own opt-in command, same shape as
+      "nexler init kgate"/"nexler init kpass". Requires the target app to
+      already have a core database connection (-db at "nexler create
+      app" time) and a JWT-capable -auth choice (jwt or both) — the
+      delete endpoint needs an authenticated caller to gate at all. Both
+      routes go through middleware.RegisterTask, every route's guard
+      since it registers into an app-wide task registry and — via its
+      middleware.PermissionCheck hook — checks authorization once
+      "nexler init kpass" has wired it; authenticated but not authorized
+      until then. DeleteTenantOrg is a real, hard delete — no undo. Run
+      "nexler init db" afterward to provision tenant_orgs on a SQL core
+      (Mongo needs no provisioning).
+
+      Example: nexler init tenant -dir ./myapp
+
   nexler init docker [-dir <app-dir>]
       Adds a multi-stage Dockerfile (build + serve) and a docker-compose.yml
       to an existing generated app. The Dockerfile's golang:<version>-alpine

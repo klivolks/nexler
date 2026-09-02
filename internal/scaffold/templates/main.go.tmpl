@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"{{ .ModulePath }}/config"
+	"{{ .ModulePath }}/core"
 	"{{ .ModulePath }}/db"
 	"{{ .ModulePath }}/middleware"
 	"{{ .ModulePath }}/routes"
@@ -20,6 +21,15 @@ func main() {
 		log.Fatalf("connecting to databases: %v", err)
 	}
 	defer db.Close()
+
+	// nexler:tasks-sync (do not remove this marker) — `nexler update`
+	// anchors on this exact call to retrofit an app scaffolded before the
+	// Task Registry existed. Best-effort: a failure here is logged, never
+	// fatal — the server still starts even if core_tasks couldn't be
+	// synced.
+	if err := core.SyncTasks(context.Background()); err != nil {
+		log.Printf("syncing task registry: %v", err)
+	}
 
 	mux := http.NewServeMux()
 	routes.Register(mux)

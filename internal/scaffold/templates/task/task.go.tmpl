@@ -1,0 +1,94 @@
+// Package task is an in-process registry describing every HTTP route this
+// app registers — not a job queue. middleware.RegisterTask (see
+// middleware/task.go) calls Register once per route/method, every time
+// Register(mux) runs, so by the time the server starts listening every
+// route's contract (name, whether it requires auth, its path parameters,
+// and its Request/Response shapes) is available here for permission
+// checks, audit logging, and — when a core database connection exists —
+// core.SyncTasks to mirror into core_tasks for provisioning/workflow
+// tooling to read without the binary running.
+//
+// Run is a deliberately secondary, exceptional path: a Task registered by
+// middleware.RegisterTask never sets Executor, since a route is normally
+// invoked through the API itself, not dispatched in-process. Run only
+// works for a Task a developer has separately registered (or re-registered
+// by name) with a real Executor.
+package task
+
+import (
+	"context"
+	"fmt"
+	"sync"
+)
+
+// Task describes one named unit of work — normally an HTTP route, but
+// Executor lets a developer make one directly invocable via Run.
+type Task struct {
+	// Name is the registry key — see middleware.RegisterTask for the
+	// dotted "<module>[.<resource>].<verb>" convention generated routes
+	// use; hand-written Tasks can use any string.
+	Name string
+	// RequireAuth mirrors whether the route this Task describes is
+	// wrapped in middleware.RequireAuth.
+	RequireAuth bool
+	// PathParams names this route's "{name}" wildcard segments, if any,
+	// in order.
+	PathParams []string
+	// ReqType/RespType are zero-value instances of the route's
+	// Request/Response structs — used for reflection (see
+	// openapi.JSONSchema), never populated with real data.
+	ReqType  any
+	RespType any
+	// Executor, when set, makes this Task invocable via Run. Nil for
+	// every auto-registered route — set it yourself if you want a
+	// specific action runnable outside its own HTTP handler too.
+	Executor func(ctx context.Context, req any) (any, error)
+}
+
+var (
+	mu       sync.RWMutex
+	registry = map[string]Task{}
+)
+
+// Register records t, replacing any existing entry with the same Name.
+// Safe to call repeatedly with the same Task — middleware.RegisterTask
+// does exactly that every time Register(mux) runs.
+func Register(t Task) {
+	mu.Lock()
+	defer mu.Unlock()
+	registry[t.Name] = t
+}
+
+// Get returns the Task registered under name, and whether one exists.
+func Get(name string) (Task, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	t, ok := registry[name]
+	return t, ok
+}
+
+// All returns every registered Task, in no particular order.
+func All() []Task {
+	mu.RLock()
+	defer mu.RUnlock()
+	out := make([]Task, 0, len(registry))
+	for _, t := range registry {
+		out = append(out, t)
+	}
+	return out
+}
+
+// Run invokes name's Executor directly, in-process — the exception, not
+// the rule (see package doc comment). Errors if name isn't registered, or
+// is registered but has no Executor (true for every task auto-registered
+// by middleware.RegisterTask, unless re-registered by hand with one).
+func Run(ctx context.Context, name string, req any) (any, error) {
+	t, ok := Get(name)
+	if !ok {
+		return nil, fmt.Errorf("task: no task registered as %q", name)
+	}
+	if t.Executor == nil {
+		return nil, fmt.Errorf("task: %q has no Executor — register it again with one to make it runnable in-process", name)
+	}
+	return t.Executor(ctx, req)
+}

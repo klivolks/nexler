@@ -217,6 +217,8 @@ request/     decode helpers a handler calls into its Request struct
 response/    JSON envelope helpers a handler calls to write its result
 apiclient/   fetch/axios-style helpers (Get/Post/Put/Delete) for calling other
              HTTP APIs — see "The apiclient package" below
+task/        in-process registry every route registers itself with, via
+             middleware.RegisterTask — see "The Task Registry" below
 config/      loads {APPNAME}_-prefixed env vars (+ optional .env) once, at
              package-init time — see "Runtime configuration" below
 .env         editable starting point for the app's env vars (HOST/PORT, and
@@ -234,6 +236,9 @@ kpass/       only added by `nexler init kpass`, run separately after
              `create app` — see "nexler init kpass" below
 kgate/       only added by `nexler init kgate`, run separately after
              `create app` (needs -db) — see "nexler init kgate" below
+tenant/      only added by `nexler init tenant`, run separately after
+             `create app` (needs -db and a JWT-capable -auth) — see
+             "nexler init tenant" below
 ```
 
 `main.go` calls `routes.Register(mux)` once and is **never edited again** after the initial
@@ -571,14 +576,16 @@ handlers/services/store/models four-layer split):
   `ListServices` specifically to support these endpoints), `POST /admin/services/{name}/
   revoke` (`core.RevokeService`).
 
-Every handler wraps only in `middleware.RequireAuth` — **no role/authorization check**.
+Every handler wraps in `middleware.RegisterTask` (see "The Task Registry
+(`middleware.RegisterTask`)" below) with `requireAuth` true — **no role/authorization check**.
 This is deliberate, not an oversight: `RequireAuth` confirms the caller is
-*authenticated*, not that they're *allowed* to manage other users/services. Both
-generated files' package doc comments say so explicitly and point at `kpass.Check` (once
-`nexler init kpass` has been run) as the expected way to add that check per-app —
-permission enforcement is intentionally left out of nexler's own generated code, same
-"primitives only" precedent as everywhere else, rather than nexler guessing at an
-authorization scheme every app would actually want.
+*authenticated*, not that they're *allowed* to manage other users/services.
+`RegisterTask`'s `PermissionCheck` hook is nil until `nexler init kpass` sets it (to
+`services/kpass.CheckAccess`) — until then, any authenticated caller may hit these routes. Both
+generated files' package doc comments say so explicitly — permission enforcement is
+intentionally left out of nexler's own generated code by default, same "primitives only"
+precedent as everywhere else, rather than nexler guessing at an authorization scheme every app
+would actually want.
 
 Wired into `routes/protected/protected.go` at `NewApp` time via `route.go`'s
 `wireAggregator` — the exact same post-hoc-wiring mechanism `kgate`/`kpass` already use,
@@ -1773,8 +1780,9 @@ standalone service the way there is for a route's first-creation service.
 ### Per-route code generation (`route.go`)
 
 `RouteConfig` → `routeData`/`routeMethod` precompute all identifiers in Go (handler names like
-`HandleVerifyPost`, `RegisterExpr` — either bare or wrapped in
-`middleware.RequireAuth(...)` when `-protected` — `OperationID`, content types, doc-comment
+`HandleVerifyPost`, `RegisterExpr` — a full `middleware.RegisterTask("<action>", <protected>,
+<ReqType>{}, <RespType>{}, <path params...>)(<handler>)` call (see "The Task Registry
+(`middleware.RegisterTask`)" below) — `OperationID`, content types, doc-comment
 phrasing) so the `.tmpl` files themselves stay mostly free of conditional logic; they just range
 over `.Methods`. `routeMethod.Protected` (feeding both `RegisterExpr` and `openapi.Register`'s
 `Protected` field) is tracked per method, not just once for the whole route — a single `nexler
@@ -1792,6 +1800,110 @@ Route `-module`/`-submodule` values are sanitized to letters/digits only (`sanit
 as a Go package name; the package's import alias is the concatenation of the sanitized parts
 (e.g. `-module purchase -submodule verify` → package `verify`, alias `purchaseverify`, files under
 `purchase/verify/`).
+
+### The Task Registry (`middleware.RegisterTask`, `task` package)
+
+Every generated route — including the hand-authored `core_users`/`core_services` admin API and
+`nexler init tenant`'s admin API (below) — is wired via `middleware.RegisterTask(action string,
+requireAuth bool, reqType, respType any, pathParams ...string) func(http.HandlerFunc)
+http.HandlerFunc` instead of a bare handler reference or a direct `middleware.RequireAuth(...)`
+wrap. This is baseline infrastructure, generated unconditionally for every app (`task/task.go.tmpl`,
+`middleware/task.go.tmpl`), the same "every app gets it, no flag gating" precedent `apiclient/`
+already set — ported from `ctrl-svc`'s own proven-out Task Registry (see `nexler-checklist.md`'s
+`0.5.7` entry for the full port history and the two design decisions it resolved).
+
+`task/task.go` is an in-process registry describing every route's contract — `Task{Name,
+RequireAuth, PathParams, ReqType, RespType, Executor}`, `Register`/`Get`/`All`/`Run` — not a job
+queue: `Executor` is nil for every auto-registered route, since a route is normally invoked through
+the API itself, not dispatched in-process; `Run` only works for a `Task` a developer has separately
+registered (or re-registered by name) with a real `Executor`. `middleware.RegisterTask` calls
+`task.Register` every time a package's `Register(mux)` runs (idempotent — just overwrites the
+entry), then wraps the handler: when `requireAuth` is true, `middleware.RequireAuth` runs first,
+then (once set) `PermissionCheck`, then a best-effort audit log via `core.LogAudit` (only on a
+core-database app — a no-op passthrough otherwise) recording the caller (`auth.Subject`/
+`auth.Service`, whichever resolves — a service key takes precedence), an `X-Correlation-Id`
+(echoed if sent, generated if not), `X-Session-Id`, and the route's path parameter values.
+
+`route.go`'s `NewRoute` builds `RegisterExpr` as this whole call (a single precomputed Go-source
+string, same "opaque expression the template just prints" precedent `RegisterExpr` already had) —
+`taskActionName(module, name, pkgName, verb)` derives the dotted `"<module>.<resource>.<verb>"`
+registry key (e.g. `"purchase.verify.post"`, `"admin.sms.post"` for an `-own-register` resource) —
+mechanical and purely a registry key, safe to hand-edit `task.Task.Name` later for something more
+descriptive. The two hand-authored admin-API template files (`handlers/admin/users`,
+`handlers/admin/services`) build their own `RegisterTask(...)` calls directly, matching the same
+convention (`"admin.users.list"`, `"admin.services.revoke"`, etc.).
+
+**`PermissionCheck`** (`middleware.PermissionCheck`, a nil-by-default package var — `func(ctx,
+subject, action string) (bool, error)`) is the "guard is left for the developer to extend" primitive
+every generated protected route now shares: `RegisterTask` calls it (denying with 403 on `false`/
+error) only when it's been set. `nexler init kpass` (`NewKpass`) wires it automatically — writing a
+new `middleware/permission_kpass.go` (an `init()` setting `PermissionCheck` to
+`services/kpass.CheckAccess`) whenever the target app already has `middleware/task.go` — so a fresh
+app's `middleware/task.go` itself is never rewritten later; `nexler update`'s
+`ensureKpassPermissionHook` covers the "ran `init kpass` before this existed, or before
+`middleware/task.go` existed" case.
+
+On a core-database app, `core/tasks.go` (`core.SyncTasks`, mirroring `task.All()` into `core_tasks`
+via a new exported `openapi.JSONSchema` — factored out of that package's existing unexported
+`jsonSchema`, so `ReqSchema`/`RespSchema` reuse `/openapi.json`'s own reflection instead of
+re-deriving it) and `core/audit.go` (`core.LogAudit`, writing `core_audit_log`) are also generated;
+`main.go` calls `core.SyncTasks` at startup, best-effort (logged, never fatal), behind a new `//
+nexler:tasks-sync` marker — the first marker `main.go` has ever needed, an exception to its usual
+"never edited again after scaffold" rule, made explicitly for this one retrofit anchor. `nexler init
+db` provisions `core_tasks`/`core_audit_log` unconditionally for every `-db` app, same
+zero-cost-when-unused precedent as `core_kgate_channels`.
+
+`nexler update`'s `ensureTaskRegistry` brings an app scaffolded before any of this existed up to
+date — writes `task/task.go`/`middleware/task.go` unconditionally if missing, `core/tasks.go`/
+`core/audit.go` plus the `main.go` patch when the app has a core database. Deliberately does **not**
+rewrite `RegisterExpr` in already-generated route files — that's static Go source baked in at each
+route's own creation time; only a newly-added method (a later `nexler create <route>` call) on an
+existing app picks up the new `RegisterTask` wrapping, so an updated older app can legitimately end
+up with a mix of routes wrapped the old way (bare, or `middleware.RequireAuth(...)`) and the new way.
+
+### `nexler init tenant`: independent TenantOrg admin API
+
+`nexler init tenant [-dir <app-dir>]` (`cmd/nexler/inittenant.go` → `scaffold.NewTenant` in
+`internal/scaffold/tenant.go`) adds a guarded `tenantorg` listing/delete admin API to an *existing*
+generated app, for a `hub` (or similar) app to manage tenants — the same "pure local file
+scaffolding, no live network connection" shape as `nexler init kgate`/`nexler init kpass`, and a new
+embedded template tree, `tenant_templates/`. **Not to be confused with the already-shipped,
+unrelated `-multitenant` flag** (Org propagation through auth context — `auth.ContextWithOrg`,
+`core.User.OrgId`, see "Authentication" above) — that feature threads a tenant identifier through
+*requests*; this one is the actual store of tenant-organization *records* a hub app manages, and
+the two don't reference each other.
+
+Deliberately **not** part of `core/` (unlike `core_config`/`core_error_log`, unconditional for every
+`-db` app): whether an app has a multi-tenant model at all is a provider/business-specific decision,
+not something every `-db` app needs — so this is its own separate, explicit, opt-in `init` command,
+never a `create app` flag. Requires the target app to already have a core database connection (same
+eligibility check `NewKgate` uses) and a JWT-capable `-auth` choice (same eligibility as the
+`core_users`/`core_services` admin API) — a clear error naming what's missing otherwise.
+
+`tenant/tenant.go` (`TenantOrg{ID, Name, Settings map[string]any, Status, CreatedAt, UpdatedAt}` —
+`Settings` is a free-form organization configuration/settings blob, this package's whole reason for
+existing, not a fixed metadata shape like `Service`) is scoped to `ListTenantOrgs`/`DeleteTenantOrg`
+only in this release — no generated Create/Update path yet, so `ID` is a caller-assigned string (an
+external system's own identifier), not nexler-generated. `DeleteTenantOrg` is a real, hard delete —
+the row/document is gone, no undo — unlike `core.RevokeService`'s soft status-flip; there's no
+working hard-delete precedent to lift from elsewhere in this codebase (`docs/index.html` documents
+`DELETE /admin/users/{id}`/`DELETE /admin/services/{name}` as shipped, but neither actually exists in
+code — a pre-existing doc/code drift, unrelated to this feature, worth fixing separately).
+
+`handlers/admin/tenants/tenants.go` (`GET /admin/tenants`, `DELETE /admin/tenants/{id}`) is one
+self-contained hand-authored file, same shape as `handlers/admin/users`/`handlers/admin/services`,
+wired into `routes/protected/protected.go` via the existing `wireAggregator`. Both routes go through
+`middleware.RegisterTask` (see above) with `requireAuth` true — the same "confirms authentication,
+not authorization" caveat as every other admin route, now backed by a concrete, working
+`PermissionCheck` hook (once `nexler init kpass` has run) instead of just a comment.
+
+`nexler init db` provisions `tenant_orgs` conditional on `tenant/tenant.go` existing on disk (checked
+via `tenantOrgEnabled`, the same "detect state from what's on disk" precedent `nexler db add`'s
+`dialectEnabled` already uses) — a plain table for a SQL core, no stored procedures, since
+List/Delete need none; a Mongo core needs no provisioning at all (no unique-index requirement here,
+and Mongo creates the collection lazily on first write). This keeps `nexler init db` the one place
+nexler itself touches a live database connection, while staying opt-in/no-cost for an app that never
+ran `init tenant`.
 
 ### Dynamic path parameters (`{name}` segments in a route)
 

@@ -94,6 +94,8 @@ var updateChecks = []updateCheck{
 	{"auth: API-key (service-to-service) auth", ensureServiceAuth},
 	{"auth: admin API for core_users/core_services", ensureAdminRoutes},
 	{"config: API base path (openapi servers)", ensureAPIBasePath},
+	{"task: Task Registry (task/task.go, middleware/task.go, core.SyncTasks)", ensureTaskRegistry},
+	{"kpass: wire middleware.PermissionCheck to services/kpass.CheckAccess", ensureKpassPermissionHook},
 }
 
 // Update runs every registered check against appDir, best-effort: a check
