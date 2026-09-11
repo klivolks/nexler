@@ -19,7 +19,7 @@ import (
 // because it happens to share middleware with a user-facing route.
 //
 // Verifies X-Api-Secret against core_services (core.VerifyServiceKey) and
-// attaches the calling service's name to the request context via
+// attaches the calling service's ID to the request context via
 // auth.ContextWithService — read it back with auth.Service(r).
 func RequireServiceAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -28,11 +28,11 @@ func RequireServiceAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "missing X-Api-Secret", http.StatusUnauthorized)
 			return
 		}
-		name, ok, err := core.VerifyServiceKey(r.Context(), key)
+		id, ok, err := core.VerifyServiceKey(r.Context(), key)
 		if err != nil || !ok {
 			http.Error(w, "invalid API key", http.StatusUnauthorized)
 			return
 		}
-		next(w, r.WithContext(auth.ContextWithService(r.Context(), name)))
+		next(w, r.WithContext(auth.ContextWithService(r.Context(), id)))
 	}
 }

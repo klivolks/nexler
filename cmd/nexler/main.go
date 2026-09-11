@@ -654,7 +654,7 @@ Usage:
       service/automation caller can hit the exact same -protected routes a
       human user would, rather than needing a service-only route. A
       service-key match still attaches auth.ContextWithService, plus
-      auth.ContextWithSubject set to the service's name (purely so
+      auth.ContextWithSubject set to the service's ID (purely so
       subject-reading code has something to evaluate — not a claim that a
       service should pass user-level authorization). Off by default: a pure
       API service that wants user-only and service-only routes to stay

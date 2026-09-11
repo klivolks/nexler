@@ -466,16 +466,29 @@ func usersStatements(dbType string) []string {
 // itself, rather than a separate CREATE UNIQUE INDEX statement, since
 // CREATE INDEX ... IF NOT EXISTS isn't portable across all three SQL
 // dialects the way CREATE TABLE IF NOT EXISTS is.
+//
+// id is a DB-generated surrogate identifier (UUID/GUID), used as the
+// calling service's identity for auth/permission checks (see
+// core.VerifyServiceKey) instead of name — name stays each table's
+// PRIMARY KEY (nothing keyed by name breaks), id is an additional unique
+// column. Every dialect's default expression is idempotent per-row (each
+// existing or new row gets its own generated value, never a shared
+// constant), and the table-level column definition is paired with a
+// guarded ALTER TABLE so an already-provisioned database (from before id
+// existed) picks up the column — and backfills every existing row — the
+// next time `nexler init db` runs, same as a fresh install.
 func servicesStatements(dbType string) []string {
 	switch dbType {
 	case "mysql":
 		return []string{
 			"CREATE TABLE IF NOT EXISTS core_services (" +
 				"name VARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"id CHAR(36) NOT NULL DEFAULT (UUID()) UNIQUE, " +
 				"key_hash CHAR(64) NOT NULL UNIQUE, " +
 				"status VARCHAR(32) NOT NULL DEFAULT 'active', " +
 				"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
 				"updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
+			"ALTER TABLE core_services ADD COLUMN IF NOT EXISTS id CHAR(36) NOT NULL DEFAULT (UUID()) UNIQUE",
 			"DROP PROCEDURE IF EXISTS core_service_create",
 			"CREATE PROCEDURE core_service_create(IN p_name VARCHAR(255), IN p_key_hash CHAR(64)) " +
 				"BEGIN " +
@@ -491,10 +504,12 @@ func servicesStatements(dbType string) []string {
 		return []string{
 			"CREATE TABLE IF NOT EXISTS core_services (" +
 				"name TEXT PRIMARY KEY, " +
+				"id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE, " +
 				"key_hash CHAR(64) NOT NULL UNIQUE, " +
 				"status TEXT NOT NULL DEFAULT 'active', " +
 				"created_at TIMESTAMPTZ NOT NULL DEFAULT now(), " +
 				"updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+			"ALTER TABLE core_services ADD COLUMN IF NOT EXISTS id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE",
 			"CREATE OR REPLACE PROCEDURE core_service_create(p_name TEXT, p_key_hash CHAR(64)) " +
 				"LANGUAGE plpgsql AS $$ " +
 				"BEGIN " +
@@ -511,10 +526,13 @@ func servicesStatements(dbType string) []string {
 			"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'core_services') " +
 				"CREATE TABLE core_services (" +
 				"[name] NVARCHAR(255) NOT NULL PRIMARY KEY, " +
+				"id UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() UNIQUE, " +
 				"key_hash CHAR(64) NOT NULL UNIQUE, " +
 				"status NVARCHAR(32) NOT NULL DEFAULT 'active', " +
 				"created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(), " +
 				"updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME())",
+			"IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('core_services') AND name = 'id') " +
+				"ALTER TABLE core_services ADD id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_core_services_id DEFAULT NEWID() UNIQUE",
 			"CREATE OR ALTER PROCEDURE core_service_create " +
 				"@p_name NVARCHAR(255), @p_key_hash CHAR(64) AS " +
 				"BEGIN " +
