@@ -19,7 +19,7 @@ import (
 // Service is a core_services record — a service account for
 // app-to-app/service-to-service calls (see middleware.RequireServiceAuth).
 // Its API key is generated once by CreateService and never stored or
-// returned in plaintext again — the X-Api-Key it grants access under must
+// returned in plaintext again — the X-Api-Secret it grants access under must
 // never be embedded in any UI-facing client.
 type Service struct {
 	Name      string

@@ -380,7 +380,7 @@ generated differently depending on the app-creation-time `-auth` choice
 `handler.go.tmpl` already uses for `HTMLResponse`):
 
 - `none` (default): functionally identical to the original stub (only its doc comment
-  now points at `-auth`) — checks that an `X-Api-Key` header and a `Bearer` token were
+  now points at `-auth`) — checks that an `X-Api-Scret` header and a `Bearer` token were
   *sent*, never verifies either. Existing apps/behavior are untouched by this feature.
 - `jwt`: generates `auth/jwt.go.tmpl` → `auth/jwt.go` — `IssueJWT`/`VerifyJWT`, a
   minimal, correct HS256 JWT (stdlib-only: `crypto/hmac` + `crypto/sha256`, no
@@ -455,7 +455,7 @@ Apps with `-auth jwt|both` and `-db` set also get a second, wholly separate auth
 mechanism for app-to-app calls: `middleware.RequireServiceAuth` (`middleware/
 service_auth.go.tmpl`), checking the `X-Api-Secret` header — nexler's existing convention
 for this concept (the `-auth none` stub in `middleware/auth.go.tmpl` already checks for
-an `X-Api-Key` header's presence, unverified — a separate, older stub convention, not
+an `X-Api-Secret` header's presence, unverified — a separate, older stub convention, not
 literally the same header name as this real check) — against a new `core_services`
 table, backed by `core/services.go.tmpl`'s `CreateService`/`VerifyServiceKey`/
 `RevokeService`. Deliberately **independent** of `RequireAuth` by default, not a third

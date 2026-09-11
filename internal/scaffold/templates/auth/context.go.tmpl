@@ -67,7 +67,7 @@ var serviceKey = serviceKeyType{}
 
 // ContextWithService returns a copy of ctx carrying name as the calling
 // service's identity (its core_services Name). Called by
-// middleware.RequireServiceAuth once a request's X-Api-Key passes
+// middleware.RequireServiceAuth once a request's X-Api-Secret passes
 // core.VerifyServiceKey — application code normally reads it back via
 // Service instead of calling this directly.
 func ContextWithService(ctx context.Context, name string) context.Context {

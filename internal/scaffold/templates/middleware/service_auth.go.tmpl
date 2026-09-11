@@ -8,7 +8,7 @@ import (
 )
 
 // RequireServiceAuth wraps a handler meant to be called only by other
-// backend services — never a browser/UI client. The X-Api-Key it checks
+// backend services — never a browser/UI client. The X-Api-Secret it checks
 // must never be embedded in any UI-facing code (JS bundles, mobile app
 // binaries, etc.) — treat it the same as a database credential.
 //
@@ -18,7 +18,7 @@ import (
 // service-only route can never accidentally accept an end-user JWT just
 // because it happens to share middleware with a user-facing route.
 //
-// Verifies X-Api-Key against core_services (core.VerifyServiceKey) and
+// Verifies X-Api-Secret against core_services (core.VerifyServiceKey) and
 // attaches the calling service's name to the request context via
 // auth.ContextWithService — read it back with auth.Service(r).
 func RequireServiceAuth(next http.HandlerFunc) http.HandlerFunc {

@@ -635,10 +635,10 @@ Usage:
       across instances; swap the store before scaling beyond one
       instance in production. When -auth is jwt or both AND -db is also
       set, the app additionally gets middleware.RequireServiceAuth — a
-      second, wholly separate auth mechanism (checking an X-Api-Key
+      second, wholly separate auth mechanism (checking an X-Api-Secret
       header against a new core_services table) for app-to-app calls,
       independent of RequireAuth so a service-only route can never
-      accidentally accept an end-user JWT. That X-Api-Key must never be
+      accidentally accept an end-user JWT. That X-Api-Secret must never be
       embedded in any UI-facing code. core.CreateService/VerifyServiceKey/
       RevokeService (core/services.go) manage it; a companion core_users
       table (core/users.go) is a minimal local record keyed by the same
@@ -647,7 +647,7 @@ Usage:
       "nexler init db", not here.
 
       -merge-service-auth (only meaningful with -auth jwt|both and -db;
-      default false) folds that same X-Api-Key/X-Api-Secret service-key
+      default false) folds that same X-Api-Secret service-key
       check into RequireAuth itself instead of generating a separate
       RequireServiceAuth — RequireAuth then tries JWT (then session, for
       -auth both), then falls back to the service key, so a

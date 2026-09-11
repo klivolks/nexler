@@ -225,7 +225,7 @@ func Spec(title, basePath string) map[string]any {
 	components := map[string]any{"schemas": schemas}
 	if needsSecurity {
 		components["securitySchemes"] = map[string]any{
-			"ApiKeyAuth":   map[string]any{"type": "apiKey", "in": "header", "name": "X-Api-Key"},
+			"ApiKeyAuth":   map[string]any{"type": "apiKey", "in": "header", "name": "X-Api-Secret"},
 			"BearerAuth":   map[string]any{"type": "http", "scheme": "bearer"},
 			"ClientIdAuth": map[string]any{"type": "apiKey", "in": "header", "name": "X-Client-Id"},
 		}
