@@ -27,21 +27,22 @@ type serviceKeyType struct{}
 
 var serviceKey = serviceKeyType{}
 
-// ContextWithService returns a copy of ctx carrying name as the calling
-// service's identity (its core_services Name). Called by
-// middleware.RequireServiceAuth once a request's X-Api-Key passes
-// core.VerifyServiceKey — application code normally reads it back via
-// Service instead of calling this directly.
-func ContextWithService(ctx context.Context, name string) context.Context {
-	return context.WithValue(ctx, serviceKey, name)
+// ContextWithService returns a copy of ctx carrying id as the calling
+// service's identity (its core_services ID — the stable identifier, not
+// the mutable-in-spirit Name, so it's safe to use as a permission-check
+// subject). Called by middleware.RequireServiceAuth once a request's
+// X-Api-Secret passes core.VerifyServiceKey — application code normally
+// reads it back via Service instead of calling this directly.
+func ContextWithService(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, serviceKey, id)
 }
 
-// Service returns r's calling service's name, as attached by
+// Service returns r's calling service's ID, as attached by
 // middleware.RequireServiceAuth. ok is false for a request that never
 // passed through RequireServiceAuth.
-func Service(r *http.Request) (name string, ok bool) {
-	name, ok = r.Context().Value(serviceKey).(string)
-	return name, ok
+func Service(r *http.Request) (id string, ok bool) {
+	id, ok = r.Context().Value(serviceKey).(string)
+	return id, ok
 }
 `
 
@@ -166,7 +167,7 @@ func ensureServiceAuth(appDir string) (bool, error) {
 // without both. A silent no-op otherwise, same precedent as every other
 // ensure* retrofit. Does not re-run `nexler init db`.
 func ensureAdminRoutes(appDir string) (bool, error) {
-	_, hasCoreDB := readCoreDBType(appDir)
+	coreDBType, hasCoreDB := readCoreDBType(appDir)
 	hasJWT, _ := detectAuthFiles(appDir)
 	if !hasCoreDB || !hasJWT {
 		return false, nil
@@ -176,7 +177,14 @@ func ensureAdminRoutes(appDir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	data := struct{ ModulePath string }{ModulePath: modulePath}
+	coreDBAccessor := "SQL"
+	if coreDBType == "mongo" {
+		coreDBAccessor = "Mongo"
+	}
+	data := struct {
+		ModulePath     string
+		CoreDBAccessor string
+	}{ModulePath: modulePath, CoreDBAccessor: coreDBAccessor}
 
 	changed := false
 

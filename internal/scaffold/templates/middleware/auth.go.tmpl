@@ -55,7 +55,7 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 // Whichever credential succeeds, its identity is attached to the request
 // context: a JWT sets auth.ContextWithSubject to the token's subject; a
 // service key sets auth.ContextWithService to the calling service's
-// core_services name, AND auth.ContextWithSubject to that same name — not
+// core_services ID, AND auth.ContextWithSubject to that same ID — not
 // because a service should pass user-level authorization, but so
 // subject-reading code (e.g. a services/kpass.CheckAccess-style
 // permission gate, if one is added later) has something to evaluate
@@ -88,9 +88,9 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 		if key := r.Header.Get("X-Api-Secret"); key != "" {
-			if name, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
-				ctx := auth.ContextWithService(r.Context(), name)
-				ctx = auth.ContextWithSubject(ctx, name)
+			if id, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
+				ctx := auth.ContextWithService(r.Context(), id)
+				ctx = auth.ContextWithSubject(ctx, id)
 				next(w, r.WithContext(ctx))
 				return
 			}
@@ -175,7 +175,7 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 // Whichever credential succeeds, its identity is attached to the request
 // context: JWT/session sets auth.ContextWithSubject to the real subject; a
 // service key sets auth.ContextWithService to the calling service's
-// core_services name, AND auth.ContextWithSubject to that same name — not
+// core_services ID, AND auth.ContextWithSubject to that same ID — not
 // because a service should pass user-level authorization, but so
 // subject-reading code (e.g. a services/kpass.CheckAccess-style
 // permission gate, if one is added later) has something to evaluate
@@ -221,9 +221,9 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 {{- end }}
 		if key := r.Header.Get("X-Api-Secret"); key != "" {
-			if name, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
-				ctx := auth.ContextWithService(r.Context(), name)
-				ctx = auth.ContextWithSubject(ctx, name)
+			if id, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
+				ctx := auth.ContextWithService(r.Context(), id)
+				ctx = auth.ContextWithSubject(ctx, id)
 				next(w, r.WithContext(ctx))
 				return
 			}

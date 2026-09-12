@@ -35,6 +35,7 @@ import (
 // except HandleServicesPost, which additionally returns the plaintext
 // key exactly once, on creation.
 type ServiceSummary struct {
+	ID         string     `json:"id"`
 	Name       string     `json:"name"`
 	Status     string     `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -43,7 +44,11 @@ type ServiceSummary struct {
 }
 
 func toServiceSummary(s core.Service) ServiceSummary {
-	return ServiceSummary{Name: s.Name, Status: s.Status, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt, LastUsedAt: s.LastUsedAt}
+{{- if eq .CoreDBAccessor "Mongo" }}
+	return ServiceSummary{ID: s.ID.Hex(), Name: s.Name, Status: s.Status, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt, LastUsedAt: s.LastUsedAt}
+{{- else }}
+	return ServiceSummary{ID: s.ID, Name: s.Name, Status: s.Status, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt, LastUsedAt: s.LastUsedAt}
+{{- end }}
 }
 
 // GetServicesRequest is the (empty — query-parameters-only) request for
@@ -88,6 +93,7 @@ type PostServicesRequest struct {
 // credential; store it securely (e.g. a secrets manager) the moment you
 // receive it.
 type PostServicesResponse struct {
+	ID   string `json:"id"`
 	Name string `json:"name"`
 	Key  string `json:"key"`
 }
@@ -101,12 +107,12 @@ func HandleServicesPost(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
-	key, err := core.CreateService(r.Context(), req.Name)
+	id, key, err := core.CreateService(r.Context(), req.Name)
 	if err != nil {
 		response.Error(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	response.JSON(w, http.StatusOK, PostServicesResponse{Name: req.Name, Key: key})
+	response.JSON(w, http.StatusOK, PostServicesResponse{ID: id, Name: req.Name, Key: key})
 }
 
 // GetServiceRequest is the (path-parameter-only) request for GET

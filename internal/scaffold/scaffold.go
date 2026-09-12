@@ -634,30 +634,34 @@ func userGetQuerySQL(dbType string, multitenant bool) string {
 
 // serviceVerifyQuerySQL is configGetQuerySQL's counterpart for
 // core/services.go.tmpl's VerifyServiceKey — looked up by key_hash, never
-// the plaintext key, which is never stored.
+// the plaintext key, which is never stored. id is cast to a plain string
+// per-dialect (postgres' native column type is uuid, mssql's is
+// uniqueidentifier) so serviceRow.ID scans uniformly as a Go string
+// regardless of -db choice — see initdb.go's servicesStatements for the
+// column definitions themselves.
 func serviceVerifyQuerySQL(dbType string) string {
 	switch dbType {
 	case "mysql":
-		return "SELECT name, status FROM core_services WHERE key_hash = ?"
+		return "SELECT id, status FROM core_services WHERE key_hash = ?"
 	case "mssql":
-		return "SELECT name, status FROM core_services WHERE key_hash = @p1"
+		return "SELECT CAST(id AS VARCHAR(36)) AS id, status FROM core_services WHERE key_hash = @p1"
 	default: // postgres
-		return "SELECT name, status FROM core_services WHERE key_hash = $1"
+		return "SELECT id::text AS id, status FROM core_services WHERE key_hash = $1"
 	}
 }
 
 // serviceGetQuerySQL is serviceVerifyQuerySQL's counterpart for
 // core/services.go.tmpl's GetService — looked up by name (core_services'
-// primary key), never key_hash.
+// primary key), never key_hash. Per-dialect id cast, same reasoning as
+// serviceVerifyQuerySQL.
 func serviceGetQuerySQL(dbType string) string {
-	const cols = "name, status, created_at, updated_at"
 	switch dbType {
 	case "mysql":
-		return "SELECT " + cols + " FROM core_services WHERE name = ?"
+		return "SELECT id, name, status, created_at, updated_at FROM core_services WHERE name = ?"
 	case "mssql":
-		return "SELECT " + cols + " FROM core_services WHERE name = @p1"
+		return "SELECT CAST(id AS VARCHAR(36)) AS id, name, status, created_at, updated_at FROM core_services WHERE name = @p1"
 	default: // postgres
-		return "SELECT " + cols + " FROM core_services WHERE name = $1"
+		return "SELECT id::text AS id, name, status, created_at, updated_at FROM core_services WHERE name = $1"
 	}
 }
 
