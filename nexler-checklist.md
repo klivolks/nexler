@@ -254,6 +254,17 @@ tenant on a user's behalf.
    `ensureTaskSyncAfterRoutes` moves it in existing apps. Earlier tests here
    missed it because they called `routes.Register` themselves before
    `SyncTasks`.
+9. `[x]` **Fixes from rolling out to the four icorp services.**
+   - The `Task` retrofit missed hand-written compact blocks
+     (`Method: "GET", Path: "/x", ...` on one line); it now adds
+     `Task` inline there.
+   - The service-caller retrofit anchored on `serviceDoc`'s `LastUsedAt`
+     field, which older apps lack; it now inserts before the struct's
+     closing brace.
+   - `ensureKpassPermissionHook` / `init kpass` wrote `permission_kpass.go`
+     into an app whose hand-built `middleware/task.go` (ported from
+     ctrl-svc, icorp-core-svc) has no `PermissionCheck`, which broke the
+     build; they now skip such apps.
 8. `[x]` **Stale entries pruned.** `SyncTasks` → `pruneStaleTasks`:
    - deletes only entries with this app's `service` whose task is no longer
      registered
