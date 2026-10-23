@@ -178,7 +178,19 @@ checklist was written:
    completely unaffected; confirmed `nexler update` behaves normally
    against a package with two `Register<X>` functions.
 
-## Unreleased (2026-10-23): tasks callable over HTTP
+## Unreleased (2026-10-23): fixes after 0.5.11-beta
+
+1. `[x]` **`Task` retrofit no longer duplicates inline fields.** Its
+   "already has a `Task`" check only matched `Task:` at the start of a line,
+   so on every later `nexler update` a compact block
+   (`Method: "GET", Path: "/x", Task: "...", ...`) got `Task` added again,
+   which doesn't compile (`duplicate field name Task in struct literal`).
+   Re-running 0.5.11-beta broke 120 operations across hr, catalogue and
+   core. `taskFieldRe` now matches `Task:` anywhere in the block; the
+   duplicates were removed from the services, and two more updates on all
+   four leave them unchanged and building.
+
+## 0.5.11-beta (2026-10-23): tasks callable over HTTP
 
 Driven by the iCorp per-tenant onboarding program
 (`klivolks-v3/icorp/docs/customer-onboarding-workflow-checklist.md` §2): a

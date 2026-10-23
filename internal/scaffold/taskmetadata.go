@@ -140,7 +140,9 @@ var (
 	// mux.HandleFunc("POST /accounts", ...RegisterTask("icorp.crm.accounts.create", ...
 	registerTaskCallRe = regexp.MustCompile(`mux\.HandleFunc\("([A-Z]+) ([^"]+)",[^\n]*?RegisterTask\("([^"]+)"`)
 	operationStartRe   = regexp.MustCompile(`openapi\.Register\(openapi\.Operation\{`)
-	taskFieldRe        = regexp.MustCompile(`(?m)^\s*Task:\s`)
+	// taskFieldRe finds a Task field on its own line or inline in the
+	// compact style (Method: "GET", Path: "/x", Task: "...", ...).
+	taskFieldRe = regexp.MustCompile(`\bTask:\s`)
 )
 
 // ensureOperationTaskFields inserts Task: "<name>" into every generated

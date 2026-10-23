@@ -709,6 +709,12 @@ err = resp.JSON(&amp;out)</pre></div>
       <div class="changelog">
         <div class="change-entry">
           <div class="change-date">2026-10-23</div>
+          <h4>Fix: repeated <code>nexler update</code> duplicated <code>Task</code> fields</h4>
+          <p><strong>Fixed</strong>: on an app with compact <code>openapi.Register</code> blocks (<code>Method: "GET", Path: "/x", Task: "…", …</code> on one line), every <code>nexler update</code> after the first added <code>Task</code> again, and the app stopped compiling with <code>duplicate field name Task in struct literal</code>. The check now finds an existing <code>Task</code> anywhere in the block. An app already hit by it needs the second <code>Task: "…",</code> removed from each block once.</p>
+          <div class="change-tags"><span class="change-tag">update</span></div>
+        </div>
+        <div class="change-entry">
+          <div class="change-date">2026-10-23</div>
           <h4>Tasks addressable over HTTP; service callers acting for a user and an org; <code>nexler update -opt-out</code></h4>
           <p><strong>New</strong>: <code>core_tasks</code> records how to call each task: <code>service</code>, <code>method</code>, <code>path</code>, <code>base_path</code> and <code>callable</code>. <code>openapi.Operation</code> gains <code>Task</code> and <code>Callable</code>, generated routes set <code>Task</code>, <code>openapi.Operations()</code> lists the registered operations, and <code>nexler create &lt;route&gt; -callable</code> marks new methods as callable by another service (e.g. a workflow engine). Mongo core only.</p>
           <p><strong>New</strong>: a service-key caller may send <code>X-Acting-Subject</code> (written to the audit entry as <code>acting_subject</code>, read with <code>auth.ActingSubject</code>) and, on a <code>-multitenant</code> app, <code>X-Org-Id</code>. The org is honoured only for a service whose <code>core_services</code> record allows it (<code>acts_for_orgs</code>; <code>core.ServiceActsForOrgs</code>/<code>SetServiceActsForOrgs</code>); otherwise the request gets 403. New file <code>middleware/service_caller.go</code>.</p>
