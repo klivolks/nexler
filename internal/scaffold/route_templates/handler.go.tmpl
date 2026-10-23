@@ -80,6 +80,10 @@ func {{ .RegisterFuncName }}(mux *http.ServeMux) {
 		Summary:     "{{ .Verb }} {{ $.Route }}",
 		Protected:   {{ .Protected }},
 		Tags:        []string{"{{ $.Module }}"},
+		Task:        "{{ .TaskName }}",
+{{- if $.Callable }}
+		Callable:    true,
+{{- end }}
 		ReqType:     {{ $.Alias }}models.{{ .ReqTypeName }}{},
 {{- if .ReqContentType }}
 		ReqContentType: "{{ .ReqContentType }}",

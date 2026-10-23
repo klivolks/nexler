@@ -4,8 +4,10 @@ package core
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
+	"{{ .ModulePath }}/config"
 	"{{ .ModulePath }}/db"
 	"{{ .ModulePath }}/mongo"
 	"{{ .ModulePath }}/openapi"
@@ -18,8 +20,22 @@ type taskDoc struct {
 	PathParams  []string       `bson:"path_params,omitempty"`
 	ReqSchema   map[string]any `bson:"req_schema,omitempty"`
 	RespSchema  map[string]any `bson:"resp_schema,omitempty"`
-	SyncedAt    time.Time      `bson:"synced_at"`
+	// Service, Method, Path and BasePath address the task over HTTP:
+	// BasePath + Path on the gateway route for Service. Method and Path
+	// are empty when no openapi operation could be matched to the task.
+	Service  string `bson:"service"`
+	Method   string `bson:"method,omitempty"`
+	Path     string `bson:"path,omitempty"`
+	BasePath string `bson:"base_path,omitempty"`
+	// Callable is openapi.Operation.Callable: another service (e.g. a
+	// workflow engine) may run this task on a caller's behalf.
+	Callable bool      `bson:"callable"`
+	SyncedAt time.Time `bson:"synced_at"`
 }
+
+// serviceName is this app's name, recorded on every core_tasks entry so a
+// caller knows which service serves a task.
+const serviceName = "{{ .AppName }}"
 
 func taskCollection() (mongo.Collection, bool) {
 	conn, ok := mongo.Conn("core")
@@ -46,12 +62,21 @@ func SyncTasks(ctx context.Context) error {
 		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
 	}
 	now := time.Now().UTC()
-	for _, t := range task.All() {
+	ops := openapi.Operations()
+	tasks := task.All()
+	registered := make(map[string]bool, len(tasks))
+	for _, t := range tasks {
+		registered[t.Name] = true
 		doc := taskDoc{
 			Name:        t.Name,
 			RequireAuth: t.RequireAuth,
 			PathParams:  t.PathParams,
+			Service:     serviceName,
+			BasePath:    config.C.APIBasePath,
 			SyncedAt:    now,
+		}
+		if op, ok := operationFor(t, ops); ok {
+			doc.Method, doc.Path, doc.Callable = op.Method, op.Path, op.Callable
 		}
 		if t.ReqType != nil {
 			doc.ReqSchema = openapi.JSONSchema(t.ReqType)
@@ -63,7 +88,57 @@ func SyncTasks(ctx context.Context) error {
 			return err
 		}
 	}
+	return pruneStaleTasks(ctx, coll, registered)
+}
+
+// pruneStaleTasks deletes this service's core_tasks entries whose task it
+// no longer registers (a renamed or removed route), so tooling reading
+// core_tasks never offers a task that doesn't exist. core_tasks is shared
+// by every service on the same core database, so only entries carrying
+// this service's name are touched; entries with no service (synced before
+// the field existed) are left for a person to remove. An empty registry
+// prunes nothing: it means SyncTasks ran before routes were registered,
+// not that every route is gone.
+func pruneStaleTasks(ctx context.Context, coll mongo.Collection, registered map[string]bool) error {
+	if len(registered) == 0 || serviceName == "" {
+		return nil
+	}
+	docs, err := mongo.Get[taskDoc](ctx, coll, taskDoc{Service: serviceName})
+	if err != nil {
+		return err
+	}
+	for _, d := range docs {
+		if d.Service != serviceName || registered[d.Name] {
+			continue
+		}
+		if err := mongo.Delete(ctx, coll, taskDoc{Name: d.Name, Service: serviceName}); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// operationFor finds the openapi operation serving t: the one whose Task
+// names it, else the only one with the same request and response types
+// (routes registered before Operation.Task existed).
+func operationFor(t task.Task, ops []openapi.Operation) (openapi.Operation, bool) {
+	for _, op := range ops {
+		if op.Task == t.Name {
+			return op, true
+		}
+	}
+	if t.ReqType == nil || t.RespType == nil {
+		return openapi.Operation{}, false
+	}
+	var match openapi.Operation
+	n := 0
+	for _, op := range ops {
+		if op.Task == "" && reflect.TypeOf(op.ReqType) == reflect.TypeOf(t.ReqType) && reflect.TypeOf(op.RespType) == reflect.TypeOf(t.RespType) {
+			match = op
+			n++
+		}
+	}
+	return match, n == 1
 }
 {{- else -}}
 package core

@@ -33,6 +33,8 @@ func RequireServiceAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "invalid API key", http.StatusUnauthorized)
 			return
 		}
-		next(w, r.WithContext(auth.ContextWithService(r.Context(), id)))
+		if ctx, ok := serviceCallerContext(auth.ContextWithService(r.Context(), id), w, r, id); ok {
+			next(w, r.WithContext(ctx))
+		}
 	}
 }

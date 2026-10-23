@@ -1,0 +1,46 @@
+package middleware
+
+import (
+	"context"
+	"net/http"
+
+	"{{ .ModulePath }}/auth"
+{{- if .Multitenant }}
+	"{{ .ModulePath }}/core"
+{{- end }}
+)
+
+// serviceCallerContext adds to ctx what a service caller (X-Api-Secret)
+// says about the call it is making on someone's behalf, e.g. a workflow
+// engine running a task as a step of a run:
+//   - X-Acting-Subject: the user the service is working for, read back with
+//     auth.ActingSubject and written to the audit log. Informational only —
+//     permission checks still run against the service itself.
+{{- if .Multitenant }}
+//   - X-Org-Id: the tenant org the call is for, set with auth.ContextWithOrg.
+//     Honoured only for a service whose core_services record allows it
+//     (core.ServiceActsForOrgs); any other service sending it gets 403.
+{{- end }}
+//
+// ok is false when a response has already been written and the request
+// must stop.
+func serviceCallerContext(ctx context.Context, w http.ResponseWriter, r *http.Request, id string) (context.Context, bool) {
+	if acting := r.Header.Get("X-Acting-Subject"); acting != "" {
+		ctx = auth.ContextWithActingSubject(ctx, acting)
+	}
+{{- if .Multitenant }}
+	if org := r.Header.Get("X-Org-Id"); org != "" {
+		acts, err := core.ServiceActsForOrgs(r.Context(), id)
+		if err != nil {
+			http.Error(w, "checking service: "+err.Error(), http.StatusInternalServerError)
+			return ctx, false
+		}
+		if !acts {
+			http.Error(w, "this service may not act for an org (X-Org-Id)", http.StatusForbidden)
+			return ctx, false
+		}
+		ctx = auth.ContextWithOrg(ctx, org)
+	}
+{{- end }}
+	return ctx, true
+}

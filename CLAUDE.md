@@ -44,7 +44,7 @@ CLI usage (also printed by `nexler help`):
 
 ```
 nexler create app <name> [-dir <output-dir>] [-module <module-path>] [-ui] [-auth none|jwt|session|both] [-remember-me] [-db mongo,mysql,postgres,mssql] [-core <type>]
-nexler create <route> -module <name> [-submodule <name>] [-dir <app-dir>] [-protected] [-methods GET,POST] [-body json] [-response json]
+nexler create <route> -module <name> [-submodule <name>] [-dir <app-dir>] [-protected] [-callable] [-methods GET,POST] [-body json] [-response json]
 nexler create store <name> [-file <name>] [-dir <app-dir>]
 nexler create service <name> [-file <name>] [-dir <app-dir>] [-store <name>]
 nexler db add <name> -type <mongo|mysql|postgres|mssql> [-dir <app-dir>] [-host] [-port] [-dbname] [-user] [-password]
@@ -591,7 +591,12 @@ Wired into `routes/protected/protected.go` at `NewApp` time via `route.go`'s
 `wireAggregator` — the exact same post-hoc-wiring mechanism `kgate`/`kpass` already use,
 called right after `NewApp`'s main `fs.WalkDir` pass (same point `cfg.UI`'s
 `writeAppUIHomepage` call already runs), since `wireAggregator` needs the aggregator file
-to already exist on disk. Retrofits via `ensureAdminRoutes` (`serviceauth.go`, alongside
+to already exist on disk. An app that removed either half on purpose opts out with `nexler update
+-opt-out admin-users|admin-services` (`internal/scaffold/optout.go`): the choice lives in a committed
+`nexler.json` at the app root (`{"optOut": [...]}`, unknown keys preserved), and `ensureAdminRoutes`,
+`ensureServiceAuth` and `MergeServiceAuth` then never recreate `handlers/admin/users` + `core/users.go`
+(`admin-users`) or `handlers/admin/services` (`admin-services`). Opting out deletes nothing;
+`-opt-in` removes the name. Retrofits via `ensureAdminRoutes` (`serviceauth.go`, alongside
 `ensureServiceAuth`) — same eligibility gate, writes either handler file if missing, and
 wires each into `protected.go` **only if not already imported**: `wireAggregator` itself
 *errors* (not a silent no-op) on an already-present import, since for its usual caller
@@ -1847,11 +1852,30 @@ On a core-database app, `core/tasks.go` (`core.SyncTasks`, mirroring `task.All()
 via a new exported `openapi.JSONSchema` — factored out of that package's existing unexported
 `jsonSchema`, so `ReqSchema`/`RespSchema` reuse `/openapi.json`'s own reflection instead of
 re-deriving it) and `core/audit.go` (`core.LogAudit`, writing `core_audit_log`) are also generated;
-`main.go` calls `core.SyncTasks` at startup, best-effort (logged, never fatal), behind a new `//
-nexler:tasks-sync` marker — the first marker `main.go` has ever needed, an exception to its usual
+`main.go` calls `core.SyncTasks` at startup, right **after** `routes.Register(mux)` (routes add
+their tasks to the registry inside `Register`; apps generated before 2026-10-23 called it first and
+synced nothing; `ensureTaskSyncAfterRoutes` moves the call). It is best-effort (logged, never fatal)
+and sits behind a `//
+nexler:tasks-sync` marker. `SyncTasks` also prunes (`pruneStaleTasks`) this service's own entries for
+tasks it no longer registers. It matches on `service`, never touches another service's entries or
+entries without `service`, and does nothing when the registry is empty — the first marker `main.go` has ever needed, an exception to its usual
 "never edited again after scaffold" rule, made explicitly for this one retrofit anchor. `nexler init
 db` provisions `core_tasks`/`core_audit_log` unconditionally for every `-db` app, same
 zero-cost-when-unused precedent as `core_kgate_channels`.
+
+**Calling a task over HTTP.** `core_tasks` also records `service` (app name), `method`, `path`,
+`base_path` (`{APPNAME}_API_BASE_PATH`) and `callable` (Mongo core only; the SQL
+`core_task_upsert` procedure keeps its original columns). `RegisterTask` itself doesn't know a route's
+method/path, so generated `openapi.Register` calls carry `Task: "<action>"` (plus `Callable: true`
+with `nexler create <route> -callable`), and `core.SyncTasks` joins task to operation by that name
+(`operationFor`), falling back to the one operation with identical `ReqType`/`RespType` types.
+A service-key caller may also send `X-Acting-Subject` (audit `acting_subject`, `auth.ActingSubject`)
+and, on a `-multitenant` app, `X-Org-Id`, honoured only when its `core_services` doc has
+`acts_for_orgs` (`core.ServiceActsForOrgs`/`SetServiceActsForOrgs`), else 403. Both are handled
+in `middleware/service_caller.go` (`serviceCallerContext`). Retrofits: `taskmetadata.go`
+(`ensureOpenAPITaskFields`, `ensureCoreTaskMetadata`, `ensureOperationTaskFields`) and
+`servicecaller.go` (`ensureServiceCallerContext`). All of them insert or patch by anchor, never fully
+regenerate, because `openapi.go` is hand-extended in some apps. `VerifyServiceKey` keeps its signature.
 
 `nexler update`'s `ensureTaskRegistry` brings an app scaffolded before any of this existed up to
 date — writes `task/task.go`/`middleware/task.go` unconditionally if missing, `core/tasks.go`/

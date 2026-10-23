@@ -91,7 +91,9 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			if id, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
 				ctx := auth.ContextWithService(r.Context(), id)
 				ctx = auth.ContextWithSubject(ctx, id)
-				next(w, r.WithContext(ctx))
+				if ctx, ok = serviceCallerContext(ctx, w, r, id); ok {
+					next(w, r.WithContext(ctx))
+				}
 				return
 			}
 		}
@@ -224,7 +226,9 @@ func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			if id, ok, err := core.VerifyServiceKey(r.Context(), key); err == nil && ok {
 				ctx := auth.ContextWithService(r.Context(), id)
 				ctx = auth.ContextWithSubject(ctx, id)
-				next(w, r.WithContext(ctx))
+				if ctx, ok = serviceCallerContext(ctx, w, r, id); ok {
+					next(w, r.WithContext(ctx))
+				}
 				return
 			}
 		}

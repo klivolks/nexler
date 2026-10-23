@@ -377,7 +377,7 @@ func NewApp(cfg NewAppConfig) error {
 		// explicitly the same value as the JWT "sub" claim, so neither
 		// makes sense for -auth none|session alone.
 		switch relSlash {
-		case "core/users.go.tmpl", "core/services.go.tmpl":
+		case "core/users.go.tmpl", "core/services.go.tmpl", "middleware/service_caller.go.tmpl":
 			if !hasDB || !needsJWT {
 				return nil
 			}

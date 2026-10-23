@@ -198,6 +198,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:      "GET",
 		Path:        "/admin/services",
+		Task:        "admin.services.list",
 		OperationID: "listServices",
 		Summary:     "List all core_services records (metadata only, never keys)",
 		Protected:   true,
@@ -210,6 +211,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:         "POST",
 		Path:           "/admin/services",
+		Task:           "admin.services.create",
 		OperationID:    "createService",
 		Summary:        "Create a service account — returns its API key exactly once",
 		Protected:      true,
@@ -223,6 +225,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:      "GET",
 		Path:        "/admin/services/{name}",
+		Task:        "admin.services.get",
 		OperationID: "getService",
 		Summary:     "Get one service's metadata by name",
 		Protected:   true,
@@ -235,6 +238,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:      "POST",
 		Path:        "/admin/services/{name}/revoke",
+		Task:        "admin.services.revoke",
 		OperationID: "revokeService",
 		Summary:     "Revoke a service's API key",
 		Protected:   true,

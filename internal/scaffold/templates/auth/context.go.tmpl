@@ -82,4 +82,25 @@ func Service(r *http.Request) (id string, ok bool) {
 	id, ok = r.Context().Value(serviceKey).(string)
 	return id, ok
 }
+
+// actingSubjectKeyType keeps the acting user distinct from the
+// authenticated subject: a service authenticates, the acting subject is
+// only who it says it is working for.
+type actingSubjectKeyType struct{}
+
+var actingSubjectKey = actingSubjectKeyType{}
+
+// ContextWithActingSubject returns a copy of ctx carrying subject as the
+// user a service caller is acting for (its X-Acting-Subject header).
+func ContextWithActingSubject(ctx context.Context, subject string) context.Context {
+	return context.WithValue(ctx, actingSubjectKey, subject)
+}
+
+// ActingSubject returns the user a service caller said it is acting for.
+// It is informational (written to the audit log), never an authenticated
+// identity: permission checks still run against the service itself.
+func ActingSubject(r *http.Request) (subject string, ok bool) {
+	subject, ok = r.Context().Value(actingSubjectKey).(string)
+	return subject, ok && subject != ""
+}
 {{- end }}

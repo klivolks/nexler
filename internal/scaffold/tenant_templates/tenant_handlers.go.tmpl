@@ -111,6 +111,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:      "GET",
 		Path:        "/admin/tenants",
+		Task:        "admin.tenants.list",
 		OperationID: "listTenants",
 		Summary:     "List all tenant_orgs records",
 		Protected:   true,
@@ -123,6 +124,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:      "DELETE",
 		Path:        "/admin/tenants/{id}",
+		Task:        "admin.tenants.delete",
 		OperationID: "deleteTenant",
 		Summary:     "Permanently delete a tenant organization — no undo",
 		Protected:   true,

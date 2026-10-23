@@ -192,6 +192,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:      "GET",
 		Path:        "/admin/users",
+		Task:        "admin.users.list",
 		OperationID: "listUsers",
 		Summary:     "List all core_users records",
 		Protected:   true,
@@ -204,6 +205,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:         "POST",
 		Path:           "/admin/users",
+		Task:           "admin.users.create",
 		OperationID:    "createUser",
 		Summary:        "Create or upsert a user",
 		Protected:      true,
@@ -217,6 +219,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:      "GET",
 		Path:        "/admin/users/{id}",
+		Task:        "admin.users.get",
 		OperationID: "getUser",
 		Summary:     "Get one user by ID",
 		Protected:   true,
@@ -229,6 +232,7 @@ func Register(mux *http.ServeMux) {
 	openapi.Register(openapi.Operation{
 		Method:         "PATCH",
 		Path:           "/admin/users/{id}/status",
+		Task:           "admin.users.setstatus",
 		OperationID:    "setUserStatus",
 		Summary:        "Set a user's status (e.g. active/disabled)",
 		Protected:      true,

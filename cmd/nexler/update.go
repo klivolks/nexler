@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/klivolks/nexler/internal/scaffold"
 )
@@ -17,7 +18,28 @@ func runUpdate(args []string) {
 	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
 	mergeServiceAuth := fs.Bool("merge-service-auth", false, "explicit opt-in: convert an already-scaffolded -auth jwt|both -db app from a separate middleware.RequireServiceAuth to service-key auth folded into RequireAuth (see 'create app -merge-service-auth'); not run automatically, since merged-vs-separate is a per-app design choice, not a one-true-shape fix")
 	multitenant := fs.Bool("multitenant", false, "explicit opt-in: thread a tenant Org through an already-scaffolded -auth jwt|session|both app's auth/context.go, auth/session.go, middleware/auth.go, and core/users.go (see 'create app -multitenant'); not run automatically")
+	optOut := fs.String("opt-out", "", "comma-separated pieces this app doesn't want, recorded in nexler.json so every later update leaves them out instead of adding them back: admin-users (handlers/admin/users + core/users.go), admin-services (handlers/admin/services); never deletes existing files")
+	optIn := fs.String("opt-in", "", "comma-separated names to remove from nexler.json's opt-out list; the pieces come back on this same update")
 	fs.Parse(args)
+
+	for _, change := range []struct {
+		names string
+		out   bool
+	}{{*optOut, true}, {*optIn, false}} {
+		if change.names == "" {
+			continue
+		}
+		if _, err := scaffold.SetOptOut(*dir, splitCSV(change.names), change.out); err != nil {
+			fmt.Fprintf(os.Stderr, "nexler: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if names, err := scaffold.OptedOut(*dir); err != nil {
+		fmt.Fprintf(os.Stderr, "nexler: %v\n", err)
+		os.Exit(1)
+	} else if len(names) > 0 {
+		fmt.Printf("opted out (%s): %s — left out by this update\n", scaffold.AppConfigFile, strings.Join(names, ", "))
+	}
 
 	result, err := scaffold.Update(*dir)
 	if err != nil {

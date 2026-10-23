@@ -91,13 +91,19 @@ func MergeServiceAuth(appDir string) (bool, error) {
 		coreData.CoreServiceGetQuery = serviceGetQuerySQL(coreDBType)
 	}
 
+	// core/users.go only backs the admin users API: an app that opted out
+	// of admin-users doesn't get it back.
+	skipUsers, err := optedOut(appDir, optOutAdminUsers)
+	if err != nil {
+		return changed, err
+	}
 	usersPath := filepath.Join(appDir, "core", "users.go")
-	if _, err := os.Stat(usersPath); os.IsNotExist(err) {
+	if _, err := os.Stat(usersPath); os.IsNotExist(err) && !skipUsers {
 		if err := writeTemplateFile(templatesRoot+"/core/users.go.tmpl", usersPath, coreData); err != nil {
 			return changed, err
 		}
 		changed = true
-	} else if err != nil {
+	} else if err != nil && !os.IsNotExist(err) {
 		return changed, err
 	}
 
@@ -134,7 +140,7 @@ func MergeServiceAuth(appDir string) (bool, error) {
 		if err != nil {
 			return changed, err
 		}
-		if string(actual) != string(expected) {
+		if normalizeServiceCallSites(string(actual)) != string(expected) {
 			return changed, fmt.Errorf("%s doesn't match what nexler would generate — has it been hand-rewritten? Remove or reconcile it by hand before re-running with -merge-service-auth", serviceAuthPath)
 		}
 		if err := os.Remove(serviceAuthPath); err != nil {
@@ -153,7 +159,11 @@ func MergeServiceAuth(appDir string) (bool, error) {
 	authData := struct {
 		AuthKind, ModulePath string
 		MergeServiceAuth     bool
-	}{AuthKind: authKind, ModulePath: modulePath, MergeServiceAuth: true}
+		HasCoreDB            bool
+		CoreDBAccessor       string
+		Multitenant          bool
+	}{AuthKind: authKind, ModulePath: modulePath, MergeServiceAuth: true, HasCoreDB: hasCoreDB, CoreDBAccessor: coreDBAccessorFor(coreDBType),
+		Multitenant: strings.Contains(string(contextRawForCaller(appDir)), "func ContextWithOrg(")}
 	rendered, err := renderTemplateFile(templatesRoot+"/middleware/auth.go.tmpl", authData)
 	if err != nil {
 		return changed, err
@@ -164,8 +174,12 @@ func MergeServiceAuth(appDir string) (bool, error) {
 		}
 		changed = true
 	}
-
-	return changed, nil
+	// The merged RequireAuth calls serviceCallerContext.
+	wrote, err := writeServiceCaller(appDir, modulePath, strings.Contains(string(contextRawForCaller(appDir)), "func ContextWithOrg("), false)
+	if err != nil {
+		return changed, err
+	}
+	return changed || wrote, nil
 }
 
 // renderTemplateFile renders the embedded template at tmplPath with data,

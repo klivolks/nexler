@@ -145,16 +145,19 @@ func Multitenant(appDir string) (bool, error) {
 	// middleware/auth.go already on the multitenant shape is left alone —
 	// see the same reasoning on session.go above.
 	if !strings.Contains(string(authRaw), "ContextWithOrg") {
+		mwCoreDBType, mwHasCoreDB := readCoreDBType(appDir)
 		authData := struct {
 			AuthKind, ModulePath string
 			MergeServiceAuth     bool
 			Multitenant          bool
-		}{AuthKind: authKind, ModulePath: modulePath, MergeServiceAuth: mergeServiceAuth}
+			HasCoreDB            bool
+			CoreDBAccessor       string
+		}{AuthKind: authKind, ModulePath: modulePath, MergeServiceAuth: mergeServiceAuth, HasCoreDB: mwHasCoreDB, CoreDBAccessor: coreDBAccessorFor(mwCoreDBType)}
 		expectedAuth, err := renderTemplateFile(templatesRoot+"/middleware/auth.go.tmpl", authData)
 		if err != nil {
 			return changed, err
 		}
-		if string(expectedAuth) != string(authRaw) {
+		if string(expectedAuth) != normalizeServiceCallSites(string(authRaw)) {
 			return changed, fmt.Errorf("%s doesn't match what nexler would generate — has it been hand-rewritten? Reconcile it by hand before re-running with -multitenant", authGoPath)
 		}
 		authData.Multitenant = true
@@ -166,6 +169,15 @@ func Multitenant(appDir string) (bool, error) {
 			return changed, err
 		}
 		changed = true
+	}
+	// A service caller may now name its org (X-Org-Id): regenerate
+	// middleware/service_caller.go in its multitenant shape.
+	if _, err := os.Stat(filepath.Join(appDir, "core", "services.go")); err == nil {
+		wrote, err := writeServiceCaller(appDir, modulePath, true, true)
+		if err != nil {
+			return changed, err
+		}
+		changed = changed || wrote
 	}
 
 	// 4. core/users.go (only if it already exists — an app without both a

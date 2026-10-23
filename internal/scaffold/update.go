@@ -95,6 +95,11 @@ var updateChecks = []updateCheck{
 	{"auth: admin API for core_users/core_services", ensureAdminRoutes},
 	{"config: API base path (openapi servers)", ensureAPIBasePath},
 	{"task: Task Registry (task/task.go, middleware/task.go, core.SyncTasks)", ensureTaskRegistry},
+	{"openapi: Operation.Task/Callable + Operations()", ensureOpenAPITaskFields},
+	{"task: route metadata (service/method/path/base_path/callable) + stale-entry pruning in core_tasks", ensureCoreTaskMetadata},
+	{"main.go: core.SyncTasks after routes.Register", ensureTaskSyncAfterRoutes},
+	{"handlers: Task field on openapi.Register blocks", ensureOperationTaskFields},
+	{"auth: X-Acting-Subject + X-Org-Id (acts_for_orgs) for service-key callers", ensureServiceCallerContext},
 	{"kpass: wire middleware.PermissionCheck to services/kpass.CheckAccess", ensureKpassPermissionHook},
 }
 
