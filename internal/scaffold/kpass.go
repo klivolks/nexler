@@ -86,10 +86,11 @@ func NewKpass(cfg KpassConfig) error {
 // middleware.PermissionCheck to services/kpass.CheckAccess — only when
 // this app already has the Task Registry (middleware/task.go); a silent
 // no-op otherwise (an app that predates the Task Registry has no
-// PermissionCheck var to set). Errors if the file already exists, same
-// collision guard as kpass/kpass.go and services/kpass/kpass.go above.
+// PermissionCheck var to set, and neither has a hand-built task middleware
+// without one). Errors if the file already exists, same collision guard as
+// kpass/kpass.go and services/kpass/kpass.go above.
 func writeKpassPermissionHook(appDir, modulePath string) error {
-	if _, err := os.Stat(filepath.Join(appDir, "middleware", "task.go")); err != nil {
+	if !taskMiddlewareHasPermissionHook(appDir) {
 		return nil
 	}
 
@@ -126,7 +127,11 @@ func ensureKpassPermissionHook(appDir string) (bool, error) {
 	if _, err := os.Stat(filepath.Join(appDir, "middleware", "permission_kpass.go")); err == nil {
 		return false, nil
 	}
-
+	if !taskMiddlewareHasPermissionHook(appDir) {
+		// A hand-built task middleware (e.g. one ported from ctrl-svc) with
+		// no PermissionCheck var: the hook file would not compile there.
+		return false, nil
+	}
 	modulePath, err := readModulePath(appDir)
 	if err != nil {
 		return false, err
@@ -251,4 +256,11 @@ func envHasKey(env, key string) bool {
 		}
 	}
 	return false
+}
+
+// taskMiddlewareHasPermissionHook reports whether middleware/task.go
+// declares nexler's PermissionCheck hook, which permission_kpass.go sets.
+func taskMiddlewareHasPermissionHook(appDir string) bool {
+	raw, err := os.ReadFile(filepath.Join(appDir, "middleware", "task.go"))
+	return err == nil && strings.Contains(string(raw), "PermissionCheck")
 }

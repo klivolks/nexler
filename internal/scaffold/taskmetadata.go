@@ -203,15 +203,24 @@ func addOperationTaskFields(content string) (string, int) {
 		if taskFieldRe.MatchString(block) {
 			continue
 		}
-		methodRe := regexp.MustCompile(`(?m)^\s*Method:\s*"` + regexp.QuoteMeta(verb) + `",`)
-		pathRe := regexp.MustCompile(`(?m)^\s*Path:\s*"` + regexp.QuoteMeta(route) + `",[^\n]*\n`)
-		pl := pathRe.FindStringIndex(block)
-		if !methodRe.MatchString(block) || pl == nil {
+		methodRe := regexp.MustCompile(`\bMethod:\s*"` + regexp.QuoteMeta(verb) + `",`)
+		if !methodRe.MatchString(block) {
 			continue
 		}
-		insertAt := blockStart + pl[1]
+		// Path on its own line (generated style): add a Task line after it.
+		// Path sharing a line with other fields (hand-written compact style,
+		// e.g. Method: "GET", Path: "/x", OperationID: ...): add Task inline.
+		var insertAt int
+		var field string
+		if pl := regexp.MustCompile(`(?m)^\s*Path:\s*"` + regexp.QuoteMeta(route) + `",[^\n]*\n`).FindStringIndex(block); pl != nil {
+			insertAt, field = blockStart+pl[1], fmt.Sprintf("\t\tTask: %q,\n", name)
+		} else if pl := regexp.MustCompile(`\bPath:\s*"` + regexp.QuoteMeta(route) + `",`).FindStringIndex(block); pl != nil {
+			insertAt, field = blockStart+pl[1], fmt.Sprintf(" Task: %q,", name)
+		} else {
+			continue
+		}
 		b.WriteString(content[pos:insertAt])
-		fmt.Fprintf(&b, "\t\tTask: %q,\n", name)
+		b.WriteString(field)
 		pos = insertAt
 		added++
 	}

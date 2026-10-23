@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -102,8 +101,6 @@ const (
 	auditDetailsNew        = "\t\t\tdetails := map[string]any{\n\t\t\t\t\"correlation_id\": correlationID,\n\t\t\t\t\"session_id\":     r.Header.Get(\"X-Session-Id\"),\n\t\t\t}\n\t\t\tif acting, ok := auth.ActingSubject(r); ok {\n\t\t\t\tdetails[\"acting_subject\"] = acting\n\t\t\t}\n\t\t\t_ = core.LogAudit(r.Context(), subject, actorType, action, pathValues, details)\n"
 )
 
-var serviceDocLastUsedRe = regexp.MustCompile("(?m)^(\\s*LastUsedAt\\s+\\*time\\.Time\\s+`bson:\"last_used_at,omitempty\"`\\n)\\}")
-
 // ensureServiceCallerContext applies the retrofit described in this file's
 // doc comment. A silent no-op for an app without service-key auth (no
 // core/services.go). Each piece is skipped when already present; a call
@@ -146,11 +143,15 @@ func ensureServiceCallerContext(appDir string) (bool, error) {
 	svcChanged := false
 	isMongo := strings.Contains(svc, "type serviceDoc struct")
 	if isMongo && !strings.Contains(svc, "acts_for_orgs") {
-		loc := serviceDocLastUsedRe.FindStringSubmatchIndex(svc)
-		if loc == nil {
-			return changed, fmt.Errorf("%s: serviceDoc doesn't end with its generated LastUsedAt field — add `ActsForOrgs bool \x60bson:\"acts_for_orgs,omitempty\"\x60` to serviceDoc by hand", servicesPath)
+		start := strings.Index(svc, "type serviceDoc struct {")
+		end := -1
+		if start != -1 {
+			end = strings.Index(svc[start:], "\n}\n")
 		}
-		insertAt := loc[3]
+		if end == -1 {
+			return changed, fmt.Errorf("%s: can't find the serviceDoc struct — add `ActsForOrgs bool \x60bson:\"acts_for_orgs,omitempty\"\x60` to serviceDoc by hand", servicesPath)
+		}
+		insertAt := start + end + 1
 		svc = svc[:insertAt] + "\tActsForOrgs bool `bson:\"acts_for_orgs,omitempty\"`\n" + svc[insertAt:]
 		svcChanged = true
 	}
