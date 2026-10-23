@@ -178,6 +178,97 @@ checklist was written:
    completely unaffected; confirmed `nexler update` behaves normally
    against a package with two `Register<X>` functions.
 
+## Unreleased (2026-10-23): tasks callable over HTTP
+
+Driven by the iCorp per-tenant onboarding program
+(`klivolks-v3/icorp/docs/customer-onboarding-workflow-checklist.md` §2): a
+workflow service must find which service serves a task and call it for a
+tenant on a user's behalf.
+
+1. `[x]` **Route metadata in `core_tasks`.** `openapi.Operation` gains
+   `Task` and `Callable`, and `openapi.Operations()` lists what is
+   registered. `register_methods.tmpl`/`handler.go.tmpl` (and the admin and
+   tenant handler templates) emit `Task: "<action>"`, and
+   `nexler create <route> -callable` adds `Callable: true`.
+   `core.SyncTasks` (Mongo core) writes `service`, `method`, `path`,
+   `base_path` and `callable`, matching a task to its operation by `Task`,
+   else by a unique request/response type pair. SQL core unchanged: its
+   `core_task_upsert` signature is fixed.
+2. `[x]` **Service caller acting for a user and an org.** New
+   `middleware/service_caller.go` (`serviceCallerContext`), called from
+   the service-key branch of `RequireAuth` (merged) and
+   `RequireServiceAuth`:
+   - `X-Acting-Subject` → `auth.ActingSubject`, written to the audit entry
+     as `acting_subject`
+   - `X-Org-Id` (multitenant apps) → `auth.ContextWithOrg`, only when
+     `core.ServiceActsForOrgs` is true (`acts_for_orgs` on the
+     `core_services` doc, set with `core.SetServiceActsForOrgs`); 403
+     otherwise. Mongo only.
+
+   `VerifyServiceKey` keeps its signature.
+3. `[x]` **Retrofits** (`taskmetadata.go`, `servicecaller.go`), each an
+   insertion or anchored patch, never a full regeneration of a possibly
+   hand-extended file:
+   - `ensureOpenAPITaskFields`
+   - `ensureCoreTaskMetadata` (regenerates `core/tasks.go` only when its
+     generated anchors are intact)
+   - `ensureOperationTaskFields` (adds `Task` to existing
+     `openapi.Register` blocks)
+   - `ensureServiceCallerContext`
+
+   `MergeServiceAuth`/`Multitenant` normalize the old call sites before
+   comparing, and write or upgrade `service_caller.go`.
+4. `[x]` **Fix:** `nexler update -merge-service-auth` and `-multitenant`
+   failed to render `middleware/auth.go` (template data lacked
+   `HasCoreDB`/`CoreDBAccessor`/`Multitenant`). This was broken at
+   `ee8633a`.
+5. Verified:
+   - fresh `-auth jwt -db mongo` apps (merged + multitenant, `init tenant`,
+     and separate auth) build and vet, and a second `nexler update`
+     changes nothing
+   - against a local Mongo: `core_tasks` rows carry
+     service/method/path/base_path/callable; `X-Org-Id` gives 403 without
+     `acts_for_orgs` and 200 with it; the audit entry has `acting_subject`
+   - a copy of `icorp-crm-svc`: all 21 operations got `Task`; it builds,
+     vets and passes `go test -race`; a second update is a no-op
+   - `-merge-service-auth` and `-multitenant` retrofits build
+6. `[x]` **Opt-out for the admin API.** `ensureAdminRoutes` used to put
+   back `handlers/admin/{users,services}` and `core/users.go` on an app
+   that deleted them on purpose (seen on `icorp-crm-svc`). Now
+   `nexler update -opt-out admin-users,admin-services` records the choice
+   in a committed `nexler.json` (`optout.go`; `-opt-in` reverses it), and
+   `ensureAdminRoutes`, `ensureServiceAuth` and `MergeServiceAuth` honour
+   it. `core/services.go` always stays.
+
+   Verified on a copy of `icorp-crm-svc`:
+   - an unknown name is rejected
+   - after opting out, the update recreates nothing and the app builds,
+     vets and passes its tests
+   - a second run is a no-op
+   - `-opt-in admin-services` brings only that half back, and it builds
+7. `[x]` **Fix: `core.SyncTasks` ran before `routes.Register`.** Routes add
+   their tasks to the registry inside `Register(mux)`, so a real start synced
+   nothing to `core_tasks`. This affected every app generated with the Task
+   Registry, including crm/hr/catalogue/core. `main.go.tmpl` now syncs after
+   `routes.Register`, `ensureTaskRegistry` inserts it there, and
+   `ensureTaskSyncAfterRoutes` moves it in existing apps. Earlier tests here
+   missed it because they called `routes.Register` themselves before
+   `SyncTasks`.
+8. `[x]` **Stale entries pruned.** `SyncTasks` → `pruneStaleTasks`:
+   - deletes only entries with this app's `service` whose task is no longer
+     registered
+   - never runs on an empty registry
+   - leaves entries with no `service` alone
+
+   Verified by starting the real binary of a fresh app against a scratch
+   Mongo:
+   - its tasks were synced
+   - a seeded stale entry for its own service was deleted
+   - another service's entry and an entry with no `service` were kept
+
+   The crm-copy retrofit moved the call; the copy builds, vets and passes
+   its tests, and a second update is a no-op.
+
 ## 0.5.7
 
 1. `[x]` **Task Registry, ported as baseline infrastructure.** Ports

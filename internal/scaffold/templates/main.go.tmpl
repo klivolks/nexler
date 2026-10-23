@@ -22,17 +22,18 @@ func main() {
 	}
 	defer db.Close()
 
+	mux := http.NewServeMux()
+	routes.Register(mux)
+
 	// nexler:tasks-sync (do not remove this marker) — `nexler update`
 	// anchors on this exact call to retrofit an app scaffolded before the
-	// Task Registry existed. Best-effort: a failure here is logged, never
-	// fatal — the server still starts even if core_tasks couldn't be
-	// synced.
+	// Task Registry existed. It must run after routes.Register: routes add
+	// their tasks to the registry there, so an earlier call syncs nothing.
+	// Best-effort: a failure here is logged, never fatal — the server still
+	// starts even if core_tasks couldn't be synced.
 	if err := core.SyncTasks(context.Background()); err != nil {
 		log.Printf("syncing task registry: %v", err)
 	}
-
-	mux := http.NewServeMux()
-	routes.Register(mux)
 
 	srv := &http.Server{Addr: config.C.Addr(), Handler: middleware.Recover(mux)}
 

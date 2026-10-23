@@ -76,6 +76,7 @@ type serviceDoc struct {
 	CreatedAt   time.Time  `bson:"created_at"`
 	UpdatedAt   time.Time  `bson:"updated_at"`
 	LastUsedAt  *time.Time `bson:"last_used_at,omitempty"`
+	ActsForOrgs bool       `bson:"acts_for_orgs,omitempty"`
 }
 
 func serviceCollection() (mongo.Collection, bool) {
@@ -206,6 +207,41 @@ func RevokeService(ctx context.Context, name string) error {
 	doc.UpdatedAt = time.Now().UTC()
 	return mongo.Set(ctx, coll, serviceDoc{Name: name}, doc)
 }
+
+// ServiceActsForOrgs reports whether the service with this core_services ID
+// may name the tenant org it calls for (X-Org-Id) — e.g. a workflow engine
+// running a task for a tenant. False for an unknown or inactive service.
+func ServiceActsForOrgs(ctx context.Context, id string) (bool, error) {
+	coll, ok := serviceCollection()
+	if !ok {
+		return false, fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	objID, err := bson.ObjectIDFromHex(id)
+	if err != nil {
+		return false, nil
+	}
+	doc, err := mongo.GetOne[serviceDoc](ctx, coll, serviceDoc{Base: common.Base{ID: objID}})
+	if err != nil {
+		return false, nil
+	}
+	return doc.Status == "active" && doc.ActsForOrgs, nil
+}
+
+// SetServiceActsForOrgs allows or stops service name naming the tenant org
+// it calls for (see ServiceActsForOrgs).
+func SetServiceActsForOrgs(ctx context.Context, name string, acts bool) error {
+	coll, ok := serviceCollection()
+	if !ok {
+		return fmt.Errorf("core: no \"core\" database connection (has db.Connect() run yet?)")
+	}
+	doc, err := mongo.GetOne[serviceDoc](ctx, coll, serviceDoc{Name: name})
+	if err != nil {
+		return fmt.Errorf("core: service %q not found", name)
+	}
+	doc.ActsForOrgs = acts
+	doc.UpdatedAt = time.Now().UTC()
+	return mongo.Set(ctx, coll, serviceDoc{Name: name}, doc)
+}
 {{- else }}
 
 type serviceRow struct {
@@ -326,5 +362,17 @@ func RevokeService(ctx context.Context, name string) error {
 	}
 	_, err := {{ .CoreDB }}.Call[struct{}](ctx, conn, "core_service_set_status", name, "revoked")
 	return err
+}
+// ServiceActsForOrgs reports whether a service may name the tenant org it
+// calls for (X-Org-Id). Always false on a SQL core: core_services has no
+// column for it yet.
+func ServiceActsForOrgs(ctx context.Context, id string) (bool, error) {
+	return false, nil
+}
+
+// SetServiceActsForOrgs is not supported on a SQL core yet (see
+// ServiceActsForOrgs).
+func SetServiceActsForOrgs(ctx context.Context, name string, acts bool) error {
+	return fmt.Errorf("core: acts-for-orgs is not supported on a SQL core yet")
 }
 {{- end }}

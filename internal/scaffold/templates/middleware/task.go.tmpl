@@ -117,10 +117,16 @@ func auditWrap(action string, pathParams []string, next http.HandlerFunc) http.H
 			pathValues[p] = r.PathValue(p)
 		}
 		defer func() {
-			_ = core.LogAudit(r.Context(), subject, actorType, action, pathValues, map[string]any{
+			details := map[string]any{
 				"correlation_id": correlationID,
 				"session_id":     r.Header.Get("X-Session-Id"),
-			})
+			}
+{{- if or (eq .AuthKind "jwt") (eq .AuthKind "both") }}
+			if acting, ok := auth.ActingSubject(r); ok {
+				details["acting_subject"] = acting
+			}
+{{- end }}
+			_ = core.LogAudit(r.Context(), subject, actorType, action, pathValues, details)
 		}()
 		next(w, r)
 	}

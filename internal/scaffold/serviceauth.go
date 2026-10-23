@@ -93,13 +93,19 @@ func ensureServiceAuth(appDir string) (bool, error) {
 
 	changed := false
 
+	// core/users.go only backs the admin users API: an app that opted out
+	// of admin-users doesn't get it back.
+	skipUsers, err := optedOut(appDir, optOutAdminUsers)
+	if err != nil {
+		return changed, err
+	}
 	usersPath := filepath.Join(appDir, "core", "users.go")
-	if _, err := os.Stat(usersPath); os.IsNotExist(err) {
+	if _, err := os.Stat(usersPath); os.IsNotExist(err) && !skipUsers {
 		if err := writeTemplateFile(templatesRoot+"/core/users.go.tmpl", usersPath, coreData); err != nil {
 			return changed, err
 		}
 		changed = true
-	} else if err != nil {
+	} else if err != nil && !os.IsNotExist(err) {
 		return changed, err
 	}
 
@@ -186,25 +192,39 @@ func ensureAdminRoutes(appDir string) (bool, error) {
 		CoreDBAccessor string
 	}{ModulePath: modulePath, CoreDBAccessor: coreDBAccessor}
 
+	// An app that opted out (nexler.json, `nexler update -opt-out`) never
+	// gets that half back, even after deleting it.
+	skipUsers, err := optedOut(appDir, optOutAdminUsers)
+	if err != nil {
+		return false, err
+	}
+	skipServices, err := optedOut(appDir, optOutAdminServices)
+	if err != nil {
+		return false, err
+	}
+	if skipUsers && skipServices {
+		return false, nil
+	}
+
 	changed := false
 
 	usersPath := filepath.Join(appDir, "handlers", "admin", "users", "users.go")
-	if _, err := os.Stat(usersPath); os.IsNotExist(err) {
+	if _, err := os.Stat(usersPath); os.IsNotExist(err) && !skipUsers {
 		if err := writeTemplateFile(templatesRoot+"/handlers/admin/users/users.go.tmpl", usersPath, data); err != nil {
 			return changed, err
 		}
 		changed = true
-	} else if err != nil {
+	} else if err != nil && !os.IsNotExist(err) {
 		return changed, err
 	}
 
 	servicesPath := filepath.Join(appDir, "handlers", "admin", "services", "services.go")
-	if _, err := os.Stat(servicesPath); os.IsNotExist(err) {
+	if _, err := os.Stat(servicesPath); os.IsNotExist(err) && !skipServices {
 		if err := writeTemplateFile(templatesRoot+"/handlers/admin/services/services.go.tmpl", servicesPath, data); err != nil {
 			return changed, err
 		}
 		changed = true
-	} else if err != nil {
+	} else if err != nil && !os.IsNotExist(err) {
 		return changed, err
 	}
 
@@ -222,7 +242,7 @@ func ensureAdminRoutes(appDir string) (bool, error) {
 	// case where "already wired" is the expected, common outcome, so it's
 	// checked for here instead of treated as an error.
 	usersImport := modulePath + "/handlers/admin/users"
-	if !strings.Contains(protectedContent, `"`+usersImport+`"`) {
+	if !skipUsers && !strings.Contains(protectedContent, `"`+usersImport+`"`) {
 		if err := wireAggregator(appDir, "protected", usersImport, "adminusers"); err != nil {
 			return changed, err
 		}
@@ -235,7 +255,7 @@ func ensureAdminRoutes(appDir string) (bool, error) {
 	}
 
 	servicesImport := modulePath + "/handlers/admin/services"
-	if !strings.Contains(protectedContent, `"`+servicesImport+`"`) {
+	if !skipServices && !strings.Contains(protectedContent, `"`+servicesImport+`"`) {
 		if err := wireAggregator(appDir, "protected", servicesImport, "adminservices"); err != nil {
 			return changed, err
 		}

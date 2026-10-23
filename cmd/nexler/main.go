@@ -294,6 +294,7 @@ func runCreateRoute(route string, args []string) {
 	store := fs.String("store", "", "reuse an existing store package instead of generating one, as module[/submodule], e.g. purchase or purchase/verify; \"none\" skips generating a store for this route entirely (stop at handler+model)")
 	dir := fs.String("dir", ".", "path to the app directory (must contain go.mod); defaults to the current directory")
 	protected := fs.Bool("protected", false, "require auth for this route (registers in routes/protected instead of routes/public); when adding method(s) to an already-existing route package, applies only to the newly-added method(s), independently of the rest of the package")
+	callable := fs.Bool("callable", false, "mark the newly-created-or-added method(s) as callable tasks another service (e.g. a workflow engine) may run on a caller's behalf: their openapi.Register call gets Callable: true, copied into core_tasks by core.SyncTasks; like -protected, applies only to the method(s) this invocation adds")
 	methods := fs.String("methods", "GET", "comma-separated HTTP methods to generate: GET, POST, PUT, PATCH, DELETE (OPTIONS is automatic and always 200 OK)")
 	body := fs.String("body", "json", "request body shape for non-GET methods: json, form, or multipart")
 	response := fs.String("response", "json", "response kind for every method: json (response.JSON, default), html (response.HTML), or raw (response.JSONRaw, no {\"data\": ...} envelope)")
@@ -398,6 +399,7 @@ func runCreateRoute(route string, args []string) {
 		ResponseKind:     responseVal,
 		LayoutKind:       layoutVal,
 		OwnRegister:      *ownRegister,
+		Callable:         *callable,
 	}
 
 	result, err := scaffold.NewRoute(cfg)
@@ -724,7 +726,7 @@ Usage:
       Example: nexler create app test -auth both -db mongo -merge-service-auth
       Example: nexler create app test -auth session -multitenant
 
-  nexler create <route> -module <name> [-submodule <name>] [-protected] [-methods GET,POST] [-body json] [-response json] [-layout shared] [-dir <app-dir>] [-file <name>] [-name <name>] [-own-register]
+  nexler create <route> -module <name> [-submodule <name>] [-protected] [-callable] [-methods GET,POST] [-body json] [-response json] [-layout shared] [-dir <app-dir>] [-file <name>] [-name <name>] [-own-register]
       Scaffold a route inside an existing app: generates a handler,
       service, store, and model file grouped under module[/submodule].
       The route itself may contain "{name}" path parameter segments (Go
@@ -752,7 +754,10 @@ Usage:
       OPTIONS is wired automatically for every route and always returns
       200 OK. Public routes (default) are wired into routes/public/
       public.go; -protected wraps each handler with middleware.RequireAuth
-      and wires into routes/protected/protected.go instead. main.go itself
+      and wires into routes/protected/protected.go instead. -callable
+      marks the new method(s) as tasks another service (a workflow
+      engine) may run: openapi.Register gets Callable: true and
+      core.SyncTasks records it in core_tasks. main.go itself
       is never touched after the initial
       scaffold. Run from inside the app directory, or pass -dir. If the
       route already exists, this instead adds only the newly-requested
@@ -995,7 +1000,7 @@ Usage:
       Example: nexler add bootstrap@5.3.3 -as bootstrap
       Example: nexler add @popperjs/core
 
-  nexler update [-dir <app-dir>] [-merge-service-auth] [-multitenant]
+  nexler update [-dir <app-dir>] [-merge-service-auth] [-multitenant] [-opt-out <name>[,<name>]] [-opt-in <name>[,<name>]]
       Brings an existing generated app's nexler-owned files — ones you generally don't
       hand-edit — up to date with whatever the current nexler binary knows how to generate,
       without needing to coincidentally trigger it via "nexler create <route>" (which already
@@ -1035,7 +1040,19 @@ Usage:
       these files has been hand-edited since it was generated. A no-op if
       the app isn't eligible (needs -auth jwt, session, or both).
 
+      -opt-out records, in nexler.json at the app root (commit it), pieces
+      this app doesn't want, so this and every later "nexler update" leaves
+      them out instead of adding them back. -opt-in removes a name again.
+      Neither deletes or creates anything by itself: delete opted-out files
+      by hand; an opted-in piece comes back on this same update run. Names:
+        admin-users     handlers/admin/users, its routes/protected wiring,
+                        and core/users.go
+        admin-services  handlers/admin/services and its routes/protected
+                        wiring (core/services.go stays: service-key auth
+                        needs it)
+
       Example: nexler update -dir ./myapp
+      Example: nexler update -dir ./myapp -opt-out admin-users,admin-services
       Example: nexler update -dir ./myapp -merge-service-auth
       Example: nexler update -dir ./myapp -multitenant
 

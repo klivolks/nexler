@@ -16,6 +16,7 @@ package scaffold
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -81,11 +82,7 @@ func ensureTaskRegistry(appDir string) (bool, error) {
 		return changed, nil
 	}
 
-	coreData := struct {
-		ModulePath     string
-		CoreDB         string
-		CoreDBAccessor string
-	}{ModulePath: modulePath, CoreDB: coreDBType, CoreDBAccessor: coreDBAccessor}
+	coreData := taskRegistryCoreData(modulePath, coreDBType, coreDBAccessor)
 
 	tasksPath := filepath.Join(appDir, "core", "tasks.go")
 	if _, err := os.Stat(tasksPath); os.IsNotExist(err) {
@@ -114,22 +111,12 @@ func ensureTaskRegistry(appDir string) (bool, error) {
 	}
 	mainContent := string(mainRaw)
 	if !strings.Contains(mainContent, "core.SyncTasks") {
-		const anchor = "\tdefer db.Close()\n"
-		idx := strings.Index(mainContent, anchor)
+		idx := strings.Index(mainContent, routesRegisterLine)
 		if idx == -1 {
-			return changed, fmt.Errorf("%s doesn't contain the expected \"defer db.Close()\" line — has it been hand-rewritten? Reconcile it by hand before re-running nexler update", mainPath)
+			return changed, fmt.Errorf("%s doesn't contain the expected \"routes.Register(mux)\" line — has it been hand-rewritten? Reconcile it by hand before re-running nexler update", mainPath)
 		}
-		insertAt := idx + len(anchor)
-		syncBlock := "\n" +
-			"\t// nexler:tasks-sync (do not remove this marker) — `nexler update`\n" +
-			"\t// anchors on this exact call to retrofit an app scaffolded before the\n" +
-			"\t// Task Registry existed. Best-effort: a failure here is logged, never\n" +
-			"\t// fatal — the server still starts even if core_tasks couldn't be\n" +
-			"\t// synced.\n" +
-			"\tif err := core.SyncTasks(context.Background()); err != nil {\n" +
-			"\t\tlog.Printf(\"syncing task registry: %v\", err)\n" +
-			"\t}\n"
-		mainContent = mainContent[:insertAt] + syncBlock + mainContent[insertAt:]
+		insertAt := idx + len(routesRegisterLine)
+		mainContent = mainContent[:insertAt] + "\n" + taskSyncBlock + mainContent[insertAt:]
 
 		if !strings.Contains(mainContent, `"`+modulePath+`/core"`) {
 			mainContent, err = insertImport(mainContent, "", modulePath+"/core")
@@ -144,4 +131,78 @@ func ensureTaskRegistry(appDir string) (bool, error) {
 	}
 
 	return changed, nil
+}
+
+// coreTaskData is what core/tasks.go.tmpl and core/audit.go.tmpl need when
+// rendered outside NewApp (whose own templateData carries the same fields).
+type coreTaskData struct {
+	ModulePath     string
+	AppName        string
+	CoreDB         string
+	CoreDBAccessor string
+}
+
+// taskRegistryCoreData builds coreTaskData for an existing app. AppName is
+// the module path's last element, the same value NewApp uses for an app
+// created with -module set to its folder name.
+func taskRegistryCoreData(modulePath, coreDBType, coreDBAccessor string) coreTaskData {
+	return coreTaskData{
+		ModulePath:     modulePath,
+		AppName:        path.Base(modulePath),
+		CoreDB:         coreDBType,
+		CoreDBAccessor: coreDBAccessor,
+	}
+}
+
+// routesRegisterLine is main.go's route wiring; the task sync goes right
+// after it, once every route has added its task to the registry.
+const routesRegisterLine = "\troutes.Register(mux)\n"
+
+// taskSyncBlock is main.go's core.SyncTasks call, as main.go.tmpl writes it.
+const taskSyncBlock = "\t// nexler:tasks-sync (do not remove this marker) — `nexler update`\n" +
+	"\t// anchors on this exact call to retrofit an app scaffolded before the\n" +
+	"\t// Task Registry existed. It must run after routes.Register: routes add\n" +
+	"\t// their tasks to the registry there, so an earlier call syncs nothing.\n" +
+	"\t// Best-effort: a failure here is logged, never fatal — the server still\n" +
+	"\t// starts even if core_tasks couldn't be synced.\n" +
+	"\tif err := core.SyncTasks(context.Background()); err != nil {\n" +
+	"\t\tlog.Printf(\"syncing task registry: %v\", err)\n" +
+	"\t}\n"
+
+// ensureTaskSyncAfterRoutes moves main.go's core.SyncTasks call after
+// routes.Register. Apps generated before this fix synced before any route
+// had registered its task, so core_tasks never received their tasks.
+func ensureTaskSyncAfterRoutes(appDir string) (bool, error) {
+	mainPath := filepath.Join(appDir, "main.go")
+	raw, err := os.ReadFile(mainPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	content := string(raw)
+	syncAt := strings.Index(content, "core.SyncTasks(")
+	routesAt := strings.Index(content, routesRegisterLine)
+	if syncAt == -1 || routesAt == -1 || syncAt > routesAt {
+		return false, nil
+	}
+	start := strings.Index(content, "\t// nexler:tasks-sync")
+	if start == -1 || start > syncAt {
+		return false, fmt.Errorf("%s calls core.SyncTasks before routes.Register, without the nexler:tasks-sync comment — move the call below routes.Register(mux) by hand", mainPath)
+	}
+	end := strings.Index(content[syncAt:], "\n\t}\n")
+	if end == -1 {
+		return false, fmt.Errorf("%s: can't find the end of the core.SyncTasks block — move it below routes.Register(mux) by hand", mainPath)
+	}
+	end = syncAt + end + len("\n\t}\n")
+	block := content[start:end]
+	rest := content[:start] + strings.TrimPrefix(content[end:], "\n")
+	idx := strings.Index(rest, routesRegisterLine)
+	if idx == -1 {
+		return false, fmt.Errorf("%s: lost routes.Register(mux) while moving core.SyncTasks — reconcile by hand", mainPath)
+	}
+	insertAt := idx + len(routesRegisterLine)
+	rest = rest[:insertAt] + "\n" + block + rest[insertAt:]
+	return true, os.WriteFile(mainPath, []byte(rest), 0o644)
 }

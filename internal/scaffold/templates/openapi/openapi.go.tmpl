@@ -58,6 +58,15 @@ type Operation struct {
 	// top-level -module, so /openapi.json reads as per-module sections
 	// instead of one flat operation list. Empty means untagged.
 	Tags []string
+	// Task is the middleware.RegisterTask action name this operation
+	// serves (e.g. "icorp.crm.accounts.create"). core.SyncTasks uses it to
+	// record the task's HTTP method and path in core_tasks, so another
+	// service (e.g. a workflow engine) can call the task by name.
+	Task string
+	// Callable marks the task as one another service may run on a
+	// caller's behalf (a workflow step). core.SyncTasks copies it into
+	// core_tasks; nothing at request time reads it.
+	Callable bool
 }
 
 var (
@@ -77,6 +86,13 @@ func Register(op Operation) {
 	mu.Lock()
 	defer mu.Unlock()
 	ops = append(ops, op)
+}
+
+// Operations returns a copy of every Operation registered so far.
+func Operations() []Operation {
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]Operation(nil), ops...)
 }
 
 // Spec builds an OpenAPI 3.0 document from every Operation registered so

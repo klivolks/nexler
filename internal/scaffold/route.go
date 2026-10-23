@@ -197,6 +197,12 @@ type RouteConfig struct {
 	// existing one(s) — see addOwnRegisterResource). False (default)
 	// preserves every existing -file/-name behavior exactly.
 	OwnRegister bool
+	// Callable marks the newly-created-or-added method(s) as tasks another
+	// service may run on a caller's behalf (a workflow step): their
+	// openapi.Register call gets Callable: true, which core.SyncTasks copies
+	// into core_tasks. Like Protected, it only affects the method(s) this
+	// invocation adds.
+	Callable bool
 }
 
 // routeMethod is one HTTP method's worth of generated identifiers,
@@ -208,6 +214,7 @@ type routeMethod struct {
 	ReqTypeName     string // e.g. "GetXRequest" — same single-source-of-truth reasoning as HandlerName, for the Request struct type
 	RespTypeName    string // e.g. "GetXResponse" — same, for the Response struct type
 	RegisterExpr    string // e.g. "HandleXGet" or "middleware.RequireAuth(HandleXGet)"
+	TaskName        string // the middleware.RegisterTask action name RegisterExpr registers — emitted as openapi.Operation.Task so core.SyncTasks can record this task's method and path
 	Protected       bool   // whether this specific method wraps itself with middleware.RequireAuth — same value RegisterExpr was built from
 	BodyDescription string // human-readable, used in model doc comments
 	OperationID     string // e.g. "getPing" — used in the openapi.Register call
@@ -245,6 +252,7 @@ type routeData struct {
 	StorePkgName      string   // e.g. "verify" — the reused store's package name
 	HasStore          bool     // whether this route has a store layer at all — ref'd or generated (false only when the store layer was explicitly skipped)
 	HTMLResponse      bool     // whether every method responds via response.HTML instead of response.JSON
+	Callable          bool     // whether this invocation's method(s) get openapi.Operation.Callable — see RouteConfig.Callable
 	RawResponse       bool     // whether every method responds via response.JSONRaw (no {"data": ...} envelope) instead of response.JSON
 	HasCoreDB         bool     // whether the app has a "core" database connection (see readCoreDBType)
 	CoreDBAccessor    string   // "SQL" or "Mongo" — which db.<Accessor>("core") the store TODO comment points at
@@ -371,8 +379,9 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		if len(pathParamArgs) > 0 {
 			pathParamArgsSuffix = ", " + strings.Join(pathParamArgs, ", ")
 		}
+		taskName := taskActionName(module, name, pkgName, v)
 		registerExpr := fmt.Sprintf("middleware.RegisterTask(%q, %t, %smodels.%s{}, %smodels.%s{}%s)(%s)",
-			taskActionName(module, name, pkgName, v), cfg.Protected, alias, reqTypeName, alias, respTypeName, pathParamArgsSuffix, handlerName)
+			taskName, cfg.Protected, alias, reqTypeName, alias, respTypeName, pathParamArgsSuffix, handlerName)
 		protected := cfg.Protected
 		reqContentType := ""
 		if v != "GET" {
@@ -398,6 +407,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 			ReqTypeName:     reqTypeName,
 			RespTypeName:    respTypeName,
 			RegisterExpr:    registerExpr,
+			TaskName:        taskName,
 			Protected:       protected,
 			BodyDescription: bodyDescription(v, bodyKind),
 			OperationID:     strings.ToLower(v) + name,
@@ -433,6 +443,7 @@ func NewRoute(cfg RouteConfig) (RouteResult, error) {
 		StorePkgName:      storePkgName,
 		HasStore:          hasStoreRef || !skipStore,
 		HTMLResponse:      htmlResponse,
+		Callable:          cfg.Callable,
 		RawResponse:       rawResponse,
 		HasCoreDB:         hasCoreDB,
 		CoreDBAccessor:    coreDBAccessor,
