@@ -14,7 +14,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	neturl "net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -82,15 +85,27 @@ func do(ctx context.Context, method, url string, headers map[string]string, body
 		req.Header.Set(k, v)
 	}
 
+	started := time.Now()
 	resp, err := Client.Do(req)
 	if err != nil {
+		logCall(method, url, 0, time.Since(started), err)
+		report(ctx, method, url, 0, "", err)
 		return nil, fmt.Errorf("apiclient: %s %s: %w", method, url, err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
+	logCall(method, url, resp.StatusCode, time.Since(started), err)
 	if err != nil {
+		report(ctx, method, url, resp.StatusCode, "", err)
 		return nil, fmt.Errorf("apiclient: reading response body: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		// A server that throws answers with a whole HTML error page; keep
+		// only what identifies it, in the error callers build from the body
+		// as well as in the record.
+		data = []byte(CompactBody(data))
+		report(ctx, method, url, resp.StatusCode, string(data), nil)
 	}
 
 	return &Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: data}, nil
@@ -113,4 +128,63 @@ func encodeBody(body any) (io.Reader, string, error) {
 		}
 		return bytes.NewReader(data), "application/json", nil
 	}
+}
+
+// SlowCall is how long a call may take before it is logged. Failed calls
+// are always logged.
+var SlowCall = time.Second
+
+// logCall logs a slow or failed call: method, host and path (never the
+// query string, which can carry ids), status and duration.
+func logCall(method, rawURL string, status int, took time.Duration, err error) {
+	if err == nil && took < SlowCall {
+		return
+	}
+	target := rawURL
+	if u, perr := neturl.Parse(rawURL); perr == nil {
+		target = u.Host + u.Path
+	}
+	if err != nil {
+		log.Printf("apiclient: %s %s failed after %s: %v", method, target, took.Round(time.Millisecond), err)
+		return
+	}
+	log.Printf("apiclient: %s %s -> %d in %s", method, target, status, took.Round(time.Millisecond))
+}
+
+// OnFailure, when set, is told about every call that did not get a usable
+// answer: a transport error (status 0) or any status of 400 and above
+// (400, 401, 403, 404, 405, 409, 5xx and the rest), whatever the caller then
+// decides to do with it. body is the reply, already compacted (see
+// CompactBody); err is set for transport and read errors. It is called
+// synchronously, so it must be quick and must not call this package.
+// icorp-core-svc's core package installs one that writes the error log.
+var OnFailure func(ctx context.Context, method, rawURL string, status int, body string, err error)
+
+func report(ctx context.Context, method, rawURL string, status int, body string, err error) {
+	if f := OnFailure; f != nil {
+		f(ctx, method, rawURL, status, body, err)
+	}
+}
+
+var (
+	htmlTitleRe     = regexp.MustCompile(`(?is)<title>(.*?)</title>`)
+	htmlRequestIDRe = regexp.MustCompile(`(?is)Request ID:</strong>\s*<code>(.*?)</code>`)
+)
+
+// CompactBody returns body unchanged unless it is an HTML page, in which
+// case it returns the page title and, when present, the ASP.NET request id,
+// which is what the other service's own error log can be searched by.
+func CompactBody(body []byte) string {
+	head := strings.ToLower(string(body[:min(len(body), 200)]))
+	if !strings.Contains(head, "<!doctype") && !strings.Contains(head, "<html") {
+		return string(body)
+	}
+	out := "HTML error page"
+	if m := htmlTitleRe.FindSubmatch(body); m != nil {
+		out += ": " + strings.TrimSpace(string(m[1]))
+	}
+	if m := htmlRequestIDRe.FindSubmatch(body); m != nil {
+		out += " (request id " + strings.TrimSpace(string(m[1])) + ")"
+	}
+	return out
 }

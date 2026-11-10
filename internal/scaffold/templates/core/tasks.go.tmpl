@@ -78,6 +78,14 @@ func SyncTasks(ctx context.Context) error {
 		if op, ok := operationFor(t, ops); ok {
 			doc.Method, doc.Path, doc.Callable = op.Method, op.Path, op.Callable
 		}
+		// Callable can be changed in the database (e.g. by an admin). Once
+		// this task has an entry, the stored value wins over the one in
+		// code, so a restart never overwrites it; code only seeds new entries.
+		if existing, err := mongo.Get[taskDoc](ctx, coll, taskDoc{Name: t.Name}); err != nil {
+			return err
+		} else if len(existing) > 0 {
+			doc.Callable = existing[0].Callable
+		}
 		if t.ReqType != nil {
 			doc.ReqSchema = openapi.JSONSchema(t.ReqType)
 		}
