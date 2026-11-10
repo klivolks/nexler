@@ -97,6 +97,7 @@ var updateChecks = []updateCheck{
 	{"task: Task Registry (task/task.go, middleware/task.go, core.SyncTasks)", ensureTaskRegistry},
 	{"openapi: Operation.Task/Callable + Operations()", ensureOpenAPITaskFields},
 	{"task: route metadata (service/method/path/base_path/callable) + stale-entry pruning in core_tasks", ensureCoreTaskMetadata},
+	{"task: keep callable stored in core_tasks when syncing", ensureTaskCallableFromDB},
 	{"main.go: core.SyncTasks after routes.Register", ensureTaskSyncAfterRoutes},
 	{"handlers: Task field on openapi.Register blocks", ensureOperationTaskFields},
 	{"auth: X-Acting-Subject + X-Org-Id (acts_for_orgs) for service-key callers", ensureServiceCallerContext},
