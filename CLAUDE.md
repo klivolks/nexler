@@ -141,7 +141,7 @@ Registered retrofits by area (function → what it adds):
 | Mongo/SQL helpers | `ensureInsertIDHelpers`, `ensureMongoDatabaseName`, `ensureMongoUpdate`, `ensureMongoFilterExpression`, `ensureMongoEmbeddedFilterFix`, `ensureStoreCommon` |
 | kpass | `ensureKpassService`, `ensureKpassPermissionHook` |
 | kgate (in this order) | `ensureKgateResumeAll` → `ensureKgateOpenAPIAndTestSubscribe` → `ensureKgateSharedConnection` → `ensureKgatePublishEncoding` → `ensureKgateResilientDelivery` → `ensureKgateWebhookDispatch` → `ensureKgateServiceExtraction` |
-| Task Registry | `ensureTaskRegistry`, `ensureTaskSyncAfterRoutes`, and `taskmetadata.go`'s `ensureOpenAPITaskFields`, `ensureCoreTaskMetadata`, `ensureOperationTaskFields` |
+| Task Registry | `ensureTaskRegistry`, `ensureTaskSyncAfterRoutes`, and `taskmetadata.go`'s `ensureOpenAPITaskFields`, `ensureCoreTaskMetadata`, `ensureTaskCallableFromDB`, `ensureOperationTaskFields` |
 
 ### Two embedded template trees, two code paths
 
@@ -521,6 +521,7 @@ Calling a task over HTTP:
 - `core_tasks` also records `service` (app name), `method`, `path`, `base_path` (`{APPNAME}_API_BASE_PATH`) and `callable` (Mongo core only; the SQL `core_task_upsert` procedure keeps its original columns).
 - `RegisterTask` doesn't know a route's method/path, so generated `openapi.Register` calls carry `Task: "<action>"` (plus `Callable: true` with `nexler create <route> -callable`). `core.SyncTasks` joins task to operation by that name (`operationFor`), falling back to the one operation with identical `ReqType`/`RespType`.
 - A service-key caller may send `X-Acting-Subject` (audit `acting_subject`, `auth.ActingSubject`) and, on a `-multitenant` app, `X-Org-Id`, honoured only when its `core_services` doc has `acts_for_orgs` (`core.ServiceActsForOrgs`/`SetServiceActsForOrgs`), else 403. Both are handled in `middleware/service_caller.go` (`serviceCallerContext`).
+- **`callable` is seeded, not enforced**: `SyncTasks` looks up the task's existing `core_tasks` entry and keeps its stored `callable`; code only sets it for a task with no entry (so a database change survives restarts). Mongo core only. Retrofit: `ensureTaskCallableFromDB` (`taskmetadata.go`, runs after `ensureCoreTaskMetadata`).
 - These retrofits insert or patch by anchor and never fully regenerate, because `openapi.go` is hand-extended in some apps.
 
 ### Dynamic path parameters (`{name}` segments)

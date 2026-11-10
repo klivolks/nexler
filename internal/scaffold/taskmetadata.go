@@ -241,3 +241,47 @@ func writeGoFile(p, content string) error {
 	}
 	return os.WriteFile(p, []byte(content), 0o644)
 }
+
+const (
+	callableAnchor = "\t\t\tdoc.Method, doc.Path, doc.Callable = op.Method, op.Path, op.Callable\n\t\t}\n"
+	callableKeep   = "\t\t// Callable can be changed in the database (e.g. by an admin). Once\n" +
+		"\t\t// this task has an entry, the stored value wins over the one in\n" +
+		"\t\t// code, so a restart never overwrites it; code only seeds new entries.\n" +
+		"\t\tif existing, err := mongo.Get[taskDoc](ctx, coll, taskDoc{Name: t.Name}); err != nil {\n" +
+		"\t\t\treturn err\n" +
+		"\t\t} else if len(existing) > 0 {\n" +
+		"\t\t\tdoc.Callable = existing[0].Callable\n" +
+		"\t\t}\n"
+)
+
+// ensureTaskCallableFromDB patches core/tasks.go on a Mongo-core app so
+// SyncTasks keeps the callable value already stored in core_tasks instead
+// of overwriting it with the one in code (code only seeds new entries).
+// A narrow, anchor-based insert after the operationFor block: a copy that
+// doesn't match is reported, not overwritten. A no-op for a SQL core, an
+// app with no core/tasks.go, or one that already has the lookup. Must run
+// after ensureCoreTaskMetadata, which regenerates an older copy from the
+// current template (already containing this lookup).
+func ensureTaskCallableFromDB(appDir string) (bool, error) {
+	coreDBType, hasCoreDB := readCoreDBType(appDir)
+	if !hasCoreDB || coreDBType != "mongo" {
+		return false, nil
+	}
+	p := filepath.Join(appDir, "core", "tasks.go")
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	content := string(raw)
+	if strings.Contains(content, "existing[0].Callable") {
+		return false, nil
+	}
+	if strings.Count(content, callableAnchor) != 1 {
+		return false, fmt.Errorf("%s doesn't match the generated SyncTasks shape — has it been hand-edited? After the operationFor block, look up the task's existing core_tasks entry with mongo.Get[taskDoc] and keep its Callable (see nexler's core/tasks.go.tmpl)", p)
+	}
+	content = strings.Replace(content, callableAnchor, callableAnchor+callableKeep, 1)
+	return true, os.WriteFile(p, []byte(content), 0o644)
+}

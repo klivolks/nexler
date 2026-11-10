@@ -708,6 +708,12 @@ err = resp.JSON(&amp;out)</pre></div>
 
       <div class="changelog">
         <div class="change-entry">
+          <div class="change-date">2026-11-10</div>
+          <h4>Fix: a <code>callable</code> value set in the database is no longer overwritten at startup</h4>
+          <p><strong>Fixed</strong>: <code>core.SyncTasks</code> replaced each <code>core_tasks</code> document on every start, so a <code>callable</code> changed in the database was reset to the value in code. Once a task has an entry, the stored <code>callable</code> now wins; code only sets it for a task with no entry yet. This means a later <code>Callable: true</code> in code (e.g. <code>-callable</code>) does not change an existing task, so change it in the database. Mongo core only. <code>nexler update</code> patches an existing app's <code>core/tasks.go</code> (and reports a copy it can't match instead of overwriting it).</p>
+          <div class="change-tags"><span class="change-tag">update</span></div>
+        </div>
+        <div class="change-entry">
           <div class="change-date">2026-10-23</div>
           <h4>Fix: repeated <code>nexler update</code> duplicated <code>Task</code> fields</h4>
           <p><strong>Fixed</strong>: on an app with compact <code>openapi.Register</code> blocks (<code>Method: "GET", Path: "/x", Task: "…", …</code> on one line), every <code>nexler update</code> after the first added <code>Task</code> again, and the app stopped compiling with <code>duplicate field name Task in struct literal</code>. The check now finds an existing <code>Task</code> anywhere in the block. An app already hit by it needs the second <code>Task: "…",</code> removed from each block once.</p>
