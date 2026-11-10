@@ -308,12 +308,17 @@ func jsonSchema(v any) map[string]any {
 	if t.Kind() != reflect.Struct {
 		return map[string]any{"type": jsonType(t.Kind())}
 	}
-	return map[string]any{"type": "object", "properties": structProps(t)}
+	return map[string]any{"type": "object", "properties": structProps(t, nil)}
 }
 
 // structProps walks a struct type's exported fields into an OpenAPI
 // "properties" map, using each field's json tag for the property name.
-func structProps(t reflect.Type) map[string]any {
+//
+// A type that contains itself (a tree node with Children []Node) would recurse
+// forever, so path holds the struct types being expanded and a repeat is shown
+// as a plain object.
+func structProps(t reflect.Type, path []reflect.Type) map[string]any {
+	path = append(path[:len(path):len(path)], t)
 	props := map[string]any{}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
@@ -324,7 +329,7 @@ func structProps(t reflect.Type) map[string]any {
 		if skip {
 			continue
 		}
-		props[name] = fieldSchema(f.Type)
+		props[name] = fieldSchema(f.Type, path)
 	}
 	return props
 }
@@ -334,7 +339,7 @@ func structProps(t reflect.Type) map[string]any {
 // one special case: *multipart.FileHeader (a file upload field) renders
 // as {"type": "string", "format": "binary"} instead of being recursed
 // into like an ordinary struct.
-func fieldSchema(t reflect.Type) map[string]any {
+func fieldSchema(t reflect.Type, path []reflect.Type) map[string]any {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -343,9 +348,14 @@ func fieldSchema(t reflect.Type) map[string]any {
 	}
 	switch t.Kind() {
 	case reflect.Struct:
-		return map[string]any{"type": "object", "properties": structProps(t)}
+		for _, seen := range path {
+			if seen == t {
+				return map[string]any{"type": "object", "description": "same shape as an enclosing " + t.Name()}
+			}
+		}
+		return map[string]any{"type": "object", "properties": structProps(t, path)}
 	case reflect.Slice, reflect.Array:
-		return map[string]any{"type": "array", "items": fieldSchema(t.Elem())}
+		return map[string]any{"type": "array", "items": fieldSchema(t.Elem(), path)}
 	default:
 		return map[string]any{"type": jsonType(t.Kind())}
 	}
@@ -413,7 +423,7 @@ func queryParams(v any, skipNames map[string]bool) []map[string]any {
 		params = append(params, map[string]any{
 			"name":   name,
 			"in":     "query",
-			"schema": fieldSchema(f.Type),
+			"schema": fieldSchema(f.Type, nil),
 		})
 	}
 	return params

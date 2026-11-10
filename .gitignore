@@ -32,3 +32,6 @@
 /cosign.password.txt
 
 /text.txt
+
+# local backups (not for the repo)
+backup/

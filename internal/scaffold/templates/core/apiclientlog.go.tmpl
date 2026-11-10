@@ -1,0 +1,37 @@
+package core
+
+import (
+	"context"
+	"fmt"
+	neturl "net/url"
+
+	"{{ .ModulePath }}/apiclient"
+)
+
+// maxLoggedBody caps how much of another service's reply goes into the error
+// log.
+const maxLoggedBody = 1000
+
+// Every outbound call made through apiclient (KPass, KGate, ctrl-svc,
+// icorp-master, ...) that fails is written to the error log: a transport
+// error, or any status of 400 and above. The message names the method, the
+// host and path (never the query string) and the status; the details carry
+// the reply, which for an HTML error page is already reduced to its title and
+// request id (apiclient.CompactBody). Logging is best-effort and never
+// changes what the caller sees.
+func init() {
+	apiclient.OnFailure = func(ctx context.Context, method, rawURL string, status int, body string, err error) {
+		target, path := rawURL, rawURL
+		if u, perr := neturl.Parse(rawURL); perr == nil {
+			target, path = u.Host+u.Path, u.Path
+		}
+		if err != nil {
+			_ = LogError(ctx, fmt.Sprintf("api: %s %s failed", method, target), err.Error(), path)
+			return
+		}
+		if len(body) > maxLoggedBody {
+			body = body[:maxLoggedBody] + "…"
+		}
+		_ = LogError(ctx, fmt.Sprintf("api: %s %s returned %d", method, target, status), body, path)
+	}
+}

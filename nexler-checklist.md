@@ -178,7 +178,7 @@ checklist was written:
    completely unaffected; confirmed `nexler update` behaves normally
    against a package with two `Register<X>` functions.
 
-## Unreleased (2026-10-23): fixes after 0.5.11-beta
+## 0.5.12-beta (2026-10-23): fixes after 0.5.11-beta
 
 1. `[x]` **`Task` retrofit no longer duplicates inline fields.** Its
    "already has a `Task`" check only matched `Task:` at the start of a line,
